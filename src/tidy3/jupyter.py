@@ -9,12 +9,11 @@ Text", some SolveIt builds, etc.), the input transformer rewrites multi-line
 If the UI has **no** run-selection command, use ``%%tidy3_run``, a separate
 cell for the prefix, or ``%tidy3_run`` for a one-liner.
 
-Large data (CRAFT ``%gpu``)
----------------------------
-With ``%gpu``, cells already execute on the remote machine. Put files on the
-GPU host and use normal tidy3 APIs with remote paths — no special ``remote()``
-wrapper. Load tidy3 under ``%gpu`` (or install it on the remote) so the remote
-kernel can import it.
+Large data (CRAFT)
+------------------
+Load tidy3 like every other addon (``%local`` + ``%run addons/tidy3.py``), then
+``%gpu``. Subsequent cells run on the remote kernel — use paths that exist on
+the GPU host with normal ``scan_parquet`` / pipes. No special remote API.
 """
 
 from __future__ import annotations
@@ -136,7 +135,7 @@ def load_ipython_extension(ipython: Any) -> None:
                     "Partial run (highlight):\n"
                     "  If SolveIt can 'Run Selected Text', select a pipe prefix and run it.\n"
                     "  Else: paste into %%tidy3_run, or put the prefix in its own cell.\n"
-                    "Large data: %gpu then scan_parquet('/path/on/host/...') as usual."
+                    "Large data: load tidy3 under %local, then %gpu + host paths."
                 )
                 return None
             return partial_run(line, namespace=self.shell.user_ns)

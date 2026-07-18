@@ -34,22 +34,23 @@ With the Jupyter extension loaded you can omit the outer parentheses — the **k
 
 ## Jupyter / SolveIt
 
-### Load
+### Load (same as other gpudev addons)
 
-```python
-%load_ext tidy3.jupyter
-# or gpudev:
-#   %local
-#   %run .../CRAFT.py
-#   %gpu
-#   %run .../addons/tidy3.py   # load on the remote kernel under %gpu
+```text
+%local
+%run /path/to/gpudev/CRAFT.py
+%run /path/to/gpudev/addons/tidy3.py
+%gpu
 ```
 
-Under **`%gpu`**, every cell already runs on the remote machine — use normal tidy3
-APIs with **paths on the GPU host**. No special `remote()` wrapper.
+Or without CRAFT: `%load_ext tidy3.jupyter` / `pip install -e .`
+
+Under **`%gpu`**, cells run on the remote kernel. Use normal tidy3 with **paths
+on the GPU host** (no special wrapper). tidy3 must be importable on that
+kernel (clone on the host volume or install in the image).
 
 ```python
-# %gpu is on — this runs on the host box; file must be there
+# after %gpu — file path is on the GPU box
 scan_parquet("/home/gpudev/data/huge.parquet")
 >> filter(col("year") >= 2020)
 >> group_by("region")
