@@ -36,7 +36,7 @@ from tidy3.verbs import (
     ungroup,
 )
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 __all__ = [
     "TidyFrame",

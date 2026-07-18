@@ -208,14 +208,9 @@ class TidyFrame:
         groups = f" groups={self._groups}" if self._groups else ""
         return df_to_html(pdf, caption=f"TidyFrame (preview{groups})")
 
-    def _repr_mimebundle_(self, include=None, exclude=None):
-        """Let Jupyter pick text/html or text/plain like Polars does."""
-        plain = repr(self)
-        try:
-            html = self._repr_html_()
-        except Exception:
-            html = f"<pre>{plain}</pre>"
-        return {"text/plain": plain, "text/html": html}
+    # NOTE: no _repr_mimebundle_ — SolveIt renders text/plain when a
+    # mimebundle is present; separate __repr__/_repr_html_ (like polars
+    # itself) makes it pick the HTML table.
 
     def __len__(self) -> int:
         return int(self._lf.select(pl.len()).collect().item())

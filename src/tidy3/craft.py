@@ -16,6 +16,7 @@ import base64
 import hashlib
 import io
 import tarfile
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -43,11 +44,14 @@ def build_payload() -> tuple[str, str]:
     stamp = f"{__version__}-{h.hexdigest()[:16]}"
 
     buf = io.BytesIO()
+    now = int(time.time())
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for name, data in files:
             ti = tarfile.TarInfo(name)
             ti.size = len(data)
-            ti.mtime = 0
+            # fresh mtime, NOT 0: a same-size edit (e.g. version bump) with a
+            # constant mtime would validate stale remote __pycache__ bytecode
+            ti.mtime = now
             tar.addfile(ti, io.BytesIO(data))
     return base64.b64encode(buf.getvalue()).decode("ascii"), stamp
 
@@ -65,7 +69,9 @@ try:
 except Exception:
     _fresh = False
 if not _fresh:
+    import shutil as _shutil
     _root.mkdir(parents=True, exist_ok=True)
+    _shutil.rmtree(_root / "tidy3", ignore_errors=True)
     _buf = _io.BytesIO(_b64.b64decode("%(payload)s"))
     with _tarfile.open(fileobj=_buf, mode="r:gz") as _tar:
         try:

@@ -25,11 +25,14 @@ def test_html_uses_polars_table():
     assert "i64" in html or "f64" in html or "<pre" in html
 
 
-def test_mimebundle_has_plain_and_html():
+def test_no_mimebundle_but_plain_and_html_reprs():
+    # SolveIt shows text/plain when _repr_mimebundle_ exists; polars-style
+    # separate __repr__ + _repr_html_ makes it render the HTML table.
     df = pl.DataFrame({"x": [1]})
-    bundle = tidy(df)._repr_mimebundle_()
-    assert "text/plain" in bundle
-    assert "text/html" in bundle
+    tf = tidy(df)
+    assert not hasattr(tf, "_repr_mimebundle_")
+    assert "TidyFrame" in repr(tf)
+    assert "<table" in tf._repr_html_()
 
 
 def test_html_is_self_contained_inline_styles():
