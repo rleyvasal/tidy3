@@ -1,20 +1,27 @@
-"""IPython/Jupyter/SolveIt integration — kernel-side, no VS Code required.
+"""IPython/Jupyter/SolveIt integration — kernel-side.
 
-When loaded (``%load_ext tidy3.jupyter`` or the gpudev addon):
+Highlight + run
+---------------
+If the frontend sends *selected text* to the kernel (JupyterLab "Run Selected
+Text", some SolveIt builds, etc.), the input transformer rewrites multi-line
+``>>`` prefixes so they parse. That is true partial-run of a highlight.
 
-1. **Input transformer** — multi-line ``>>`` pipes and partial prefixes become
-   valid Python before the kernel parses them. Works for whole cells **and**
-   for frontends that send *selected text* to the kernel (SolveIt, Jupyter
-   "Run Selected Text", etc.).
-2. **Magics** — ``%tidy3_run`` / ``%%tidy3_run`` for explicit partial runs.
-3. **API inject** — optional helper to push tidy3 names into ``user_ns``.
+If the UI has **no** run-selection command, use one of:
+
+* ``%%tidy3_run`` with the highlighted lines pasted into the cell body
+* put the prefix in its own cell and run the cell
+* ``%tidy3_run`` for a one-liner
+
+Remote large data (CRAFT)
+-------------------------
+``%%tidy3_remote`` / ``remote(...)`` run the pipe on the GPU host via
+``remote_run_``; only a small Polars preview returns to SolveIt.
 """
 
 from __future__ import annotations
 
 from typing import Any, Callable
 
-# Transformer callable registered on the shell (for unload)
 _TRANSFORMER: Callable[[list[str]], list[str]] | None = None
 
 
@@ -25,7 +32,6 @@ def _lines_to_text(lines: list[str]) -> str:
 def _text_to_lines(text: str) -> list[str]:
     if not text:
         return []
-    # IPython expects lines with trailing newlines (except possibly last)
     if text.endswith("\n"):
         parts = text.splitlines(keepends=True)
     else:
@@ -36,7 +42,7 @@ def _text_to_lines(text: str) -> list[str]:
 
 
 def tidy3_input_transformer(lines: list[str]) -> list[str]:
-    """IPython cleanup transformer: rewrite multi-line tidy3 ``>>`` pipes."""
+    """Rewrite multi-line tidy3 ``>>`` pipes (cells *and* run-selection)."""
     if not lines:
         return lines
     from tidy3.partial_run import maybe_rewrite_cell
@@ -49,7 +55,6 @@ def tidy3_input_transformer(lines: list[str]) -> list[str]:
 
 
 def enable_pipe_transform(ipython: Any | None = None) -> bool:
-    """Register the pipe input transformer on the active IPython shell."""
     global _TRANSFORMER
     if ipython is None:
         try:
@@ -61,20 +66,20 @@ def enable_pipe_transform(ipython: Any | None = None) -> bool:
     if ipython is None:
         return False
 
-    # Avoid double-registration
     transformers = getattr(ipython, "input_transformers_cleanup", None)
     if transformers is None:
         return False
-    if tidy3_input_transformer in transformers:
-        _TRANSFORMER = tidy3_input_transformer
-        return True
-    transformers.append(tidy3_input_transformer)
+    if tidy3_input_transformer not in transformers:
+        transformers.append(tidy3_input_transformer)
+    # Also post — some frontends feed selection after cleanup
+    post = getattr(ipython, "input_transformers_post", None)
+    if isinstance(post, list) and tidy3_input_transformer not in post:
+        post.append(tidy3_input_transformer)
     _TRANSFORMER = tidy3_input_transformer
     return True
 
 
 def disable_pipe_transform(ipython: Any | None = None) -> None:
-    """Remove the pipe input transformer."""
     global _TRANSFORMER
     if ipython is None:
         try:
@@ -85,14 +90,14 @@ def disable_pipe_transform(ipython: Any | None = None) -> None:
             ipython = None
     if ipython is None:
         return
-    transformers = getattr(ipython, "input_transformers_cleanup", None)
-    if transformers and tidy3_input_transformer in transformers:
-        transformers.remove(tidy3_input_transformer)
+    for attr in ("input_transformers_cleanup", "input_transformers_post"):
+        transformers = getattr(ipython, attr, None)
+        if transformers and tidy3_input_transformer in transformers:
+            transformers.remove(tidy3_input_transformer)
     _TRANSFORMER = None
 
 
 def inject_api(ipython: Any | None = None) -> None:
-    """Put tidy3 public names into ``user_ns`` (for bare ``filter`` / ``col``)."""
     if ipython is None:
         try:
             from IPython import get_ipython
@@ -112,10 +117,44 @@ def inject_api(ipython: Any | None = None) -> None:
         except AttributeError:
             pass
     ipython.user_ns.setdefault("tidy3", t3)
+    # Remote helpers
+    try:
+        from tidy3.remote import remote, remote_bind, remote_collect, remote_status
+
+        ipython.user_ns.setdefault("remote", remote)
+        ipython.user_ns.setdefault("remote_bind", remote_bind)
+        ipython.user_ns.setdefault("remote_collect", remote_collect)
+        ipython.user_ns.setdefault("remote_status", remote_status)
+    except Exception:
+        pass
+
+
+def _register_local_if_craft(names: list[str]) -> None:
+    """Keep tidy3 magics on the host under %gpu (they call remote_run_)."""
+    try:
+        from IPython import get_ipython
+
+        ip = get_ipython()
+        if ip is None:
+            return
+        ns = ip.user_ns or {}
+        reg = ns.get("register_local_magic")
+        if not callable(reg):
+            # try gpudev_craft
+            try:
+                from gpudev_craft.core import register_local_magic as reg
+            except Exception:
+                return
+        for name in names:
+            try:
+                reg(name if name.startswith("%") else f"%{name}")
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def load_ipython_extension(ipython: Any) -> None:
-    """Register magics + pipe transformer (any Jupyter, including SolveIt)."""
     from IPython.core.magic import Magics, cell_magic, line_magic, magics_class
 
     from tidy3.partial_run import partial_run
@@ -127,37 +166,66 @@ def load_ipython_extension(ipython: Any) -> None:
     class Tidy3Magics(Magics):
         @line_magic("tidy3_run")
         def tidy3_run_line(self, line: str = ""):
-            """Run a one-line pipe: ``%tidy3_run tidy(df) >> filter(...)``."""
+            """Run a one-line pipe prefix (local)."""
             line = (line or "").strip()
             if not line:
                 print(
-                    "Usage: %tidy3_run tidy(df) >> filter(col('x') > 0)\n"
-                    "Or put a multi-line prefix in a cell — the pipe transformer\n"
-                    "rewrites it automatically (no VS Code extension needed)."
+                    "Partial run (highlight):\n"
+                    "  If SolveIt/Jupyter can 'Run Selected Text', select a pipe\n"
+                    "  prefix and run it — the kernel rewrites multi-line >>.\n"
+                    "  Else: paste the highlight into %%tidy3_run  or use its own cell.\n"
+                    "Remote large data:  %%tidy3_remote   or  remote(\"\"\"...\"\"\")"
                 )
                 return None
             return partial_run(line, namespace=self.shell.user_ns)
 
         @cell_magic("tidy3_run")
         def tidy3_run_cell(self, line: str = "", cell: str = ""):
-            """Run a multi-line pipe prefix (explicit partial run).
-
-            Example::
-
-                %%tidy3_run
-                tidy(cars)
-                >> filter(col("mpg") > 20)
-            """
+            """Run highlighted/pasted pipe prefix locally; show Polars-style preview."""
             source = cell if cell.strip() else line
             return partial_run(source, namespace=self.shell.user_ns)
 
+        @cell_magic("tidy3_remote")
+        def tidy3_remote_cell(self, line: str = "", cell: str = ""):
+            """Run pipe on CRAFT remote; return small Polars preview only.
+
+            Paths in the pipe must exist **on the GPU host**. Example::
+
+                %%tidy3_remote
+                scan_parquet("/home/gpudev/data/big.parquet")
+                >> filter(col("x") > 0)
+                >> group_by("g")
+                >> summarise(n=n())
+            """
+            from tidy3.remote import remote
+
+            source = cell if cell.strip() else line
+            # Optional: %%tidy3_remote n=20
+            n = None
+            bind = None
+            for part in (line or "").split():
+                if part.startswith("n="):
+                    n = int(part.split("=", 1)[1])
+                elif part.startswith("bind="):
+                    bind = part.split("=", 1)[1]
+            return remote(source, n=n, bind=bind)
+
+        @line_magic("tidy3_remote")
+        def tidy3_remote_line(self, line: str = ""):
+            from tidy3.remote import remote
+
+            line = (line or "").strip()
+            if not line:
+                print("Usage: %tidy3_remote scan_parquet('/data/x.parquet') >> filter(...)")
+                return None
+            return remote(line)
+
         @line_magic("tidy3_pipes")
         def tidy3_pipes(self, line: str = ""):
-            """Enable/disable auto rewrite: ``%tidy3_pipes on|off|status``."""
             arg = (line or "status").strip().lower()
             if arg in ("on", "1", "true", "enable"):
                 enable_pipe_transform(self.shell)
-                print("tidy3: pipe input transformer ON (multi-line >> auto-wrapped)")
+                print("tidy3: pipe input transformer ON")
             elif arg in ("off", "0", "false", "disable"):
                 disable_pipe_transform(self.shell)
                 print("tidy3: pipe input transformer OFF")
@@ -168,6 +236,9 @@ def load_ipython_extension(ipython: Any) -> None:
                 print(f"tidy3: pipe input transformer {'ON' if on else 'OFF'}")
 
     ipython.register_magics(Tidy3Magics)
+    _register_local_if_craft(
+        ["%tidy3_run", "%tidy3_remote", "%tidy3_pipes", "%%tidy3_run", "%%tidy3_remote"]
+    )
 
 
 def unload_ipython_extension(ipython: Any) -> None:

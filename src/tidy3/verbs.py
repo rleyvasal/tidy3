@@ -237,3 +237,21 @@ def collect(as_: str = "polars") -> Verb:
         return tf.collect(as_=as_)
 
     return Verb(_apply, "collect")
+
+
+def peek(n: int | None = None) -> Verb:
+    """Print a Polars-style preview mid-pipe and pass the frame through.
+
+    Useful while exploring a long pipe in one cell::
+
+        tidy(df) >> filter(...) >> peek() >> mutate(...)
+    """
+
+    def _apply(tf):
+        from tidy3.options import get_options
+
+        rows = get_options().preview_rows if n is None else n
+        print(tf.preview(rows))
+        return tf
+
+    return Verb(_apply, "peek")

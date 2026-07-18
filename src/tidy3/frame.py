@@ -182,7 +182,7 @@ class TidyFrame:
             ) from e
         return ggplot(self.to_pandas(), mapping, **kwargs)
 
-    # ── display ─────────────────────────────────────────────────────────
+    # ── display (match Polars table formatting) ─────────────────────────
     def _preview_df(self) -> pl.DataFrame:
         opts = get_options()
         n = opts.preview_rows if opts.preview else 10
@@ -194,24 +194,41 @@ class TidyFrame:
         except Exception as e:  # pragma: no cover
             return f"<TidyFrame groups={self._groups!r} (preview failed: {e})>"
         groups = f" groups={self._groups}" if self._groups else ""
-        body = repr(pdf)
-        return f"TidyFrame (preview){groups}\n{body}"
+        # Same text table style as a bare polars DataFrame
+        return f"TidyFrame (preview){groups}\n{pdf!r}"
 
     def _repr_html_(self) -> str:
+        """Prefer Polars' own HTML table (not pandas)."""
         try:
             pdf = self._preview_df()
         except Exception as e:  # pragma: no cover
             return f"<pre>TidyFrame preview failed: {e}</pre>"
         groups = f" groups={self._groups}" if self._groups else ""
         header = (
-            f"<div style='font:12px system-ui;margin-bottom:4px'>"
-            f"<b>TidyFrame</b> (preview{groups})</div>"
+            f"<div style='font:12px ui-monospace,SFMono-Regular,Menlo,monospace;"
+            f"margin:0 0 4px 0;opacity:.85'>"
+            f"TidyFrame (preview{groups})</div>"
         )
-        # Prefer pandas HTML if available for nicer tables
+        # Polars DataFrame HTML (shape + styled table) — same as printing `cars`
+        h = getattr(pdf, "_repr_html_", None)
+        if callable(h):
+            try:
+                body = h()
+                if body:
+                    return header + body
+            except Exception:
+                pass
+        # Fallback: monospaced polars text table (matches notebook plain output)
+        return header + f"<pre style='font:12px ui-monospace,Menlo,monospace'>{pdf!r}</pre>"
+
+    def _repr_mimebundle_(self, include=None, exclude=None):
+        """Let Jupyter pick text/html or text/plain like Polars does."""
+        plain = repr(self)
         try:
-            return header + pdf.to_pandas().to_html(index=False)
+            html = self._repr_html_()
         except Exception:
-            return header + f"<pre>{pdf!r}</pre>"
+            html = f"<pre>{plain}</pre>"
+        return {"text/plain": plain, "text/html": html}
 
     def __len__(self) -> int:
         return int(self._lf.select(pl.len()).collect().item())

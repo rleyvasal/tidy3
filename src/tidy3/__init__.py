@@ -12,6 +12,7 @@ from tidy3.partial_run import (
     normalize_pipe_source,
     partial_run,
 )
+from tidy3.remote import remote, remote_bind, remote_collect, remote_status
 from tidy3.verbs import (
     arrange,
     collect,
@@ -24,6 +25,7 @@ from tidy3.verbs import (
     inner_join,
     left_join,
     mutate,
+    peek,
     rename,
     sample_frac,
     sample_n,
@@ -35,7 +37,7 @@ from tidy3.verbs import (
     ungroup,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "TidyFrame",
@@ -53,17 +55,22 @@ __all__ = [
     "inner_join",
     "last",
     "left_join",
+    "looks_like_tidy_pipe",
     "max",
     "mean",
     "median",
     "min",
+    "maybe_rewrite_cell",
     "mutate",
     "n",
-    "looks_like_tidy_pipe",
-    "maybe_rewrite_cell",
     "normalize_pipe_source",
     "options",
     "partial_run",
+    "peek",
+    "remote",
+    "remote_bind",
+    "remote_collect",
+    "remote_status",
     "rename",
     "sample_frac",
     "sample_n",
