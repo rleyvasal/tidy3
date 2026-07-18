@@ -32,47 +32,35 @@ out = (
 
 With the Jupyter extension loaded you can omit the outer parentheses — the **kernel** rewrites multi-line `>>` pipes before parse.
 
-## Jupyter / SolveIt (kernel-side partial run)
+## Jupyter / SolveIt
 
-Works in **any** IPython kernel. Nothing editor-specific.
-
-### Load once
+### Load
 
 ```python
 %load_ext tidy3.jupyter
-# or gpudev: %run .../addons/tidy3.py  (loads the extension automatically)
+# or gpudev:
+#   %local
+#   %run .../CRAFT.py
+#   %gpu
+#   %run .../addons/tidy3.py   # load on the remote kernel under %gpu
 ```
 
-This enables:
-
-1. **Input transformer** — multi-line `>>` pipes (and partial prefixes) are auto-wrapped so they parse and display.
-2. **Magics** — `%tidy3_run` / `%%tidy3_run` for explicit partial runs.
-3. **Name inject** — `tidy`, `filter`, `col`, … available in the namespace.
-
-### Partial run like RStudio
-
-Write a full pipeline in a cell (optional outer `()`):
+Under **`%gpu`**, every cell already runs on the remote machine — use normal tidy3
+APIs with **paths on the GPU host**. No special `remote()` wrapper.
 
 ```python
-tidy(cars)
->> filter(col("mpg") > 20)
->> mutate(km=col("mpg") * 1.609)
->> group_by("cyl")
->> summarise(n=n(), avg=mean("mpg"))
+# %gpu is on — this runs on the host box; file must be there
+scan_parquet("/home/gpudev/data/huge.parquet")
+>> filter(col("year") >= 2020)
+>> group_by("region")
+>> summarise(n=n(), avg=mean("value"))
 ```
 
-To inspect an intermediate:
+### Partial run
 
-**Option A — run only the prefix as its own cell** (simplest, works everywhere):
-
-```python
-tidy(cars)
->> filter(col("mpg") > 20)
-```
-
-Run the cell → filtered preview (transformer rewrites; `TidyFrame` shows head only).
-
-**Option B — explicit magic** (same text, always via `partial_run`):
+- **Run Selected Text** (if SolveIt has it): highlight a pipe prefix → run selection  
+- Own cell with only the prefix  
+- `%%tidy3_run` with the prefix pasted in  
 
 ```python
 %%tidy3_run
@@ -80,29 +68,8 @@ tidy(cars)
 >> filter(col("mpg") > 20)
 ```
 
-**Option C — line-by-line with `_`:**
-
-```python
-tidy(cars) >> filter(col("mpg") > 20)   # filtered preview
-_ >> mutate(km=col("mpg") * 1.609)      # next step
-```
-
-**Option D — if the frontend can “run selected text” into the kernel**  
-(SolveIt / some Jupyter UIs): select the prefix and run selection. The same input transformer rewrites the selection before exec — **no VS Code extension**.
-
 ```text
-%tidy3_pipes on|off|status   # toggle auto-rewrite
-```
-
-### Large files
-
-```python
-from tidy3 import scan_parquet, filter, col, group_by, summarise, mean
-
-scan_parquet("data/*.parquet")
->> filter(col("year") >= 2020)
->> group_by("region")
->> summarise(avg=mean("value"))
+%tidy3_pipes on|off|status
 ```
 
 ## plot3

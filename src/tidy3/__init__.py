@@ -12,7 +12,6 @@ from tidy3.partial_run import (
     normalize_pipe_source,
     partial_run,
 )
-from tidy3.remote import remote, remote_bind, remote_collect, remote_status
 from tidy3.verbs import (
     arrange,
     collect,
@@ -37,7 +36,7 @@ from tidy3.verbs import (
     ungroup,
 )
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "TidyFrame",
@@ -67,10 +66,6 @@ __all__ = [
     "options",
     "partial_run",
     "peek",
-    "remote",
-    "remote_bind",
-    "remote_collect",
-    "remote_status",
     "rename",
     "sample_frac",
     "sample_n",
