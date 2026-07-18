@@ -106,8 +106,12 @@ from IPython import get_ipython as _gi
 _ip = _gi()
 if _ip is not None:
     _em = _ip.extension_manager
-    if "tidy3.jupyter" in getattr(_em, "loaded", set()) and not _fresh:
-        _em.reload_extension("tidy3.jupyter")
+    _loaded = getattr(_em, "loaded", set())
+    if "tidy3.jupyter" in _loaded and "tidy3.jupyter" not in _sys.modules:
+        _loaded.discard("tidy3.jupyter")
+    if "tidy3.jupyter" in _loaded:
+        if not _fresh:
+            _em.reload_extension("tidy3.jupyter")
     else:
         _em.load_extension("tidy3.jupyter")
     if %(style)s:
