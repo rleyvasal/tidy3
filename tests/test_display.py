@@ -30,3 +30,26 @@ def test_mimebundle_has_plain_and_html():
     bundle = tidy(df)._repr_mimebundle_()
     assert "text/plain" in bundle
     assert "text/html" in bundle
+
+
+def test_html_is_self_contained_inline_styles():
+    # CRAFT republishes remote output where <style> blocks / CSS classes are
+    # lost — the table must carry all styling inline and escape content.
+    df = pl.DataFrame({"a": [1, 2], "b": ["<x>", "y"]})
+    html = tidy(df)._repr_html_()
+    assert "<style" not in html
+    assert "class=" not in html
+    assert "style='" in html
+    assert "&lt;x&gt;" in html
+    assert "shape: (2, 2)" in html
+
+
+def test_df_to_html_truncates_rows_and_cols():
+    from tidy3.display import df_to_html
+
+    df = pl.DataFrame({f"c{i}": list(range(40)) for i in range(30)})
+    html = df_to_html(df, max_rows=5, max_cols=10)
+    assert "shape: (40, 30)" in html
+    assert "…" in html
+    # only 5 body rows + ellipsis row rendered
+    assert html.count("<tr>") <= 2 + 5 + 1

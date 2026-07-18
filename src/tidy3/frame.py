@@ -198,28 +198,15 @@ class TidyFrame:
         return f"TidyFrame (preview){groups}\n{pdf!r}"
 
     def _repr_html_(self) -> str:
-        """Prefer Polars' own HTML table (not pandas)."""
+        """Inline-styled table — survives CRAFT's remote republish (no <style>)."""
         try:
             pdf = self._preview_df()
         except Exception as e:  # pragma: no cover
             return f"<pre>TidyFrame preview failed: {e}</pre>"
+        from tidy3.display import df_to_html
+
         groups = f" groups={self._groups}" if self._groups else ""
-        header = (
-            f"<div style='font:12px ui-monospace,SFMono-Regular,Menlo,monospace;"
-            f"margin:0 0 4px 0;opacity:.85'>"
-            f"TidyFrame (preview{groups})</div>"
-        )
-        # Polars DataFrame HTML (shape + styled table) — same as printing `cars`
-        h = getattr(pdf, "_repr_html_", None)
-        if callable(h):
-            try:
-                body = h()
-                if body:
-                    return header + body
-            except Exception:
-                pass
-        # Fallback: monospaced polars text table (matches notebook plain output)
-        return header + f"<pre style='font:12px ui-monospace,Menlo,monospace'>{pdf!r}</pre>"
+        return df_to_html(pdf, caption=f"TidyFrame (preview{groups})")
 
     def _repr_mimebundle_(self, include=None, exclude=None):
         """Let Jupyter pick text/html or text/plain like Polars does."""

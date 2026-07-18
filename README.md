@@ -45,9 +45,15 @@ With the Jupyter extension loaded you can omit the outer parentheses — the **k
 
 Or without CRAFT: `%load_ext tidy3.jupyter` / `pip install -e .`
 
-Under **`%gpu`**, cells run on the remote kernel. Use normal tidy3 with **paths
-on the GPU host** (no special wrapper). tidy3 must be importable on that
-kernel (clone on the host volume or install in the image).
+Under **`%gpu`**, cells run on the remote kernel — a separate namespace and
+filesystem. The addon handles this automatically: on the first `%gpu` cell it
+**pushes the local tidy3 source to the remote kernel** (`tidy3.craft`, ~10 KB
+over the existing channel), installs polars there if missing, and loads the
+Jupyter extension remotely (API names, `>>` rewriting, `%%tidy3_run`). It
+re-seeds by itself after `%restart_kernel` and after local source edits
+(content stamp). If something goes sideways: `seed_tidy3_remote(force=True)`.
+
+Then just use normal tidy3 with **paths on the GPU host**:
 
 ```python
 # after %gpu — file path is on the GPU box
@@ -108,6 +114,21 @@ ln -s ../../tidy3 /path/to/gpudev/addons/tidy3   # if needed
 | Jupyter | `%load_ext tidy3.jupyter`, `%tidy3_run`, `%%tidy3_run`, `%tidy3_pipes` |
 | Partial | `partial_run`, `maybe_rewrite_cell`, `normalize_pipe_source` |
 | Escape | `TidyFrame.with_polars(fn)` |
+
+## Notes
+
+- **Grouped semantics are dplyr's**: after `group_by`, `mutate`/`filter`/
+  `sample_n`/`head` evaluate **per group** (Polars window `.over`).
+  `summarise` aggregates per group.
+- **Display is self-contained**: tables carry inline styles (no `<style>`
+  block), so they render identically in local cells, republished `%gpu`
+  output, and sslive exports. Under `%gpu`, bare polars DataFrames are
+  restyled the same way (`seed_tidy3_remote(style_polars=False)` to opt out).
+- **Builtins are shadowed** by design: injecting the API puts `filter`, `sum`,
+  `min`, `max` into the notebook namespace (dplyr ergonomics). Use
+  `builtins.filter` etc. when you need the Python originals.
+- **Plotting big remote data**: aggregate remotely, then let plot3's own
+  remote path pull the small result: `%plot3 res.to_pandas() x=... y=...`.
 
 ## Why not datar?
 

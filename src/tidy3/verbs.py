@@ -29,8 +29,19 @@ class Verb:
         return f"<tidy3.Verb {self.name}>"
 
 
+def _windowed(expr: Any, groups: list[str] | None) -> Any:
+    """dplyr grouped semantics: evaluate the expression per group (window)."""
+    if groups and isinstance(expr, pl.Expr):
+        return expr.over(groups)
+    return expr
+
+
 def filter(*predicates: Any) -> Verb:  # noqa: A001
-    """Keep rows matching all predicates (AND)."""
+    """Keep rows matching all predicates (AND).
+
+    After ``group_by`` the predicate is evaluated per group (dplyr window
+    semantics), so ``filter(col("x") > mean("x"))`` compares within groups.
+    """
     if not predicates:
         raise TypeError("filter() requires at least one predicate")
 
@@ -38,18 +49,24 @@ def filter(*predicates: Any) -> Verb:  # noqa: A001
         expr = predicates[0]
         for p in predicates[1:]:
             expr = expr & p
-        return tf._with_lf(tf._lf.filter(expr), groups=tf._groups)
+        return tf._with_lf(tf._lf.filter(_windowed(expr, tf._groups)), groups=tf._groups)
 
     return Verb(_apply, "filter")
 
 
 def mutate(**kwargs: Any) -> Verb:
-    """Add or overwrite columns."""
+    """Add or overwrite columns.
+
+    After ``group_by`` each expression is evaluated per group (dplyr window
+    semantics): aggregates broadcast within the group, ``cum_sum`` restarts
+    per group, etc.
+    """
     if not kwargs:
         raise TypeError("mutate() requires at least one assignment")
 
     def _apply(tf):
-        return tf._with_lf(tf._lf.with_columns(**kwargs), groups=tf._groups)
+        exprs = {k: _windowed(v, tf._groups) for k, v in kwargs.items()}
+        return tf._with_lf(tf._lf.with_columns(**exprs), groups=tf._groups)
 
     return Verb(_apply, "mutate")
 
@@ -60,7 +77,8 @@ def transmute(**kwargs: Any) -> Verb:
         raise TypeError("transmute() requires at least one assignment")
 
     def _apply(tf):
-        lf = tf._lf.with_columns(**kwargs)
+        exprs = {k: _windowed(v, tf._groups) for k, v in kwargs.items()}
+        lf = tf._lf.with_columns(**exprs)
         keep = list(kwargs.keys())
         if tf._groups:
             keep = list(dict.fromkeys([*tf._groups, *keep]))
@@ -70,18 +88,31 @@ def transmute(**kwargs: Any) -> Verb:
 
 
 def select(*cols: Any) -> Verb:
-    """Select columns by name or expression."""
+    """Select columns by name or expression.
+
+    Like dplyr, grouping columns are always kept (prepended when missing).
+    """
     if not cols:
         raise TypeError("select() requires at least one column")
 
     def _apply(tf):
-        return tf._with_lf(tf._lf.select(*cols), groups=tf._groups)
+        sel = list(cols)
+        if tf._groups:
+            named = {c for c in sel if isinstance(c, str)}
+            sel = [*(g for g in tf._groups if g not in named), *sel]
+        return tf._with_lf(tf._lf.select(*sel), groups=tf._groups)
 
     return Verb(_apply, "select")
 
 
 def drop(*cols: str) -> Verb:
     def _apply(tf):
+        if tf._groups:
+            bad = [c for c in cols if c in tf._groups]
+            if bad:
+                raise ValueError(
+                    f"drop(): cannot drop grouping column(s) {bad}; ungroup() first"
+                )
         return tf._with_lf(tf._lf.drop(*cols), groups=tf._groups)
 
     return Verb(_apply, "drop")
@@ -94,7 +125,8 @@ def rename(**kwargs: str) -> Verb:
     mapping = {old: new for new, old in kwargs.items()}
 
     def _apply(tf):
-        return tf._with_lf(tf._lf.rename(mapping), groups=tf._groups)
+        groups = [mapping.get(g, g) for g in tf._groups] if tf._groups else None
+        return tf._with_lf(tf._lf.rename(mapping), groups=groups)
 
     return Verb(_apply, "rename")
 
@@ -176,7 +208,12 @@ def count(*cols: str, name: str = "n") -> Verb:
 
 
 def head(n: int = 10) -> Verb:
+    """First *n* rows — per group when grouped (dplyr ``slice_head``)."""
+
     def _apply(tf):
+        if tf._groups:
+            pred = pl.int_range(pl.len()).over(tf._groups) < n
+            return tf._with_lf(tf._lf.filter(pred), groups=tf._groups)
         return tf._with_lf(tf._lf.head(n), groups=tf._groups)
 
     return Verb(_apply, "head")
@@ -186,26 +223,25 @@ slice_head = head
 
 
 def sample_n(n: int, *, seed: int | None = None) -> Verb:
+    """Random *n* rows (per group when grouped), fully lazy.
+
+    Implemented as a shuffled-index filter so the plan never materializes
+    the whole dataset; original row order is preserved.
+    """
+
     def _apply(tf):
-        # sample needs collect for LazyFrame in some polars versions —
-        # use random filter approx or collect-safe path via head after shuffle.
-        # Polars LazyFrame has no sample until collect; collect then re-lazy
-        # for sample_n is OK for plot prep (explicit row limit).
-        df = tf._lf.collect()
-        if n >= df.height:
-            out = df
-        else:
-            out = df.sample(n=n, seed=seed, shuffle=True)
-        return tf._with_lf(out.lazy(), groups=tf._groups)
+        pred = pl.int_range(pl.len()).shuffle(seed=seed) < n
+        return tf._with_lf(tf._lf.filter(_windowed(pred, tf._groups)), groups=tf._groups)
 
     return Verb(_apply, "sample_n")
 
 
 def sample_frac(frac: float, *, seed: int | None = None) -> Verb:
+    """Random fraction of rows (per group when grouped), fully lazy."""
+
     def _apply(tf):
-        df = tf._lf.collect()
-        out = df.sample(fraction=frac, seed=seed, shuffle=True)
-        return tf._with_lf(out.lazy(), groups=tf._groups)
+        pred = pl.int_range(pl.len()).shuffle(seed=seed) < pl.len() * frac
+        return tf._with_lf(tf._lf.filter(_windowed(pred, tf._groups)), groups=tf._groups)
 
     return Verb(_apply, "sample_frac")
 
