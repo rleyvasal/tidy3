@@ -240,18 +240,25 @@ summarize = summarise
 
 
 def count(*cols: str, name: str = "n") -> Verb:
-    """Count rows, optionally by columns."""
+    """Count rows per group (dplyr): existing ``group_by`` groups plus *cols*.
+
+    ``group_by("a") >> count()`` ≡ R's ``group_by(a) %>% tally()``.
+    """
 
     def _apply(tf):
+        eff = list(dict.fromkeys([*(tf._groups or []), *cols]))
         if tf._backend == "pandas":
-            return tf._with_pdf(_pe().do_count(tf._pdf, cols, name), groups=None)
-        if cols:
-            lf = tf._lf.group_by(list(cols)).len(name)
+            return tf._with_pdf(_pe().do_count(tf._pdf, tuple(eff), name), groups=None)
+        if eff:
+            lf = tf._lf.group_by(eff).len(name)
             return tf._with_lf(lf, groups=None)
         lf = tf._lf.select(pl.len().alias(name))
         return tf._with_lf(lf, groups=None)
 
     return Verb(_apply, "count")
+
+
+tally = count  # R: tally() counts by the existing groups
 
 
 def head(n: int = 10) -> Verb:

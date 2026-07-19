@@ -227,6 +227,18 @@ def test_summarise_nested_agg_fallback_parity(cars):
     assert b["dev"].abs().max() == pytest.approx(0.0)  # mean deviation ≡ 0
 
 
+def test_count_uses_existing_groups(cars):
+    # dplyr: group_by(a, b) %>% count()/tally() counts per existing group
+    from tidy3 import tally
+
+    for backend in ("polars", "pandas"):
+        out = (
+            tidy(cars, backend=backend) >> group_by("cyl") >> tally()
+        ).collect(as_="pandas")
+        assert sorted(out.columns) == ["cyl", "n"]
+        assert out.set_index("cyl")["n"].to_dict() == {6: 3, 4: 1, 8: 2}
+
+
 def test_backend_option_default(cars):
     from tidy3 import options
 
