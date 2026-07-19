@@ -136,21 +136,25 @@ polars-specific raises a clear error pointing back to `backend="polars"`.
 
 ```python
 from tidy3 import bench
-bench.run(rows=10_000_000)        # pip install datar datar-pandas for the datar row
+bench.run(rows=10_000_000)        # full pipeline; pip install datar datar-pandas for the datar row
+bench.run_ops(rows=10_000_000)    # each verb in isolation vs raw pandas
 ```
 
 Apple-silicon laptop, 10M rows × 100 groups, filter→mutate→group_by→summarise→arrange:
 
 | engine | time | vs fastest |
 |---|---|---|
-| polars (raw lazy) | 39.7ms | 1.0x |
-| **tidy3[polars]** | 45.5ms | 1.1x |
-| pandas (raw) | 59.9ms | 1.5x |
-| **tidy3[pandas]** | 103.9ms | 2.6x |
-| datar[pandas] | 162.5ms | 4.1x |
+| **tidy3[polars]** | 37.9ms | 1.0x |
+| polars (raw lazy) | 39.3ms | 1.0x |
+| pandas (raw) | 59.4ms | 1.6x |
+| **tidy3[pandas]** | 102.1ms | 2.7x |
+| datar[pandas] | 164.7ms | 4.4x |
 
-Same engine, same pipeline: tidy3's pandas backend is ~1.6x faster than
-datar; the polars backend is ~3.6x faster, with near-zero wrapper overhead.
+Per operation (`run_ops`, ratios vs raw pandas): tidy3's pandas wrapper is
+free on filter/mutate/arrange (1.0–1.1x, vs datar's 1.1–2.5x); its
+`summarise` is 2.3x (one groupby pass per aggregate, vs datar's 3.9x).
+tidy3[polars] beats raw pandas on every non-trivial op — 0.7x on
+group+summarise and 0.2x on sort — including `to_pandas` conversion.
 Under `%gpu`, run the same `bench.run(...)` on the remote kernel
 (`!uv pip install datar datar-pandas` there first for the datar row).
 

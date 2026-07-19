@@ -20,7 +20,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
-__all__ = ["run", "make_data"]
+__all__ = ["run", "run_ops", "make_data"]
 
 
 def make_data(rows: int, groups: int = 100, seed: int = 0):
@@ -181,3 +181,108 @@ def run(rows: int = 1_000_000, repeat: int = 3, groups: int = 100, seed: int = 0
     for name, t, status in sorted(rows_out, key=lambda r: r[1]):
         print(f"  {name:<20} {t*1000:>8.1f}ms   {t/fastest:>9.1f}x   {status}")
     return times
+
+
+def run_ops(rows: int = 10_000_000, repeat: int = 3, groups: int = 100, seed: int = 0):
+    """Per-operation comparison against raw pandas (the baseline column).
+
+    Times each verb in isolation — same input, same output — for raw
+    pandas, tidy3[pandas], datar and tidy3[polars] (which includes
+    engine execution + materialization, since polars is lazy).
+    """
+    from tidy3 import arrange, col, filter, group_by, mean, mutate, n, std, summarise, tidy
+
+    print(f"tidy3 per-op bench: rows={rows:,} groups={groups} repeat={repeat} (best-of)")
+    pdf, pldf = make_data(rows, groups, seed)
+
+    try:
+        import datar.all as d
+
+        f = d.f
+        filt = getattr(d, "filter", None) or getattr(d, "filter_")
+        sd = getattr(d, "sd", None) or getattr(d, "std")
+        have_datar = True
+    except ImportError as e:
+        print(f"  (datar not available: {e})")
+        have_datar = False
+
+    def t3p(pipe):  # tidy3[pandas]
+        return lambda: pipe(tidy(pdf, backend="pandas")).collect(as_="pandas")
+
+    def t3l(pipe):  # tidy3[polars] — includes collect (engine run)
+        return lambda: pipe(tidy(pldf)).collect(as_="pandas")
+
+    ops: list[tuple[str, dict[str, Callable[[], Any]]]] = [
+        (
+            "filter x>0",
+            {
+                "pandas": lambda: pdf[pdf["x"] > 0],
+                "tidy3[pandas]": t3p(lambda tf: tf >> filter(col("x") > 0)),
+                "datar": (lambda: pdf >> filt(f.x > 0)) if have_datar else None,
+                "tidy3[polars]": t3l(lambda tf: tf >> filter(col("x") > 0)),
+            },
+        ),
+        (
+            "mutate z=x*2+y",
+            {
+                "pandas": lambda: pdf.assign(z=pdf["x"] * 2 + pdf["y"]),
+                "tidy3[pandas]": t3p(lambda tf: tf >> mutate(z=col("x") * 2 + col("y"))),
+                "datar": (lambda: pdf >> d.mutate(z=f.x * 2 + f.y)) if have_datar else None,
+                "tidy3[polars]": t3l(lambda tf: tf >> mutate(z=col("x") * 2 + col("y"))),
+            },
+        ),
+        (
+            "group+summarise",
+            {
+                "pandas": lambda: pdf.groupby("g", sort=False, observed=True, dropna=False)
+                .agg(n=("x", "size"), avg_x=("x", "mean"), sd_y=("y", "std"))
+                .reset_index(),
+                "tidy3[pandas]": t3p(
+                    lambda tf: tf >> group_by("g") >> summarise(n=n(), avg_x=mean("x"), sd_y=std("y"))
+                ),
+                "datar": (
+                    lambda: pdf >> d.group_by(f.g) >> d.summarise(n=d.n(), avg_x=d.mean(f.x), sd_y=sd(f.y))
+                )
+                if have_datar
+                else None,
+                "tidy3[polars]": t3l(
+                    lambda tf: tf >> group_by("g") >> summarise(n=n(), avg_x=mean("x"), sd_y=std("y"))
+                ),
+            },
+        ),
+        (
+            "arrange y",
+            {
+                "pandas": lambda: pdf.sort_values("y").reset_index(drop=True),
+                "tidy3[pandas]": t3p(lambda tf: tf >> arrange("y")),
+                "datar": (lambda: pdf >> d.arrange(f.y)) if have_datar else None,
+                "tidy3[polars]": t3l(lambda tf: tf >> arrange("y")),
+            },
+        ),
+    ]
+
+    engines = ["pandas", "tidy3[pandas]", "datar", "tidy3[polars]"]
+    print()
+    header = f"  {'op':<16}" + "".join(f" {e:>20}" for e in engines)
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    results: dict[str, dict[str, float]] = {}
+    for op_name, impls in ops:
+        row = f"  {op_name:<16}"
+        results[op_name] = {}
+        base = None
+        for e in engines:
+            fn = impls.get(e)
+            if fn is None:
+                row += f" {'—':>20}"
+                continue
+            t, _ = _time(fn, repeat)
+            results[op_name][e] = t
+            if e == "pandas":
+                base = t
+                row += f" {t*1000:>14.1f}ms     "
+            else:
+                row += f" {t*1000:>12.1f}ms {t/base:>4.1f}x"
+        print(row)
+    print("\n  (ratios are vs raw pandas; tidy3[polars] includes lazy-plan execution + to_pandas)")
+    return results

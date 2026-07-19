@@ -160,12 +160,10 @@ def do_filter(df: pd.DataFrame, predicates: tuple, groups: list[str] | None) -> 
 
 
 def do_mutate(df: pd.DataFrame, kwargs: dict, groups: list[str] | None) -> pd.DataFrame:
-    # parallel semantics like polars with_columns: all RHS see the input df
+    # parallel semantics like polars with_columns: all RHS see the input df.
+    # assign() (not copy-then-set) so copy-on-write shares unchanged columns.
     new = {k: eval_expr(v, df, groups, "window") for k, v in kwargs.items()}
-    out = df.copy()
-    for k, v in new.items():
-        out[k] = v
-    return out
+    return df.assign(**new)
 
 
 def do_summarise(df: pd.DataFrame, kwargs: dict, groups: list[str] | None) -> pd.DataFrame:
