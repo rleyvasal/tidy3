@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from tidy3.expr import Expr
+from tidy3.join_spec import JoinSpec
 
 _BIN = {
     "+": operator.add, "-": operator.sub, "*": operator.mul,
@@ -100,9 +101,186 @@ def _ev(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str) -> A
         return ~_ev(node[1], df, groups, mode)
     if kind == "bin":
         return _BIN[node[1]](_ev(node[2], df, groups, mode), _ev(node[3], df, groups, mode))
+    if kind == "horizontal":
+        _, operation, columns = node
+        if not columns:
+            identities = {"sum": 0, "any": False, "all": True}
+            return identities.get(operation)
+        values = df[list(columns)]
+        if operation in {
+            "sum",
+            "mean",
+            "min",
+            "max",
+            "median",
+            "std",
+            "any",
+            "all",
+        }:
+            return getattr(values, operation)(axis=1)
+        if operation == "first":
+            return values.iloc[:, 0]
+        if operation == "last":
+            return values.iloc[:, -1]
+        raise ValueError(f"unknown horizontal operation: {operation}")
+    if kind == "column_set":
+        _, columns, as_list = node
+        values = df[list(columns)]
+        if as_list:
+            return pd.Series(values.values.tolist(), index=df.index)
+        return pd.Series(values.to_dict(orient="records"), index=df.index)
+    if kind == "func":
+        return _ev_func(node, df, groups, mode)
+    if kind == "case_when":
+        _, cases, default = node
+        result = _as_series(_ev(default, df, groups, mode), df.index)
+        for condition_node, value_node in reversed(cases):
+            condition = _as_series(
+                _ev(condition_node, df, groups, mode), df.index
+            )
+            value = _as_series(_ev(value_node, df, groups, mode), df.index)
+            result = result.mask(condition.fillna(False).astype(bool), value)
+        return result.infer_objects()
     if kind == "call":
         return _ev_call(node, df, groups, mode)
     raise ValueError(f"unknown expression node: {node!r}")
+
+
+def _as_series(value: Any, index: pd.Index) -> pd.Series:
+    if isinstance(value, pd.Series):
+        return value.reindex(index)
+    return pd.Series(value, index=index)
+
+
+def _ev_func(
+    node: tuple,
+    df: pd.DataFrame,
+    groups: list[str] | None,
+    mode: str,
+) -> Any:
+    _, name, raw_args, raw_kwargs = node
+    args = tuple(_ev(arg, df, groups, mode) for arg in raw_args)
+    kwargs = {key: _ev(value, df, groups, mode) for key, value in raw_kwargs.items()}
+
+    if name == "n_distinct":
+        value = _as_series(args[0], df.index)
+        dropna = bool(kwargs["na_rm"])
+        if groups:
+            grouped = _grouped(value, df, groups)
+            if mode == "agg":
+                return grouped.nunique(dropna=dropna)
+            return grouped.transform(lambda series: series.nunique(dropna=dropna))
+        return value.nunique(dropna=dropna)
+
+    if name in {
+        "row_number",
+        "min_rank",
+        "dense_rank",
+        "percent_rank",
+        "cume_dist",
+        "ntile",
+        "lead",
+        "lag",
+        "cummean",
+        "cumall",
+        "cumany",
+    }:
+        if mode != "window":
+            raise ValueError(f"{name}() is not valid inside summarise()")
+        if name == "row_number" and not args:
+            if groups:
+                return df.groupby(list(groups), sort=False, **_GB_KW).cumcount() + 1
+            return pd.Series(np.arange(1, len(df) + 1), index=df.index)
+
+        value = _as_series(args[0], df.index)
+        grouped = _grouped(value, df, groups) if groups else None
+        if name in {"row_number", "min_rank", "dense_rank"}:
+            method = {
+                "row_number": "first",
+                "min_rank": "min",
+                "dense_rank": "dense",
+            }[name]
+            if grouped is not None:
+                return grouped.rank(method=method, na_option="keep")
+            return value.rank(method=method, na_option="keep")
+        if name in {"percent_rank", "cume_dist", "ntile"}:
+            method = "max" if name == "cume_dist" else (
+                "first" if name == "ntile" else "min"
+            )
+            rank = (
+                grouped.rank(method=method, na_option="keep")
+                if grouped is not None
+                else value.rank(method=method, na_option="keep")
+            )
+            count = (
+                grouped.transform("count")
+                if grouped is not None
+                else pd.Series(value.count(), index=df.index)
+            )
+            if name == "percent_rank":
+                return (rank - 1) / (count - 1)
+            if name == "cume_dist":
+                return rank / count
+            return np.floor((rank - 1) * int(kwargs["n"]) / count) + 1
+        if name in {"lead", "lag"}:
+            periods = -int(kwargs["n"]) if name == "lead" else int(kwargs["n"])
+            default = kwargs["default"]
+            if grouped is not None:
+                return grouped.shift(periods, fill_value=default)
+            return value.shift(periods, fill_value=default)
+        if name == "cummean":
+            if grouped is not None:
+                result = grouped.expanding().mean()
+                result = result.droplevel(list(range(len(groups))))
+                if df.index.is_unique:
+                    return result.reindex(df.index)
+                positioned = pd.Series(value.to_numpy(), index=range(len(value)))
+                keys = [
+                    pd.Series(df[group].to_numpy(), index=positioned.index)
+                    for group in groups
+                ]
+                result = positioned.groupby(keys, **_GB_KW).expanding().mean()
+                result = result.droplevel(list(range(len(groups)))).sort_index()
+                result.index = df.index
+                return result
+            return value.expanding().mean()
+        operation = "cummin" if name == "cumall" else "cummax"
+        if grouped is not None:
+            return grouped.transform(operation)
+        return getattr(value, operation)()
+
+    if name == "coalesce":
+        result = _as_series(args[0], df.index)
+        for value in args[1:]:
+            result = result.combine_first(_as_series(value, df.index))
+        return result.infer_objects()
+
+    if name == "if_else":
+        condition = _as_series(args[0], df.index)
+        if not isinstance(args[1], pd.Series) and not isinstance(args[2], pd.Series):
+            missing = condition.isna()
+            values = np.where(
+                condition.fillna(False).to_numpy(dtype=bool), args[1], args[2]
+            )
+            result = pd.Series(values, index=df.index)
+            if missing.any():
+                missing_value = kwargs["missing"]
+                if isinstance(missing_value, pd.Series):
+                    result = result.mask(missing, missing_value.reindex(df.index))
+                else:
+                    result = result.mask(missing, missing_value)
+            return result
+        true = _as_series(args[1], df.index)
+        false = _as_series(args[2], df.index)
+        result = false.mask(condition.fillna(False).astype(bool), true)
+        missing = condition.isna()
+        if missing.any():
+            result = result.mask(
+                missing, _as_series(kwargs["missing"], df.index)
+            )
+        return result.infer_objects()
+
+    raise ValueError(f"unknown expression function: {name}")
 
 
 def _ev_call(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str) -> Any:
@@ -162,10 +340,85 @@ def do_filter(df: pd.DataFrame, predicates: tuple, groups: list[str] | None) -> 
     return df[mask].reset_index(drop=True)
 
 
+def do_filter_out(
+    df: pd.DataFrame, predicates: tuple, groups: list[str] | None
+) -> pd.DataFrame:
+    """Drop rows matching every predicate; missing predicates are retained."""
+    mask = eval_expr(predicates[0], df, groups, "window")
+    for predicate in predicates[1:]:
+        mask = mask & eval_expr(predicate, df, groups, "window")
+    if not isinstance(mask, pd.Series):
+        mask = pd.Series(mask, index=df.index)
+    keep = ~mask.fillna(False).astype(bool)
+    return df[keep].reset_index(drop=True)
+
+
+_NO_FAST_WINDOW = object()
+
+
+def _fast_grouped_window(
+    expr: Any,
+    df: pd.DataFrame,
+    grouped: Any,
+    groups: list[str],
+) -> Any:
+    node = expr.node if isinstance(expr, Expr) else None
+    if node is None:
+        return _NO_FAST_WINDOW
+    if node[0] == "call" and node[1] in _AGG and not node[3] and not node[4]:
+        base = node[2]
+        if base[0] == "col":
+            return grouped[base[1]].transform(_AGG[node[1]])
+    if node[0] != "func":
+        return _NO_FAST_WINDOW
+    _, name, args, kwargs = node
+    if name == "row_number" and not args:
+        return grouped.cumcount() + 1
+    if not args or args[0][0] != "col":
+        return _NO_FAST_WINDOW
+    column = args[0][1]
+    series_group = grouped[column]
+    literal_kwargs = {
+        key: value[1] if value[0] == "lit" else None
+        for key, value in kwargs.items()
+    }
+    if name in {"lead", "lag"}:
+        periods = int(literal_kwargs["n"])
+        periods = -periods if name == "lead" else periods
+        return series_group.shift(periods, fill_value=literal_kwargs["default"])
+    if name in {"row_number", "min_rank", "dense_rank"}:
+        method = {
+            "row_number": "first",
+            "min_rank": "min",
+            "dense_rank": "dense",
+        }[name]
+        return series_group.rank(method=method, na_option="keep")
+    if name == "cummean":
+        result = series_group.expanding().mean()
+        result = result.droplevel(list(range(len(groups))))
+        if df.index.is_unique:
+            return result.reindex(df.index)
+    return _NO_FAST_WINDOW
+
+
 def do_mutate(df: pd.DataFrame, kwargs: dict, groups: list[str] | None) -> pd.DataFrame:
     # parallel semantics like polars with_columns: all RHS see the input df.
     # assign() (not copy-then-set) so copy-on-write shares unchanged columns.
-    new = {k: eval_expr(v, df, groups, "window") for k, v in kwargs.items()}
+    grouped = (
+        df.groupby(list(groups), sort=False, **_GB_KW) if groups else None
+    )
+    new = {}
+    for name, value in kwargs.items():
+        result = (
+            _fast_grouped_window(value, df, grouped, groups)
+            if grouped is not None
+            else _NO_FAST_WINDOW
+        )
+        new[name] = (
+            eval_expr(value, df, groups, "window")
+            if result is _NO_FAST_WINDOW
+            else result
+        )
     return df.assign(**new)
 
 
@@ -175,7 +428,11 @@ def _has_agg(x) -> bool:
         return _has_agg(x.node)
     if not (isinstance(x, tuple) and x and isinstance(x[0], str)):
         return False
-    if x[0] == "n" or (x[0] == "call" and x[1] in _AGG):
+    if (
+        x[0] == "n"
+        or (x[0] == "call" and x[1] in _AGG)
+        or (x[0] == "func" and x[1] == "n_distinct")
+    ):
         return True
     if x[0] == "call":
         _, _, base, args, kwargs = x
@@ -250,6 +507,46 @@ def do_summarise(df: pd.DataFrame, kwargs: dict, groups: list[str] | None) -> pd
     return pd.DataFrame({k: [v] for k, v in vals.items()})
 
 
+def _reframe_values(value: Any) -> list[Any]:
+    if isinstance(value, pd.Series):
+        return value.tolist()
+    if isinstance(value, (pd.Index, np.ndarray, list, tuple)):
+        return list(value)
+    return [value]
+
+
+def do_reframe(
+    df: pd.DataFrame, kwargs: dict, groups: list[str] | None
+) -> pd.DataFrame:
+    """Return an arbitrary number of rows per group, always ungrouped."""
+    pieces = []
+    for piece in _group_pieces(df, groups):
+        values = {
+            name: _reframe_values(eval_expr(expr, piece, None, "agg"))
+            for name, expr in kwargs.items()
+        }
+        lengths = [len(value) for value in values.values()]
+        if not lengths:
+            continue
+        non_scalar = {length for length in lengths if length != 1}
+        if len(non_scalar) > 1:
+            raise ValueError("reframe() outputs must have compatible sizes")
+        size = next(iter(non_scalar), 1)
+        if size == 0 and any(length > 1 for length in lengths):
+            raise ValueError("reframe() outputs must have compatible sizes")
+        expanded = {
+            name: value * size if len(value) == 1 and size != 1 else value
+            for name, value in values.items()
+        }
+        if groups:
+            keys = {group: [piece.iloc[0][group]] * size for group in groups}
+            expanded = {**keys, **expanded}
+        pieces.append(pd.DataFrame(expanded))
+    if pieces:
+        return pd.concat(pieces, ignore_index=True)
+    return pd.DataFrame(columns=[*(groups or []), *kwargs.keys()])
+
+
 def do_select(df: pd.DataFrame, cols: tuple) -> pd.DataFrame:
     bad = [c for c in cols if not isinstance(c, str)]
     if bad:
@@ -302,33 +599,512 @@ def do_head(df: pd.DataFrame, n: int, groups: list[str] | None) -> pd.DataFrame:
     return df.head(n).reset_index(drop=True)
 
 
+def _group_pieces(df: pd.DataFrame, groups: list[str] | None):
+    if not groups:
+        return [df]
+    grouped = df.groupby(list(groups), sort=False, **_GB_KW)
+    return [df.iloc[positions] for positions in grouped.indices.values()]
+
+
+def do_slice(
+    df: pd.DataFrame, positions: tuple[int, ...], groups: list[str] | None
+) -> pd.DataFrame:
+    if not any(positions):
+        return df.iloc[0:0].copy().reset_index(drop=True)
+    positive = [position - 1 for position in positions if position > 0]
+    excluded = {abs(position) - 1 for position in positions if position < 0}
+    pieces = []
+    for group in _group_pieces(df, groups):
+        if positive:
+            valid = [position for position in positive if position < len(group)]
+            pieces.append(group.iloc[valid])
+        else:
+            keep = [position for position in range(len(group)) if position not in excluded]
+            pieces.append(group.iloc[keep])
+    if not pieces:
+        return df.iloc[0:0].copy().reset_index(drop=True)
+    return pd.concat(pieces, ignore_index=True)
+
+
+def do_slice_size(
+    df: pd.DataFrame,
+    n: int | None,
+    prop: float | None,
+    groups: list[str] | None,
+    *,
+    tail: bool,
+) -> pd.DataFrame:
+    pieces = []
+    for group in _group_pieces(df, groups):
+        value = n if n is not None else prop
+        size = _sample_size(len(group), value, fraction=prop is not None)
+        pieces.append(group.tail(size) if tail and size else group.head(size))
+    if not pieces:
+        return df.iloc[0:0].copy().reset_index(drop=True)
+    return pd.concat(pieces, ignore_index=True)
+
+
+def do_slice_extreme(
+    df: pd.DataFrame,
+    order_by: Any,
+    n: int | None,
+    prop: float | None,
+    groups: list[str] | None,
+    *,
+    largest: bool,
+    with_ties: bool,
+    na_rm: bool,
+) -> pd.DataFrame:
+    order = df[order_by] if isinstance(order_by, str) else eval_expr(
+        order_by, df, groups, "window"
+    )
+    if not isinstance(order, pd.Series):
+        order = pd.Series(order, index=df.index)
+    marker = "__tidy3_order"
+    while marker in df.columns:
+        marker += "_"
+    work = df.assign(**{marker: order})
+    pieces = []
+    for group in _group_pieces(work, groups):
+        if na_rm:
+            group = group[group[marker].notna()]
+        group = group.sort_values(
+            marker, ascending=not largest, na_position="last", kind="stable"
+        )
+        value = n if n is not None else prop
+        size = _sample_size(len(group), value, fraction=prop is not None)
+        if size == 0:
+            pieces.append(group.head(0))
+            continue
+        if with_ties and size < len(group):
+            threshold = group[marker].iloc[size - 1]
+            if pd.isna(threshold):
+                chosen = group
+            elif largest:
+                chosen = group[group[marker] >= threshold]
+            else:
+                chosen = group[group[marker] <= threshold]
+            pieces.append(chosen)
+        else:
+            pieces.append(group.head(size))
+    if not pieces:
+        return df.iloc[0:0].copy().reset_index(drop=True)
+    return pd.concat(pieces, ignore_index=True).drop(columns=marker)
+
+
+def _sample_size(length: int, value: int | float, *, fraction: bool) -> int:
+    if fraction:
+        raw = length * (value if value >= 0 else 1 + value)
+        size = int(raw)  # dplyr: truncate proportions towards zero
+    else:
+        size = int(value if value >= 0 else length + value)
+    return min(length, max(0, size))
+
+
+def _sample_groups(
+    df: pd.DataFrame,
+    groups: list[str],
+    size,
+    seed: int | None,
+) -> pd.DataFrame:
+    """Sample each group by positional index without losing group columns."""
+    pieces = []
+    grouped = df.groupby(list(groups), sort=False, **_GB_KW)
+    for positions in grouped.indices.values():
+        group = df.iloc[positions]
+        pieces.append(group.sample(n=size(len(group)), random_state=seed))
+    if not pieces:
+        return df.iloc[0:0].copy().reset_index(drop=True)
+    return pd.concat(pieces, ignore_index=True)
+
+
 def do_sample_n(df: pd.DataFrame, n: int, seed: int | None, groups: list[str] | None) -> pd.DataFrame:
     if groups:
-        out = df.groupby(list(groups), group_keys=False, **_GB_KW).apply(
-            lambda g: g.sample(n=n if n < len(g) else len(g), random_state=seed)
+        return _sample_groups(
+            df,
+            groups,
+            lambda length: _sample_size(length, n, fraction=False),
+            seed,
         )
-        return out.reset_index(drop=True)
-    return df.sample(n=n if n < len(df) else len(df), random_state=seed).reset_index(drop=True)
+    size = _sample_size(len(df), n, fraction=False)
+    return df.sample(n=size, random_state=seed).reset_index(drop=True)
 
 
 def do_sample_frac(df: pd.DataFrame, frac: float, seed: int | None, groups: list[str] | None) -> pd.DataFrame:
     if groups:
-        out = df.groupby(list(groups), group_keys=False, **_GB_KW).sample(
-            frac=frac, random_state=seed
+        return _sample_groups(
+            df,
+            groups,
+            lambda length: _sample_size(length, frac, fraction=True),
+            seed,
         )
-        return out.reset_index(drop=True)
-    return df.sample(frac=frac, random_state=seed).reset_index(drop=True)
+    size = _sample_size(len(df), frac, fraction=True)
+    return df.sample(n=size, random_state=seed).reset_index(drop=True)
 
 
-def do_count(df: pd.DataFrame, cols: tuple, name: str) -> pd.DataFrame:
+def do_slice_sample(
+    df: pd.DataFrame,
+    n: int | None,
+    prop: float | None,
+    weight_by: Any,
+    replace: bool,
+    seed: int | None,
+    groups: list[str] | None,
+) -> pd.DataFrame:
+    weights = None
+    if weight_by is not None:
+        weights = (
+            df[weight_by]
+            if isinstance(weight_by, str)
+            else eval_expr(weight_by, df, groups, "window")
+        )
+        if not isinstance(weights, pd.Series):
+            weights = pd.Series(weights, index=df.index)
+    pieces = []
+    for group in _group_pieces(df, groups):
+        value = n if n is not None else prop
+        size = _sample_size(len(group), value, fraction=prop is not None)
+        if replace:
+            if n is not None:
+                size = max(0, n if n >= 0 else len(group) + n)
+            else:
+                factor = prop if prop >= 0 else 1.0 + prop
+                size = max(0, int(len(group) * factor))
+        group_weights = weights.loc[group.index] if weights is not None else None
+        pieces.append(
+            group.sample(
+                n=size,
+                replace=replace,
+                weights=group_weights,
+                random_state=seed,
+            )
+        )
+    if not pieces:
+        return df.iloc[0:0].copy().reset_index(drop=True)
+    return pd.concat(pieces, ignore_index=True)
+
+
+def do_count(
+    df: pd.DataFrame,
+    cols: tuple,
+    name: str,
+    *,
+    wt: Any = None,
+    sort: bool = False,
+) -> pd.DataFrame:
+    values = None
+    if wt is not None:
+        values = df[wt] if isinstance(wt, str) else eval_expr(wt, df, None, "window")
+        if not isinstance(values, pd.Series):
+            values = pd.Series(values, index=df.index)
     if cols:
-        return (
-            df.groupby(list(cols), sort=False, **_GB_KW)
-            .size()
-            .reset_index(name=name)
+        if values is None:
+            counts = df.groupby(list(cols), sort=False, **_GB_KW).size()
+        else:
+            counts = _grouped(values, df, list(cols)).sum(min_count=0)
+        out = counts.reset_index(name=name)
+    else:
+        value = len(df) if values is None else values.sum()
+        out = pd.DataFrame({name: [value]})
+    if sort:
+        out = out.sort_values(name, ascending=False, kind="stable").reset_index(drop=True)
+    return out
+
+
+def do_add_count(
+    df: pd.DataFrame,
+    cols: tuple[str, ...],
+    name: str,
+    *,
+    wt: Any = None,
+    sort: bool = False,
+) -> pd.DataFrame:
+    """Add a group count without collapsing rows."""
+    if wt is None:
+        values = pd.Series(1, index=df.index)
+        counts = (
+            _grouped(values, df, list(cols)).transform("size")
+            if cols
+            else len(df)
         )
-    return pd.DataFrame({name: [len(df)]})
+    else:
+        values = df[wt] if isinstance(wt, str) else eval_expr(wt, df, None, "window")
+        if not isinstance(values, pd.Series):
+            values = pd.Series(values, index=df.index)
+        counts = (
+            _grouped(values, df, list(cols)).transform("sum")
+            if cols
+            else values.sum()
+        )
+    out = df.assign(**{name: counts})
+    if sort:
+        out = out.sort_values(name, ascending=False, kind="stable")
+    return out.reset_index(drop=True)
 
 
-def do_join(df: pd.DataFrame, right: pd.DataFrame, on, how: str, **kwargs) -> pd.DataFrame:
-    return df.merge(right, on=on, how=how, suffixes=("", "_right"), **kwargs)
+def do_join(
+    df: pd.DataFrame, right: pd.DataFrame, on, how: str, **kwargs
+) -> pd.DataFrame:
+    params = {"how": how, "suffixes": ("", "_right"), **kwargs}
+    if how != "cross":
+        params["on"] = on
+    return df.merge(right, **params)
+
+
+def do_filter_join(
+    df: pd.DataFrame, right: pd.DataFrame, on, *, anti: bool
+) -> pd.DataFrame:
+    """Semi/anti join while preserving every left column and its row order."""
+    keys = [on] if isinstance(on, str) else list(on)
+    marker = "__tidy3_match"
+    while marker in df.columns or marker in right.columns:
+        marker += "_"
+    matches = right[keys].drop_duplicates().assign(**{marker: True})
+    merged = df.merge(matches, on=keys, how="left", sort=False)
+    mask = merged[marker].isna() if anti else merged[marker].notna()
+    return merged.loc[mask, list(df.columns)].reset_index(drop=True)
+
+
+def do_rows(
+    df: pd.DataFrame,
+    right: pd.DataFrame,
+    keys: list[str],
+    operation: str,
+    *,
+    conflict: str = "error",
+    unmatched: str = "error",
+) -> pd.DataFrame:
+    """SQL-like row insertion, update, patch, upsert, and deletion."""
+    columns = list(df.columns)
+    extra = [column for column in right.columns if column not in columns]
+    if extra:
+        raise ValueError(f"{operation}(): y has columns absent from x: {extra}")
+    missing_keys = [key for key in keys if key not in columns or key not in right.columns]
+    if missing_keys:
+        raise KeyError(f"{operation}(): key columns not found: {missing_keys}")
+    if operation in {"rows_update", "rows_patch", "rows_upsert"}:
+        if right.duplicated(keys).any():
+            raise ValueError(f"{operation}(): y keys must be unique")
+
+    marker = "__tidy3_match"
+    while marker in columns or marker in right.columns:
+        marker += "_"
+    x_keys = df[keys].drop_duplicates().assign(**{marker: True})
+    checked = right.merge(x_keys, on=keys, how="left", sort=False)
+    matched = checked[marker].notna()
+
+    if operation == "rows_append":
+        additions = right
+    elif operation == "rows_insert":
+        if conflict == "error" and matched.any():
+            raise ValueError("rows_insert(): y contains keys that already exist in x")
+        additions = checked.loc[~matched, list(right.columns)]
+    elif operation in {"rows_update", "rows_patch", "rows_delete"}:
+        if unmatched == "error" and (~matched).any():
+            raise ValueError(f"{operation}(): y contains keys absent from x")
+        right = checked.loc[matched, list(right.columns)]
+    elif operation != "rows_upsert":
+        raise ValueError(f"unknown row operation: {operation}")
+
+    if operation in {"rows_append", "rows_insert"}:
+        return pd.concat([df, additions], ignore_index=True, sort=False)[columns]
+    if operation == "rows_delete":
+        return do_filter_join(df, right[keys], keys, anti=True)[columns]
+
+    update_columns = [column for column in right.columns if column not in keys]
+    update_marker = marker + "_update"
+    payload = right.assign(**{update_marker: True})
+    merged = df.merge(
+        payload,
+        on=keys,
+        how="left",
+        suffixes=("", "__tidy3_y"),
+        sort=False,
+    )
+    for column in update_columns:
+        incoming = f"{column}__tidy3_y"
+        if operation == "rows_patch":
+            merged[column] = merged[column].where(merged[column].notna(), merged[incoming])
+        else:
+            merged[column] = merged[column].where(
+                merged[update_marker].isna(), merged[incoming]
+            )
+    updated = merged[columns]
+    if operation != "rows_upsert":
+        return updated.reset_index(drop=True)
+
+    additions = checked.loc[~matched, list(right.columns)]
+    return pd.concat([updated, additions], ignore_index=True, sort=False)[columns]
+
+
+def do_join_by(
+    df: pd.DataFrame,
+    right: pd.DataFrame,
+    spec: JoinSpec,
+    how: str,
+    *,
+    suffix: str = "_right",
+    keep: bool = False,
+    na_matches: str = "na",
+    multiple: str = "all",
+    unmatched: str = "drop",
+    relationship: str | None = None,
+) -> pd.DataFrame:
+    """Execute equality/inequality/rolling/overlap join specifications."""
+    left_columns = list(df.columns)
+    right_columns = list(right.columns)
+    for condition in spec.conditions:
+        if condition.left not in left_columns:
+            raise KeyError(f"join_by(): left column not found: {condition.left!r}")
+        if condition.right not in right_columns:
+            raise KeyError(f"join_by(): right column not found: {condition.right!r}")
+
+    occupied = [*left_columns, *right_columns]
+    left_id = "__tidy3_left_row"
+    while left_id in occupied:
+        left_id += "_"
+    right_id = "__tidy3_right_row"
+    while right_id in occupied or right_id == left_id:
+        right_id += "_"
+    right_names = {}
+    for column in right_columns:
+        name = f"__tidy3_y_{column}"
+        while name in occupied or name in right_names.values():
+            name += "_"
+        right_names[column] = name
+
+    equality = spec.equality
+    left_data = df.copy(deep=False)
+    right_data = right.copy(deep=False)
+    for condition in equality:
+        left_key = left_data[condition.left]
+        right_key = right_data[condition.right]
+        if left_key.isna().all() or right_key.isna().all():
+            left_data = left_data.copy(deep=False)
+            right_data = right_data.copy(deep=False)
+            left_data[condition.left] = left_key.astype("object")
+            right_data[condition.right] = right_key.astype("object")
+
+    left = left_data.reset_index(drop=True).assign(**{left_id: range(len(df))})
+    y = right_data.rename(columns=right_names).reset_index(drop=True)
+    y[right_id] = range(len(y))
+    if equality:
+        candidates = left.merge(
+            y,
+            left_on=[condition.left for condition in equality],
+            right_on=[right_names[condition.right] for condition in equality],
+            how="inner",
+            sort=False,
+        )
+        if na_matches == "never" and not candidates.empty:
+            valid = pd.Series(True, index=candidates.index)
+            for condition in equality:
+                valid &= candidates[condition.left].notna()
+                valid &= candidates[right_names[condition.right]].notna()
+            candidates = candidates[valid]
+    else:
+        candidates = left.merge(y, how="cross", sort=False)
+
+    operators = {
+        ">": lambda a, b: a > b,
+        ">=": lambda a, b: a >= b,
+        "<": lambda a, b: a < b,
+        "<=": lambda a, b: a <= b,
+    }
+    for condition in spec.inequality:
+        mask = operators[condition.operator](
+            candidates[condition.left], candidates[right_names[condition.right]]
+        )
+        candidates = candidates[mask.fillna(False)]
+
+    rolling = next((condition for condition in spec.conditions if condition.rolling), None)
+    if rolling is not None and not candidates.empty:
+        target = candidates[right_names[rolling.right]]
+        grouped = target.groupby(candidates[left_id], sort=False)
+        extreme = (
+            grouped.transform("max")
+            if rolling.operator in {">", ">="}
+            else grouped.transform("min")
+        )
+        candidates = candidates[target == extreme]
+
+    left_counts = candidates[left_id].value_counts()
+    right_counts = candidates[right_id].value_counts()
+    if relationship in {"one-to-one", "many-to-one"} and (left_counts > 1).any():
+        raise ValueError(
+            f"join relationship {relationship!r} violated: "
+            "a row in x matches multiple rows in y"
+        )
+    if relationship in {"one-to-one", "one-to-many"} and (right_counts > 1).any():
+        raise ValueError(
+            f"join relationship {relationship!r} violated: "
+            "a row in y matches multiple rows in x"
+        )
+
+    all_matched_left = set(candidates[left_id])
+    all_matched_right = set(candidates[right_id])
+    if unmatched == "error":
+        if how in {"inner", "right"} and not set(left[left_id]).issubset(
+            all_matched_left
+        ):
+            raise ValueError("join unmatched='error': rows in x have no match in y")
+        if how in {"inner", "left"} and not set(y[right_id]).issubset(
+            all_matched_right
+        ):
+            raise ValueError("join unmatched='error': rows in y have no match in x")
+
+    if multiple != "all":
+        candidates = candidates.drop_duplicates(
+            subset=[left_id], keep="last" if multiple == "last" else "first"
+        )
+
+    matched_left = candidates[[left_id]].drop_duplicates()
+    if how in {"semi", "anti"}:
+        marked = left.merge(
+            matched_left.assign(__tidy3_matched=True), on=left_id, how="left"
+        )
+        keep = marked["__tidy3_matched"].notna()
+        if how == "anti":
+            keep = ~keep
+        return marked.loc[keep, left_columns].reset_index(drop=True)
+
+    matched_right = candidates[[right_id]].drop_duplicates()
+    pieces = [candidates]
+    if how in {"left", "full"}:
+        missing_left = left.merge(matched_left, on=left_id, how="left", indicator=True)
+        missing_left = missing_left[missing_left["_merge"] == "left_only"].drop(
+            columns="_merge"
+        )
+        for column in [*right_names.values(), right_id]:
+            missing_left[column] = np.nan
+        pieces.append(missing_left)
+    if how in {"right", "full"}:
+        missing_right = y.merge(matched_right, on=right_id, how="left", indicator=True)
+        missing_right = missing_right[missing_right["_merge"] == "left_only"].drop(
+            columns="_merge"
+        )
+        for column in [*left_columns, left_id]:
+            missing_right[column] = np.nan
+        pieces.append(missing_right)
+    combined = pd.concat(pieces, ignore_index=True, sort=False)
+    if how == "right":
+        combined = combined.sort_values([right_id, left_id], kind="stable")
+    else:
+        combined = combined.sort_values([left_id, right_id], kind="stable")
+
+    equality_map = {condition.left: condition.right for condition in equality}
+    equality_right = {condition.right for condition in equality}
+    output: dict[str, Any] = {}
+    for column in left_columns:
+        if column in equality_map and not keep:
+            output[column] = combined[column].combine_first(
+                combined[right_names[equality_map[column]]]
+            )
+        else:
+            output[column] = combined[column]
+    for column in right_columns:
+        if column in equality_right and not keep:
+            continue
+        name = column + suffix if column in left_columns else column
+        output[name] = combined[right_names[column]]
+    return pd.DataFrame(output).reset_index(drop=True)

@@ -86,6 +86,40 @@ def test_lazy_until_collect(cars):
     assert isinstance(tf.lazy(), pl.LazyFrame)
 
 
+def test_current_verb_accepts_frame_from_previous_module_copy(cars):
+    # Remote re-seeding gives the same qualified class a new identity.  Model
+    # an instance retained in the notebook namespace from before that reload.
+    StaleTidyFrame = type(
+        "TidyFrame",
+        (),
+        {
+            "__module__": "tidy3.frame",
+            "__rshift__": lambda self, other: NotImplemented,
+        },
+    )
+    stale = StaleTidyFrame()
+    stale._data = cars.lazy()
+    stale._groups = ["cyl"]
+
+    out = (stale >> summarise(n=n())).collect()
+
+    assert isinstance(out, pl.DataFrame)
+    assert out.height == cars["cyl"].n_unique()
+
+
+def test_current_frame_accepts_verb_from_previous_module_copy(cars):
+    StaleVerb = type(
+        "Verb",
+        (),
+        {
+            "__module__": "tidy3.verbs",
+            "__rrshift__": lambda self, other: "applied",
+        },
+    )
+
+    assert (tidy(cars) >> StaleVerb()) == "applied"
+
+
 # ── dplyr grouped (window) semantics ────────────────────────────────────────
 
 

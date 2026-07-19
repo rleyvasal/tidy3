@@ -18,9 +18,33 @@ the GPU host with normal ``scan_parquet`` / pipes. No special remote API.
 
 from __future__ import annotations
 
+from types import ModuleType
 from typing import Any, Callable
 
 _TRANSFORMER: Callable[[list[str]], list[str]] | None = None
+
+
+def _is_tidy3_owned(value: Any) -> bool:
+    """Return whether *value* came from a previous tidy3 import.
+
+    Remote re-seeding removes tidy3 from ``sys.modules``, but objects already
+    injected into the notebook namespace keep their old module globals and
+    class identities.  Provenance is intentionally narrow so a user's own
+    variable with the same public name is left alone.
+    """
+    if isinstance(value, ModuleType):
+        module = getattr(value, "__name__", "")
+    else:
+        module = getattr(value, "__module__", "")
+    return module == "tidy3" or module.startswith("tidy3.")
+
+
+def _is_pipe_transformer(value: Any) -> bool:
+    """Match current or stale copies of the tidy3 input transformer."""
+    return (
+        getattr(value, "__module__", "") == "tidy3.jupyter"
+        and getattr(value, "__name__", "") == "tidy3_input_transformer"
+    )
 
 
 def _lines_to_text(lines: list[str]) -> str:
@@ -67,10 +91,11 @@ def enable_pipe_transform(ipython: Any | None = None) -> bool:
     transformers = getattr(ipython, "input_transformers_cleanup", None)
     if transformers is None:
         return False
-    if tidy3_input_transformer not in transformers:
-        transformers.append(tidy3_input_transformer)
+    transformers[:] = [t for t in transformers if not _is_pipe_transformer(t)]
+    transformers.append(tidy3_input_transformer)
     post = getattr(ipython, "input_transformers_post", None)
-    if isinstance(post, list) and tidy3_input_transformer not in post:
+    if isinstance(post, list):
+        post[:] = [t for t in post if not _is_pipe_transformer(t)]
         post.append(tidy3_input_transformer)
     _TRANSFORMER = tidy3_input_transformer
     return True
@@ -89,8 +114,8 @@ def disable_pipe_transform(ipython: Any | None = None) -> None:
         return
     for attr in ("input_transformers_cleanup", "input_transformers_post"):
         transformers = getattr(ipython, attr, None)
-        if transformers and tidy3_input_transformer in transformers:
-            transformers.remove(tidy3_input_transformer)
+        if isinstance(transformers, list):
+            transformers[:] = [t for t in transformers if not _is_pipe_transformer(t)]
     _TRANSFORMER = None
 
 
@@ -102,7 +127,10 @@ def inject_api(ipython: Any | None = None) -> None:
             ipython = get_ipython()
         except Exception:
             return
-    if ipython is None or not getattr(ipython, "user_ns", None):
+    if ipython is None:
+        return
+    user_ns = getattr(ipython, "user_ns", None)
+    if user_ns is None:
         return
     import tidy3 as t3
 
@@ -110,10 +138,14 @@ def inject_api(ipython: Any | None = None) -> None:
         if name.startswith("_"):
             continue
         try:
-            ipython.user_ns.setdefault(name, getattr(t3, name))
+            value = getattr(t3, name)
         except AttributeError:
             pass
-    ipython.user_ns.setdefault("tidy3", t3)
+        else:
+            if name not in user_ns or _is_tidy3_owned(user_ns[name]):
+                user_ns[name] = value
+    if "tidy3" not in user_ns or _is_tidy3_owned(user_ns["tidy3"]):
+        user_ns["tidy3"] = t3
 
 
 def load_ipython_extension(ipython: Any) -> None:

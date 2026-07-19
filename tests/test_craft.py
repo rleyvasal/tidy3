@@ -17,6 +17,9 @@ def test_payload_roundtrip_contains_package():
     assert "tidy3/__init__.py" in names
     assert "tidy3/frame.py" in names
     assert "tidy3/verbs.py" in names
+    assert "tidy3/tidyselect.py" in names
+    assert "tidy3/join_spec.py" in names
+    assert "tidy3/bench_suite.py" in names
     assert "tidy3/craft.py" in names
     assert stamp.startswith(__version__ + "-")
 

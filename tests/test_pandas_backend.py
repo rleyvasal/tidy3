@@ -239,6 +239,79 @@ def test_count_uses_existing_groups(cars):
         assert out.set_index("cyl")["n"].to_dict() == {6: 3, 4: 1, 8: 2}
 
 
+def test_count_weight_sort_name_collision_and_group_metadata():
+    from tidy3 import tally
+
+    data = pd.DataFrame(
+        {
+            "g": ["a", "a", "b"],
+            "h": [1, 2, 1],
+            "w": [2, 3, 9],
+            "n": [0, 0, 0],
+            "nn": [0, 0, 0],
+        }
+    )
+    for backend in ("polars", "pandas"):
+        counted = tidy(data, backend=backend) >> group_by("g") >> count(
+            wt="w", sort=True
+        )
+        assert counted._groups == ["g"]
+        out = counted.collect(as_="pandas")
+        assert list(out.columns) == ["g", "nnn"]
+        assert out["g"].tolist() == ["b", "a"]
+        assert out["nnn"].tolist() == [9, 5]
+
+        tallied = tidy(data, backend=backend) >> group_by("g", "h") >> tally()
+        assert tallied._groups == ["g"]
+
+    with pytest.raises(TypeError):
+        tally("g")
+
+
+@pytest.mark.parametrize("rows, expected", [(1, 0), (3, 1), (5, 2), (7, 3)])
+def test_sample_frac_rounds_towards_zero_on_both_backends(rows, expected):
+    from tidy3 import sample_frac
+
+    data = pd.DataFrame({"x": range(rows)})
+    for backend in ("polars", "pandas"):
+        out = (tidy(data, backend=backend) >> sample_frac(0.5, seed=3)).collect()
+        assert len(out) == expected
+
+
+def test_negative_sample_sizes_select_the_complement():
+    from tidy3 import sample_frac
+
+    data = pd.DataFrame({"x": range(8)})
+    for backend in ("polars", "pandas"):
+        by_n = (tidy(data, backend=backend) >> sample_n(-2, seed=3)).collect()
+        by_frac = (
+            tidy(data, backend=backend) >> sample_frac(-0.25, seed=3)
+        ).collect()
+        assert len(by_n) == 6
+        assert len(by_frac) == 6
+
+
+def test_grouped_sample_frac_truncates_within_each_group():
+    from tidy3 import sample_frac
+
+    data = pd.DataFrame({"g": ["a", "b", "b", "c", "c", "c", "c"]})
+    for backend in ("polars", "pandas"):
+        out = (
+            tidy(data, backend=backend)
+            >> group_by("g")
+            >> sample_frac(0.5, seed=3)
+        ).collect(as_="pandas")
+        assert out["g"].value_counts().to_dict() == {"c": 2, "b": 1}
+
+
+def test_distinct_keeps_first_occurrence_order_on_both_backends():
+    data = pd.DataFrame({"x": [3, 1, 2, 1, 3], "y": list("abcde")})
+    for backend in ("polars", "pandas"):
+        out = (tidy(data, backend=backend) >> distinct("x")).collect(as_="pandas")
+        assert out["x"].tolist() == [3, 1, 2]
+        assert out["y"].tolist() == ["a", "b", "c"]
+
+
 def test_backend_option_default(cars):
     from tidy3 import options
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 import polars as pl
 import pytest
 
@@ -61,6 +62,42 @@ def test_inner_join():
     right = pl.DataFrame({"id": [1, 2], "w": ["a", "b"]})
     out = (tidy(left) >> inner_join(right, on="id")).collect()
     assert out.height == 2
+
+
+@pytest.mark.parametrize("backend", ["polars", "pandas"])
+def test_natural_join_uses_common_columns(backend):
+    left = pd.DataFrame({"id": [1, 2, 3], "v": [10, 20, 30]})
+    right = pd.DataFrame({"id": [1, 2], "w": ["a", "b"]})
+
+    out = (tidy(left, backend=backend) >> left_join(right)).collect(as_="pandas")
+
+    assert out["id"].tolist() == [1, 2, 3]
+    assert out["w"].iloc[:2].tolist() == ["a", "b"]
+    assert pd.isna(out["w"].iloc[2])
+
+
+def test_join_converts_tidyframe_from_the_other_backend():
+    left_pd = pd.DataFrame({"id": [1, 2, 3], "v": [10, 20, 30]})
+    right_pd = pd.DataFrame({"id": [1, 2], "w": ["a", "b"]})
+
+    polars_out = (
+        tidy(left_pd, backend="polars")
+        >> left_join(tidy(right_pd, backend="pandas"), on="id")
+    ).collect(as_="pandas")
+    pandas_out = (
+        tidy(left_pd, backend="pandas")
+        >> left_join(tidy(right_pd, backend="polars"), on="id")
+    ).collect(as_="pandas")
+
+    pd.testing.assert_frame_equal(polars_out, pandas_out, check_dtype=False)
+
+
+@pytest.mark.parametrize("backend", ["polars", "pandas"])
+def test_natural_join_requires_at_least_one_common_column(backend):
+    left = pd.DataFrame({"id": [1, 2]})
+    right = pd.DataFrame({"other": [1, 2]})
+    with pytest.raises(ValueError, match="no common columns"):
+        tidy(left, backend=backend) >> inner_join(right)
 
 
 def test_with_polars_escape():
