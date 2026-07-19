@@ -115,6 +115,45 @@ ln -s ../../tidy3 /path/to/gpudev/addons/tidy3   # if needed
 | Partial | `partial_run`, `maybe_rewrite_cell`, `normalize_pipe_source` |
 | Escape | `TidyFrame.with_polars(fn)` |
 
+## Backends
+
+The default engine is **Polars lazy**. For 1:1 engine comparisons (e.g.
+against datar, which is pandas-only) the same pipeline also runs on an
+**eager pandas backend**:
+
+```python
+tidy(df, backend="pandas") >> filter(col("x") > 0) >> ...   # per-frame
+options(backend="pandas")                                    # session default
+```
+
+Expressions (`col("x") * 2`, `mean("y")`, comparisons, `cum_sum`, …) are
+backend-neutral: they compile to `pl.Expr` on polars and evaluate natively on
+pandas, with dplyr window semantics after `group_by` on both. The pandas
+backend covers the documented verb/expression subset; anything
+polars-specific raises a clear error pointing back to `backend="polars"`.
+
+## Benchmark vs datar
+
+```python
+from tidy3 import bench
+bench.run(rows=10_000_000)        # pip install datar datar-pandas for the datar row
+```
+
+Apple-silicon laptop, 10M rows × 100 groups, filter→mutate→group_by→summarise→arrange:
+
+| engine | time | vs fastest |
+|---|---|---|
+| polars (raw lazy) | 39.7ms | 1.0x |
+| **tidy3[polars]** | 45.5ms | 1.1x |
+| pandas (raw) | 59.9ms | 1.5x |
+| **tidy3[pandas]** | 103.9ms | 2.6x |
+| datar[pandas] | 162.5ms | 4.1x |
+
+Same engine, same pipeline: tidy3's pandas backend is ~1.6x faster than
+datar; the polars backend is ~3.6x faster, with near-zero wrapper overhead.
+Under `%gpu`, run the same `bench.run(...)` on the remote kernel
+(`!uv pip install datar datar-pandas` there first for the datar row).
+
 ## Notes
 
 - **Grouped semantics are dplyr's**: after `group_by`, `mutate`/`filter`/

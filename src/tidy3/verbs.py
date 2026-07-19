@@ -1,10 +1,28 @@
-"""dplyr-style verbs as pipeable objects (``df >> filter(...)``)."""
+"""dplyr-style verbs as pipeable objects (``df >> filter(...)``).
+
+Each verb dispatches on the frame's backend: polars (lazy — expressions are
+compiled to ``pl.Expr``) or pandas (eager — expressions are evaluated by
+``tidy3.pandas_engine``).
+"""
 
 from __future__ import annotations
 
 from typing import Any, Callable
 
 import polars as pl
+
+from tidy3.expr import Expr, to_polars
+
+
+def _plx(v: Any) -> Any:
+    """Compile a tidy3 Expr for polars; pass everything else through."""
+    return to_polars(v) if isinstance(v, Expr) else v
+
+
+def _pe():
+    from tidy3 import pandas_engine
+
+    return pandas_engine
 
 
 class Verb:
@@ -30,7 +48,7 @@ class Verb:
 
 
 def _windowed(expr: Any, groups: list[str] | None) -> Any:
-    """dplyr grouped semantics: evaluate the expression per group (window)."""
+    """dplyr grouped semantics on polars: evaluate the expression per group."""
     if groups and isinstance(expr, pl.Expr):
         return expr.over(groups)
     return expr
@@ -46,9 +64,13 @@ def filter(*predicates: Any) -> Verb:  # noqa: A001
         raise TypeError("filter() requires at least one predicate")
 
     def _apply(tf):
-        expr = predicates[0]
+        if tf._backend == "pandas":
+            return tf._with_pdf(
+                _pe().do_filter(tf._pdf, predicates, tf._groups), groups=tf._groups
+            )
+        expr = _plx(predicates[0])
         for p in predicates[1:]:
-            expr = expr & p
+            expr = expr & _plx(p)
         return tf._with_lf(tf._lf.filter(_windowed(expr, tf._groups)), groups=tf._groups)
 
     return Verb(_apply, "filter")
@@ -65,7 +87,11 @@ def mutate(**kwargs: Any) -> Verb:
         raise TypeError("mutate() requires at least one assignment")
 
     def _apply(tf):
-        exprs = {k: _windowed(v, tf._groups) for k, v in kwargs.items()}
+        if tf._backend == "pandas":
+            return tf._with_pdf(
+                _pe().do_mutate(tf._pdf, kwargs, tf._groups), groups=tf._groups
+            )
+        exprs = {k: _windowed(_plx(v), tf._groups) for k, v in kwargs.items()}
         return tf._with_lf(tf._lf.with_columns(**exprs), groups=tf._groups)
 
     return Verb(_apply, "mutate")
@@ -77,11 +103,14 @@ def transmute(**kwargs: Any) -> Verb:
         raise TypeError("transmute() requires at least one assignment")
 
     def _apply(tf):
-        exprs = {k: _windowed(v, tf._groups) for k, v in kwargs.items()}
-        lf = tf._lf.with_columns(**exprs)
         keep = list(kwargs.keys())
         if tf._groups:
             keep = list(dict.fromkeys([*tf._groups, *keep]))
+        if tf._backend == "pandas":
+            pdf = _pe().do_mutate(tf._pdf, kwargs, tf._groups)
+            return tf._with_pdf(pdf[keep], groups=tf._groups)
+        exprs = {k: _windowed(_plx(v), tf._groups) for k, v in kwargs.items()}
+        lf = tf._lf.with_columns(**exprs)
         return tf._with_lf(lf.select(keep), groups=tf._groups)
 
     return Verb(_apply, "transmute")
@@ -100,7 +129,9 @@ def select(*cols: Any) -> Verb:
         if tf._groups:
             named = {c for c in sel if isinstance(c, str)}
             sel = [*(g for g in tf._groups if g not in named), *sel]
-        return tf._with_lf(tf._lf.select(*sel), groups=tf._groups)
+        if tf._backend == "pandas":
+            return tf._with_pdf(_pe().do_select(tf._pdf, tuple(sel)), groups=tf._groups)
+        return tf._with_lf(tf._lf.select(*[_plx(c) for c in sel]), groups=tf._groups)
 
     return Verb(_apply, "select")
 
@@ -113,6 +144,8 @@ def drop(*cols: str) -> Verb:
                 raise ValueError(
                     f"drop(): cannot drop grouping column(s) {bad}; ungroup() first"
                 )
+        if tf._backend == "pandas":
+            return tf._with_pdf(tf._pdf.drop(columns=list(cols)), groups=tf._groups)
         return tf._with_lf(tf._lf.drop(*cols), groups=tf._groups)
 
     return Verb(_apply, "drop")
@@ -121,11 +154,13 @@ def drop(*cols: str) -> Verb:
 def rename(**kwargs: str) -> Verb:
     """Rename columns: ``rename(new=old)`` (dplyr style)."""
     # dplyr: rename(new_name = old_name) → mapping new←old
-    # polars: rename({old: new})
+    # polars/pandas: {old: new}
     mapping = {old: new for new, old in kwargs.items()}
 
     def _apply(tf):
         groups = [mapping.get(g, g) for g in tf._groups] if tf._groups else None
+        if tf._backend == "pandas":
+            return tf._with_pdf(tf._pdf.rename(columns=mapping), groups=groups)
         return tf._with_lf(tf._lf.rename(mapping), groups=groups)
 
     return Verb(_apply, "rename")
@@ -136,13 +171,17 @@ def arrange(*keys: Any) -> Verb:
         raise TypeError("arrange() requires at least one key")
 
     def _apply(tf):
-        return tf._with_lf(tf._lf.sort(*keys), groups=tf._groups)
+        if tf._backend == "pandas":
+            return tf._with_pdf(_pe().do_arrange(tf._pdf, keys), groups=tf._groups)
+        return tf._with_lf(tf._lf.sort(*[_plx(k) for k in keys]), groups=tf._groups)
 
     return Verb(_apply, "arrange")
 
 
 def distinct(*cols: str) -> Verb:
     def _apply(tf):
+        if tf._backend == "pandas":
+            return tf._with_pdf(_pe().do_distinct(tf._pdf, cols), groups=tf._groups)
         if cols:
             return tf._with_lf(tf._lf.unique(subset=list(cols)), groups=tf._groups)
         return tf._with_lf(tf._lf.unique(), groups=tf._groups)
@@ -155,6 +194,8 @@ def group_by(*cols: str) -> Verb:
         raise TypeError("group_by() requires at least one column")
 
     def _apply(tf):
+        if tf._backend == "pandas":
+            return tf._with_pdf(tf._pdf, groups=list(cols))
         return tf._with_lf(tf._lf, groups=list(cols))
 
     return Verb(_apply, "group_by")
@@ -162,6 +203,8 @@ def group_by(*cols: str) -> Verb:
 
 def ungroup() -> Verb:
     def _apply(tf):
+        if tf._backend == "pandas":
+            return tf._with_pdf(tf._pdf, groups=None)
         return tf._with_lf(tf._lf, groups=None)
 
     return Verb(_apply, "ungroup")
@@ -173,15 +216,17 @@ def summarise(**kwargs: Any) -> Verb:
         raise TypeError("summarise() requires at least one aggregation")
 
     def _apply(tf):
-        aggs = list(kwargs.values())
-        names = list(kwargs.keys())
-        # Ensure named aggregations
+        if tf._backend == "pandas":
+            return tf._with_pdf(
+                _pe().do_summarise(tf._pdf, kwargs, tf._groups), groups=None
+            )
         named = []
-        for name, expr in zip(names, aggs):
-            if isinstance(expr, pl.Expr):
-                named.append(expr.alias(name))
+        for name, expr in kwargs.items():
+            e = _plx(expr)
+            if isinstance(e, pl.Expr):
+                named.append(e.alias(name))
             else:
-                named.append(pl.lit(expr).alias(name))
+                named.append(pl.lit(e).alias(name))
         if tf._groups:
             lf = tf._lf.group_by(tf._groups).agg(named)
             return tf._with_lf(lf, groups=None)
@@ -198,6 +243,8 @@ def count(*cols: str, name: str = "n") -> Verb:
     """Count rows, optionally by columns."""
 
     def _apply(tf):
+        if tf._backend == "pandas":
+            return tf._with_pdf(_pe().do_count(tf._pdf, cols, name), groups=None)
         if cols:
             lf = tf._lf.group_by(list(cols)).len(name)
             return tf._with_lf(lf, groups=None)
@@ -211,6 +258,8 @@ def head(n: int = 10) -> Verb:
     """First *n* rows — per group when grouped (dplyr ``slice_head``)."""
 
     def _apply(tf):
+        if tf._backend == "pandas":
+            return tf._with_pdf(_pe().do_head(tf._pdf, n, tf._groups), groups=tf._groups)
         if tf._groups:
             pred = pl.int_range(pl.len()).over(tf._groups) < n
             return tf._with_lf(tf._lf.filter(pred), groups=tf._groups)
@@ -223,13 +272,17 @@ slice_head = head
 
 
 def sample_n(n: int, *, seed: int | None = None) -> Verb:
-    """Random *n* rows (per group when grouped), fully lazy.
+    """Random *n* rows (per group when grouped), lazy on polars.
 
-    Implemented as a shuffled-index filter so the plan never materializes
-    the whole dataset; original row order is preserved.
+    Polars: a shuffled-index filter, so the plan never materializes the
+    whole dataset and original row order is preserved.
     """
 
     def _apply(tf):
+        if tf._backend == "pandas":
+            return tf._with_pdf(
+                _pe().do_sample_n(tf._pdf, n, seed, tf._groups), groups=tf._groups
+            )
         pred = pl.int_range(pl.len()).shuffle(seed=seed) < n
         return tf._with_lf(tf._lf.filter(_windowed(pred, tf._groups)), groups=tf._groups)
 
@@ -237,30 +290,53 @@ def sample_n(n: int, *, seed: int | None = None) -> Verb:
 
 
 def sample_frac(frac: float, *, seed: int | None = None) -> Verb:
-    """Random fraction of rows (per group when grouped), fully lazy."""
+    """Random fraction of rows (per group when grouped), lazy on polars."""
 
     def _apply(tf):
+        if tf._backend == "pandas":
+            return tf._with_pdf(
+                _pe().do_sample_frac(tf._pdf, frac, seed, tf._groups), groups=tf._groups
+            )
         pred = pl.int_range(pl.len()).shuffle(seed=seed) < pl.len() * frac
         return tf._with_lf(tf._lf.filter(_windowed(pred, tf._groups)), groups=tf._groups)
 
     return Verb(_apply, "sample_frac")
 
 
-def left_join(right: Any, *, on: str | list[str] | None = None, **kwargs: Any) -> Verb:
+def _right_frame(right: Any, backend: str) -> Any:
+    """Resolve the right side of a join for the given backend."""
     from tidy3.frame import TidyFrame, tidy
 
+    if backend == "pandas":
+        if isinstance(right, TidyFrame):
+            return right.collect(as_="pandas")
+        import pandas as pd
+
+        if isinstance(right, pd.DataFrame):
+            return right
+        return tidy(right, backend="pandas")._pdf
+    return right._lf if isinstance(right, TidyFrame) else tidy(right)._lf
+
+
+def left_join(right: Any, *, on: str | list[str] | None = None, **kwargs: Any) -> Verb:
     def _apply(tf):
-        r = right._lf if isinstance(right, TidyFrame) else tidy(right)._lf
+        r = _right_frame(right, tf._backend)
+        if tf._backend == "pandas":
+            return tf._with_pdf(
+                _pe().do_join(tf._pdf, r, on, "left", **kwargs), groups=tf._groups
+            )
         return tf._with_lf(tf._lf.join(r, on=on, how="left", **kwargs), groups=tf._groups)
 
     return Verb(_apply, "left_join")
 
 
 def inner_join(right: Any, *, on: str | list[str] | None = None, **kwargs: Any) -> Verb:
-    from tidy3.frame import TidyFrame, tidy
-
     def _apply(tf):
-        r = right._lf if isinstance(right, TidyFrame) else tidy(right)._lf
+        r = _right_frame(right, tf._backend)
+        if tf._backend == "pandas":
+            return tf._with_pdf(
+                _pe().do_join(tf._pdf, r, on, "inner", **kwargs), groups=tf._groups
+            )
         return tf._with_lf(tf._lf.join(r, on=on, how="inner", **kwargs), groups=tf._groups)
 
     return Verb(_apply, "inner_join")
@@ -276,7 +352,7 @@ def collect(as_: str = "polars") -> Verb:
 
 
 def peek(n: int | None = None) -> Verb:
-    """Print a Polars-style preview mid-pipe and pass the frame through.
+    """Print a preview mid-pipe and pass the frame through.
 
     Useful while exploring a long pipe in one cell::
 

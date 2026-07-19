@@ -34,18 +34,35 @@ def _dtype_short(t: pl.DataType) -> str:
         return str(t)
 
 
+def _adapt(df):
+    """(height, width, names, dtypes, rows_fn) for polars or pandas frames."""
+    if isinstance(df, pl.DataFrame):
+        return (
+            df.height,
+            df.width,
+            list(df.columns),
+            [_dtype_short(t) for t in df.dtypes],
+            lambda n: df.head(n).rows(),
+        )
+    # pandas (duck-typed; avoids a hard import)
+    return (
+        len(df),
+        df.shape[1],
+        [str(c) for c in df.columns],
+        [str(t) for t in df.dtypes],
+        lambda n: list(df.head(n).itertuples(index=False, name=None)),
+    )
+
+
 def df_to_html(
-    df: pl.DataFrame,
+    df,
     *,
     caption: str | None = None,
     max_rows: int = 25,
     max_cols: int = 20,
 ) -> str:
-    """Render *df* as an HTML table with all styling inline."""
-    height, width = df.height, df.width
-
-    names = list(df.columns)
-    dtypes = [_dtype_short(t) for t in df.dtypes]
+    """Render a polars or pandas frame as an HTML table, all styling inline."""
+    height, width, names, dtypes, rows_fn = _adapt(df)
     cols = list(range(width))
     col_gap = None
     if width > max_cols:
@@ -55,7 +72,7 @@ def df_to_html(
         col_gap = left  # position of the "…" column within `cols`
 
     n_rows = min(height, max_rows)
-    rows = df.head(n_rows).rows()
+    rows = rows_fn(n_rows)
 
     def _tr(cells: list[str], style: str) -> str:
         tds = []

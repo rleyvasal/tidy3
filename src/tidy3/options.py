@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 class Options:
     preview_rows: int = 10
     preview: bool = True
+    backend: str = "polars"  # default engine for tidy(): "polars" | "pandas"
 
 
 _OPTIONS = Options()
