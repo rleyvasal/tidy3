@@ -199,6 +199,34 @@ def test_unsupported_method_raises_clearly(cars):
         )
 
 
+def test_summarise_derived_base_fast_path_parity(cars):
+    # mean(col*2) → derived-series base, still one groupby.agg pass
+    def pipe(tf):
+        return (
+            tf >> group_by("cyl") >> summarise(avg2=mean(col("mpg") * 2)) >> collect(as_="pandas")
+        )
+
+    a = pipe(tidy(cars))
+    b = pipe(tidy(cars, backend="pandas"))
+    pd.testing.assert_frame_equal(canonical(a), canonical(b), check_dtype=False)
+
+
+def test_summarise_nested_agg_fallback_parity(cars):
+    # mean(x - mean(x)): inner mean broadcasts per group → general evaluator
+    def pipe(tf):
+        return (
+            tf
+            >> group_by("cyl")
+            >> summarise(dev=mean(col("mpg") - mean("mpg")))
+            >> collect(as_="pandas")
+        )
+
+    a = pipe(tidy(cars))
+    b = pipe(tidy(cars, backend="pandas"))
+    pd.testing.assert_frame_equal(canonical(a), canonical(b), check_dtype=False)
+    assert b["dev"].abs().max() == pytest.approx(0.0)  # mean deviation ≡ 0
+
+
 def test_backend_option_default(cars):
     from tidy3 import options
 

@@ -107,9 +107,12 @@ def _ev(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str) -> A
 
 def _ev_call(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str) -> Any:
     _, name, base, args, kwargs = node
-    b = _ev(base, df, groups, mode)
-    args = tuple(eval_expr(a, df, groups, mode) for a in args)
-    kwargs = {k: eval_expr(v, df, groups, mode) for k, v in kwargs.items()}
+    # dplyr nesting: inside an aggregation, inner aggregates broadcast per
+    # group (window); only the outermost call reduces. mean(x - mean(x))
+    base_mode = "window" if name in _AGG else mode
+    b = _ev(base, df, groups, base_mode)
+    args = tuple(eval_expr(a, df, groups, base_mode) for a in args)
+    kwargs = {k: eval_expr(v, df, groups, base_mode) for k, v in kwargs.items()}
 
     if name in _AGG:
         pdname = _AGG[name]
@@ -166,7 +169,72 @@ def do_mutate(df: pd.DataFrame, kwargs: dict, groups: list[str] | None) -> pd.Da
     return df.assign(**new)
 
 
+def _has_agg(x) -> bool:
+    """True if the node tree contains an aggregation (n(), mean(), …)."""
+    if isinstance(x, Expr):
+        return _has_agg(x.node)
+    if not (isinstance(x, tuple) and x and isinstance(x[0], str)):
+        return False
+    if x[0] == "n" or (x[0] == "call" and x[1] in _AGG):
+        return True
+    if x[0] == "call":
+        _, _, base, args, kwargs = x
+        return (
+            _has_agg(base)
+            or any(_has_agg(a) for a in args)
+            or any(_has_agg(v) for v in kwargs.values())
+        )
+    return any(_has_agg(p) for p in x[1:])
+
+
+def _fast_summarise(df: pd.DataFrame, kwargs: dict, groups: list[str]) -> pd.DataFrame | None:
+    """Single groupby().agg() pass when every kwarg is a plain aggregation.
+
+    This matches hand-written pandas performance (one key factorization for
+    all aggregates). Returns None when any expression needs the general
+    evaluator (e.g. aggregates nested inside the aggregated expression).
+    """
+    named: dict[str, tuple[str, str]] = {}
+    extra: dict[str, pd.Series] = {}
+    for k, v in kwargs.items():
+        node = v.node if isinstance(v, Expr) else None
+        if node is None:
+            return None
+        if node[0] == "n":
+            extra.setdefault("__tidy3_ones", pd.Series(1, index=df.index))
+            named[k] = ("__tidy3_ones", "size")
+            continue
+        if not (node[0] == "call" and node[1] in _AGG and not node[3] and not node[4]):
+            return None
+        base = node[2]
+        if _has_agg(base):
+            return None  # e.g. mean(x - mean(x)): inner mean is per-group
+        if base[0] == "col":
+            src = base[1]
+        else:
+            src = f"__tidy3_b_{k}"
+            try:
+                s = _ev(base, df, None, "window")
+            except NotImplementedError:
+                return None
+            if not isinstance(s, pd.Series):
+                return None
+            extra[src] = s
+        named[k] = (src, _AGG[node[1]])
+    work = df.assign(**extra) if extra else df
+    out = (
+        work.groupby(list(groups), sort=False, **_GB_KW)
+        .agg(**{k: pd.NamedAgg(column=c, aggfunc=f) for k, (c, f) in named.items()})
+        .reset_index()
+    )
+    return out
+
+
 def do_summarise(df: pd.DataFrame, kwargs: dict, groups: list[str] | None) -> pd.DataFrame:
+    if groups:
+        fast = _fast_summarise(df, kwargs, groups)
+        if fast is not None:
+            return fast
     vals = {k: eval_expr(v, df, groups, "agg") for k, v in kwargs.items()}
     if groups:
         series = {k: v for k, v in vals.items() if isinstance(v, pd.Series)}

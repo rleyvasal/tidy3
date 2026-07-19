@@ -144,19 +144,31 @@ Apple-silicon laptop, 10M rows × 100 groups, filter→mutate→group_by→summa
 
 | engine | time | vs fastest |
 |---|---|---|
-| **tidy3[polars]** | 37.9ms | 1.0x |
-| polars (raw lazy) | 39.3ms | 1.0x |
-| pandas (raw) | 59.4ms | 1.6x |
-| **tidy3[pandas]** | 102.1ms | 2.7x |
-| datar[pandas] | 164.7ms | 4.4x |
+| **tidy3[polars]** | 40.6ms | 1.0x |
+| polars (raw lazy) | 41.5ms | 1.0x |
+| pandas (raw) | 60.1ms | 1.5x |
+| **tidy3[pandas]** | 60.8ms | 1.5x |
+| datar[pandas] | 166.3ms | 4.1x |
 
-Per operation (`run_ops`, ratios vs raw pandas): tidy3's pandas wrapper is
-free on filter/mutate/arrange (1.0–1.1x, vs datar's 1.1–2.5x); its
-`summarise` is 2.3x (one groupby pass per aggregate, vs datar's 3.9x).
-tidy3[polars] beats raw pandas on every non-trivial op — 0.7x on
-group+summarise and 0.2x on sort — including `to_pandas` conversion.
-Under `%gpu`, run the same `bench.run(...)` on the remote kernel
-(`!uv pip install datar datar-pandas` there first for the datar row).
+Per operation (`run_ops`; ratios vs raw pandas; tidy3[polars] includes plan
+execution + `to_pandas`):
+
+| op | pandas | tidy3[pandas] | datar | tidy3[polars] |
+|---|---|---|---|---|
+| filter x>0 | 27.4ms | 22.9ms (0.8x) | 25.6ms (0.9x) | 25.1ms (0.9x) |
+| mutate z=x*2+y | 4.8ms | 5.1ms (1.1x) | 13.0ms (2.7x) | 41.9ms (8.7x)¹ |
+| group+summarise | 66.3ms | 67.7ms (**1.0x**) | 264.2ms (4.0x) | 54.5ms (**0.8x**) |
+| arrange y | 1141.8ms | 1308.9ms (1.1x) | 1363.6ms (1.2x) | 240.6ms (**0.2x**) |
+
+¹ the op itself is ~free in polars; timed in isolation, the cost is
+materializing 40M values back to pandas — in a real lazy pipeline that
+happens once at the end (see the pipeline table).
+
+The takeaway: **tidy3's wrapper is free on both engines** (simple
+aggregations batch into one `groupby().agg()` pass, matching hand-written
+pandas), datar pays 2.7–4x everywhere it matters, and the polars backend
+wins outright. Under `%gpu`, run the same `bench.run(...)` on the remote
+kernel (`!uv pip install datar datar-pandas` there first for the datar row).
 
 ## Notes
 
