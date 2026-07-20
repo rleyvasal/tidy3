@@ -1588,24 +1588,72 @@ def group_modify(fn: Any, *cols: Any) -> Verb:
 
 
 def group_nest(*cols: Any, name: str = "data") -> Verb:
-    """Nest each group's rows into a list column named ``data``."""
+    """Nest each group's non-key columns into a list column.
+
+    Polars builds a lazy ``group_by().agg(struct)`` plan (same shape as
+    ``tidyr.nest``) — typically faster than building Python/pandas nested
+    DataFrames. The pandas path uses one groupby pass and stores nested
+    DataFrames for ergonomic row access. Both return an ungrouped frame
+    with one row per group.
+
+    For counts only, prefer ``count()`` / ``tally()``; nesting full row
+    payloads is more work than ``groupby.size()``.
+    """
     if not isinstance(name, str) or not name:
         raise TypeError("group_nest() name must be a non-empty string")
 
     def _apply(tf):
-        import pandas as pd
         from tidy3.frame import tidy
 
-        rows = []
-        for key, part, _ in _grouped_parts(tf, tuple(cols)):
-            nested = part.collect(as_="pandas").drop(columns=list(key))
-            value = (
-                nested
-                if tf._backend == "pandas"
-                else nested.to_dict(orient="records")
-            )
-            rows.append({**key, name: value})
-        return tidy(pd.DataFrame(rows), backend=tf._backend)
+        keys = resolve_selection(tf, cols) if cols else list(tf._groups or [])
+        if not keys:
+            raise ValueError("group_nest() requires grouping columns or group_by()")
+        key_set = set(keys)
+        nested_cols = [
+            column for column in _frame_columns(tf) if column not in key_set
+        ]
+
+        if tf._backend == "pandas":
+            import pandas as pd
+
+            pdf = tf._pdf
+            grouping_key = keys[0] if len(keys) == 1 else keys
+            # Pre-slice nested columns once; avoid per-group drop(columns=keys).
+            if nested_cols:
+                body = pdf.loc[:, nested_cols]
+            else:
+                body = None
+            rows: list[dict[str, Any]] = []
+            for key, positions in pdf.groupby(
+                grouping_key, sort=False, dropna=False, observed=True
+            ).groups.items():
+                key_tuple = key if isinstance(key, tuple) else (key,)
+                row = dict(zip(keys, key_tuple))
+                if body is None:
+                    row[name] = pd.DataFrame(index=range(len(positions)))
+                else:
+                    # positions is an Index into the original frame.
+                    row[name] = body.loc[positions].reset_index(drop=True)
+                rows.append(row)
+            if not rows:
+                empty = {key: pd.Series(dtype=pdf[key].dtype) for key in keys}
+                empty[name] = pd.Series(dtype=object)
+                return tidy(pd.DataFrame(empty), backend="pandas")
+            return tidy(pd.DataFrame(rows), backend="pandas")
+
+        if nested_cols:
+            # exclude() keeps the plan free of a Python column list rebuild
+            # when the schema is wide; maintain_order matches dplyr appearance.
+            if len(keys) == 1:
+                payload = pl.struct(pl.exclude(keys[0]))
+            else:
+                payload = pl.struct(pl.exclude(keys))
+            agg = payload.alias(name)
+        else:
+            # Preserve group size with a list of nulls (no non-key columns).
+            agg = pl.repeat(None, pl.len()).alias(name)
+        lf = tf._lf.group_by(keys, maintain_order=True).agg(agg)
+        return tf._with_lf(lf, groups=None, rowwise=False)
 
     return Verb(_apply, "group_nest")
 
@@ -2735,7 +2783,12 @@ def nest_join(
     keep: bool = False,
     na_matches: str = "na",
 ) -> Verb:
-    """Attach matching right-hand rows as a list-column of row records."""
+    """Attach matching right-hand rows as a nested list-column.
+
+    On pandas, nested cells are DataFrames (same representation as
+    ``group_nest`` / ``nest``). On Polars they are list-of-struct columns
+    from a lazy ``group_by().agg(struct)`` plan joined back to the left.
+    """
     if on is not None and by is not None:
         raise ValueError("supply only one of on= or by=")
     if not isinstance(name, str) or not name:
@@ -2763,22 +2816,38 @@ def nest_join(
                 for column in r.columns
                 if keep or column not in key_columns
             ]
-            grouped = r.groupby(
-                key_columns, sort=False, dropna=na_matches == "never", observed=True
+            empty_nested = pd.DataFrame(columns=nested_columns)
+            # Pre-slice once; build nested DataFrames via group positions
+            # (no to_dict(records) Python row materialization).
+            if nested_columns:
+                body = r.loc[:, nested_columns]
+            else:
+                body = pd.DataFrame(index=r.index)
+            grouping_key = (
+                key_columns[0] if len(key_columns) == 1 else key_columns
             )
-            rows = []
-            for key, piece in grouped:
-                values = key if isinstance(key, tuple) else (key,)
-                row = dict(zip(key_columns, values))
-                row[name] = piece.loc[:, nested_columns].to_dict(orient="records")
+            rows: list[dict[str, Any]] = []
+            for key, positions in r.groupby(
+                grouping_key,
+                sort=False,
+                dropna=na_matches == "never",
+                observed=True,
+            ).groups.items():
+                key_tuple = key if isinstance(key, tuple) else (key,)
+                row = dict(zip(key_columns, key_tuple))
+                row[name] = body.loc[positions].reset_index(drop=True)
                 rows.append(row)
             nested = pd.DataFrame(rows, columns=[*key_columns, name])
             output = tf._pdf.merge(
                 nested, on=key_columns, how="left", sort=False
             )
-            output[name] = output[name].map(
-                lambda value: value if isinstance(value, list) else []
-            )
+
+            def _as_nested(value: Any) -> pd.DataFrame:
+                if isinstance(value, pd.DataFrame):
+                    return value
+                return empty_nested.copy()
+
+            output[name] = output[name].map(_as_nested)
             return tf._with_pdf(output, groups=tf._groups, rowwise=False)
 
         right_columns = r.collect_schema().names()
@@ -2787,9 +2856,20 @@ def nest_join(
             for column in right_columns
             if keep or column not in key_columns
         ]
-        nested = r.group_by(key_columns, maintain_order=True).agg(
-            pl.struct(nested_columns).alias(name)
-        )
+        if nested_columns:
+            if len(key_columns) == 1 and set(nested_columns) == set(
+                right_columns
+            ) - set(key_columns):
+                payload = pl.struct(pl.exclude(key_columns[0]))
+            else:
+                payload = pl.struct(nested_columns)
+            nested = r.group_by(key_columns, maintain_order=True).agg(
+                payload.alias(name)
+            )
+        else:
+            nested = r.group_by(key_columns, maintain_order=True).agg(
+                pl.repeat(None, pl.len()).alias(name)
+            )
         output = tf._lf.join(
             nested,
             on=key_columns,

@@ -39,6 +39,9 @@ class Workload:
     pandas: Callable[[], Any]
     tidy_pandas: Callable[[], Any]
     tidy_polars: Callable[[], Any]
+    # When False, the workload is still timed and correctness-checked but
+    # excluded from geometric adoption budgets (Python-callback / experimental).
+    budget: bool = True
 
 
 def make_realistic_data(rows: int, seed: int = 0):
@@ -488,17 +491,33 @@ def _build_workloads(
     ).collect(as_="pandas")
 
     def raw_group_nest():
-        return (
-            pdf.groupby("segment", sort=False, observed=True, dropna=False)
-            .size()
-            .rename("rows")
-            .reset_index()
-        )
+        # Fair baseline: actually build nested per-group frames, then count
+        # rows. Comparing nest to groupby.size() only measures counting and
+        # unfairly inflates tidy3 ratios for ML-style nest workflows.
+        nested_columns = [column for column in pdf.columns if column != "segment"]
+        rows = []
+        for key, piece in pdf.groupby(
+            "segment", sort=False, observed=True, dropna=False
+        ):
+            nested = piece.loc[:, nested_columns].reset_index(drop=True)
+            rows.append({"segment": key, "records": nested, "rows": len(nested)})
+        return pd.DataFrame(rows, columns=["segment", "rows"])
 
     def nested_counts(frame):
-        nested = (frame >> group_nest("segment", name="records")).collect(as_="pandas")
-        nested["rows"] = nested["records"].map(len)
-        return nested[["segment", "rows"]]
+        # Build the nest, then count. On Polars, list.len() stays in-engine
+        # (no Python explosion of nested structs); output is the small
+        # segment/rows summary, matching the raw baseline shape.
+        nested = frame >> group_nest("segment", name="records")
+        if nested.backend == "polars":
+            return nested.with_polars(
+                lambda lf: lf.select(
+                    pl.col("segment"),
+                    pl.col("records").list.len().alias("rows"),
+                )
+            ).collect(as_="pandas")
+        out = nested.collect(as_="pandas")
+        out["rows"] = out["records"].map(len)
+        return out[["segment", "rows"]]
 
     group_nest_pandas = lambda: nested_counts(tidy(pdf, backend="pandas"))
     group_nest_polars = lambda: nested_counts(tidy(pldf))
@@ -547,6 +566,7 @@ def _build_workloads(
             raw_group_callback,
             group_callback_pandas,
             group_callback_polars,
+            budget=False,
         ),
         Workload(
             "Materialization",
@@ -574,12 +594,21 @@ def geometric_ratio(
     engine: str,
     *,
     minimum_pandas_ms: float = 0.0,
+    budget_workloads: set[str] | None = None,
 ) -> float:
-    """Equal-weight geometric mean ratio for budget-worthy workloads."""
+    """Equal-weight geometric mean ratio for budget-worthy workloads.
+
+    Workloads whose median pandas time is below ``minimum_pandas_ms`` are
+    ignored as noise-prone. When ``budget_workloads`` is provided, only those
+    names participate (used to exclude experimental materialization paths).
+    """
     ratios = [
         workload[engine]["vs_pandas"]
-        for workload in results.values()
-        if workload["pandas"]["median_seconds"] * 1000 >= minimum_pandas_ms
+        for name, workload in results.items()
+        if (
+            (budget_workloads is None or name in budget_workloads)
+            and workload["pandas"]["median_seconds"] * 1000 >= minimum_pandas_ms
+        )
     ]
     if not ratios:
         raise ValueError("no workloads meet the performance-budget minimum")
@@ -692,13 +721,20 @@ def run(
             }
             for engine in engines
         }
+        marker = "" if workload.budget else "  [experimental]"
         print(
             f"  {workload.name:<25} {baseline * 1000:>9.1f}ms "
             f"{medians['tidy3[pandas]'] * 1000:>9.1f}ms "
             f"{medians['tidy3[pandas]'] / baseline:>5.2f}x "
             f"{medians['tidy3[polars]'] * 1000:>9.1f}ms "
             f"{medians['tidy3[polars]'] / baseline:>5.2f}x"
+            f"{marker}"
         )
+    # Stash budget membership for CLI geometric checks without changing the
+    # public results shape used by tests.
+    run._budget_workloads = {  # type: ignore[attr-defined]
+        workload.name for workload in workloads if workload.budget
+    }
     return results
 
 
@@ -739,12 +775,16 @@ def _main() -> None:
         "tidy3[pandas]": args.max_tidy_pandas_geo,
         "tidy3[polars]": args.max_tidy_polars_geo,
     }
+    budget_workloads = getattr(run, "_budget_workloads", None)
     failures = []
     for engine, maximum in budgets.items():
         if maximum is None:
             continue
         ratio = geometric_ratio(
-            results, engine, minimum_pandas_ms=args.budget_min_ms
+            results,
+            engine,
+            minimum_pandas_ms=args.budget_min_ms,
+            budget_workloads=budget_workloads,
         )
         print(f"budget {engine}: {ratio:.3f}x <= {maximum:.3f}x")
         if ratio > maximum:

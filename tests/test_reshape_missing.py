@@ -313,9 +313,16 @@ def test_nest_and_unnest_nested_records_roundtrip(backend):
     )
 
     nested = frame >> nest("data", cols=["x", "y"])
+    nested_out = as_pandas(nested)
     restored = as_pandas(nested >> unnest("data"))
 
-    assert len(as_pandas(nested)) == 2
+    assert len(nested_out) == 2
+    # pandas nests DataFrames; polars handoff is list/array of row records
+    if backend == "pandas":
+        assert list(nested_out["data"].iloc[0]["x"]) == [1, 2]
+    else:
+        first = list(nested_out["data"].iloc[0])
+        assert [row["x"] for row in first] == [1, 2]
     assert restored.to_dict(orient="list") == {
         "g": ["a", "a", "b"],
         "x": [1, 2, 3],

@@ -594,13 +594,23 @@ def _fast_grouped_window(
         }[name]
         return series_group.rank(method=method, na_option="keep").astype("Int64")
     if name == "cummean":
+        # dplyr: NA propagates (once missing, later group values are NA).
+        # Use vectorized groupby.cummax — SeriesGroupBy.transform(lambda)
+        # is an order-of-magnitude regression on large frames. Non-unique
+        # indexes fall through to the general evaluator.
+        if not df.index.is_unique:
+            return _NO_FAST_WINDOW
         result = series_group.expanding().mean()
         result = result.droplevel(list(range(len(groups))))
-        if df.index.is_unique:
-            missing_seen = series_group.transform(
-                lambda series: series.isna().cummax()
-            )
-            return result.reindex(df.index).mask(missing_seen)
+        if not result.index.equals(df.index):
+            result = result.reindex(df.index)
+        missing_seen = (
+            df[column]
+            .isna()
+            .groupby([df[name] for name in groups], sort=False)
+            .cummax()
+        )
+        return result.mask(missing_seen)
     return _NO_FAST_WINDOW
 
 

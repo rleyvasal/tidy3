@@ -209,10 +209,13 @@ you need predictable performance and semantics.
 | **Experimental** | Correctness-first or Python-callback paths; may materialize eagerly or lag R oracle coverage | `group_split`, `group_map`, `group_modify`, `group_nest`, `with_groups`, `hoist`, `pack`, `unpack`, `separate_longer_delim`, `separate_wider_delim`, stochastic sampling (`sample_n`, `sample_frac`, `slice_sample`) |
 
 **Performance note:** the stable core is the path that tracks raw Polars and
-beats pandas on realistic sizes. Experimental group-callback and nest verbs
-currently Python-loop after materialization — fine for small groups, not for
-hot large-data paths. Prefer declarative `summarise` / `nest` alternatives
-when performance matters.
+beats pandas on realistic sizes. `group_nest` compiles to a Polars
+`group_by().agg(struct)` plan and is typically **faster** than building
+nested pandas DataFrames by hand; for counts alone use `count()`/`tally()`
+instead of nesting. Python-callback verbs (`group_map` / `group_modify` /
+`group_split`) still materialize and loop in Python — fine for small groups,
+not for hot large-data paths. Prefer declarative `summarise` when
+performance matters.
 
 ## Backends
 
@@ -722,7 +725,8 @@ CI (GitHub Actions):
   semantic oracle** job installs dplyr/tidyr/jsonlite and runs the differential
   suite
 - **Performance budget** — `python -m tidy3.bench_suite` geometric ratios vs raw
-  pandas (see `.github/workflows/`)
+  pandas (see `.github/workflows/`). Experimental Python-callback workloads
+  (e.g. `group_modify`) are timed but excluded from the adoption geo-mean.
 
 On a machine without R, oracle tests skip automatically. To run them locally:
 

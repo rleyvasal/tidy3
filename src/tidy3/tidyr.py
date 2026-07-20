@@ -46,6 +46,37 @@ def _result_groups(tf: Any, columns: Iterable[str]) -> list[str] | None:
     return groups or None
 
 
+def _pandas_nested_frames(
+    pdf: Any,
+    identifiers: list[str],
+    nested: list[str],
+    *,
+    column: str,
+) -> Any:
+    """Build one nested DataFrame per group without ``to_dict(records)``.
+
+    Matches ``group_nest``'s pandas representation: nested cells are
+    DataFrames (not lists of dicts), which is far cheaper on wide frames
+    and still unnests via ``unnest()``.
+    """
+    import pandas as pd
+
+    if not identifiers:
+        return pd.DataFrame({column: [pdf.loc[:, nested].reset_index(drop=True)]})
+
+    body = pdf.loc[:, nested]
+    grouping_key = identifiers[0] if len(identifiers) == 1 else identifiers
+    rows: list[dict[str, Any]] = []
+    for key, positions in pdf.groupby(
+        grouping_key, sort=False, dropna=False, observed=True
+    ).groups.items():
+        key_tuple = key if isinstance(key, tuple) else (key,)
+        row = dict(zip(identifiers, key_tuple))
+        row[column] = body.loc[positions].reset_index(drop=True)
+        rows.append(row)
+    return pd.DataFrame(rows, columns=[*identifiers, column])
+
+
 def _is_float_dtype(dtype: Any) -> bool:
     try:
         return dtype.base_type() in {pl.Float32, pl.Float64}
@@ -991,7 +1022,11 @@ def nest(
     cols: Any = None,
     by: Any = None,
 ) -> Verb:
-    """Collapse selected columns into a list-column of row records."""
+    """Collapse selected columns into a nested list-column.
+
+    Polars stores list-of-struct; pandas stores a DataFrame per group
+    (same representation as ``group_nest``).
+    """
     if not isinstance(column, str) or not column:
         raise TypeError("nest() column must be a non-empty string")
     if cols is not None and by is not None:
@@ -1016,27 +1051,21 @@ def nest(
             raise ValueError("nest() selected no columns to nest")
 
         if tf._backend == "pandas":
-            import pandas as pd
-
-            if identifiers:
-                rows = []
-                grouped = tf._pdf.groupby(
-                    identifiers, sort=False, dropna=False, observed=True
-                )
-                for key, piece in grouped:
-                    values = key if isinstance(key, tuple) else (key,)
-                    row = dict(zip(identifiers, values))
-                    row[column] = piece.loc[:, nested].to_dict(orient="records")
-                    rows.append(row)
-                output = pd.DataFrame(rows, columns=[*identifiers, column])
-            else:
-                output = pd.DataFrame(
-                    {column: [tf._pdf.loc[:, nested].to_dict(orient="records")]}
-                )
+            output = _pandas_nested_frames(
+                tf._pdf, identifiers, nested, column=column
+            )
             groups = _result_groups(tf, identifiers)
             return tf._with_pdf(output, groups=groups, rowwise=False)
 
-        records = pl.struct(nested)
+        # Prefer exclude() when nesting "everything except keys" so the plan
+        # tracks the schema without rebuilding a Python name list at collect.
+        if identifiers and set(nested) == set(columns) - set(identifiers):
+            if len(identifiers) == 1:
+                records = pl.struct(pl.exclude(identifiers[0]))
+            else:
+                records = pl.struct(pl.exclude(identifiers))
+        else:
+            records = pl.struct(nested)
         if identifiers:
             output = tf._lf.group_by(
                 identifiers, maintain_order=True
@@ -1135,7 +1164,12 @@ def unnest(
     keep_empty: bool = False,
     names_sep: str | None = None,
 ) -> Verb:
-    """Expand a list-column, widening nested row records when present."""
+    """Expand a list-column, widening nested row records when present.
+
+    On the pandas backend, nested cells may be list/tuple of dicts (legacy /
+    polars-handoff style) or DataFrames (``nest`` / ``group_nest`` /
+    ``nest_join``).
+    """
 
     def _apply(tf):
         columns = _columns(tf)
@@ -1145,6 +1179,59 @@ def unnest(
             import pandas as pd
 
             pdf = tf._pdf.copy(deep=False)
+            sample = next(
+                (
+                    value
+                    for value in pdf[column]
+                    if value is not None and not (isinstance(value, float) and pd.isna(value))
+                ),
+                None,
+            )
+
+            # Nested DataFrames from nest() / group_nest() / nest_join().
+            if isinstance(sample, pd.DataFrame):
+                pieces: list[pd.DataFrame] = []
+                parent_columns = [name for name in pdf.columns if name != column]
+                for _, row in pdf.iterrows():
+                    nested = row[column]
+                    parent = {name: row[name] for name in parent_columns}
+                    if not isinstance(nested, pd.DataFrame) or nested.empty:
+                        if keep_empty:
+                            pieces.append(pd.DataFrame([parent]))
+                        continue
+                    body = nested.reset_index(drop=True)
+                    if names_sep is not None:
+                        body = body.add_prefix(f"{column}{names_sep}")
+                    collisions = set(body.columns) & set(parent_columns)
+                    if collisions:
+                        raise ValueError(
+                            f"unnest() output columns collide: {sorted(collisions)}; "
+                            "supply names_sep"
+                        )
+                    parent_frame = pd.DataFrame(
+                        [parent] * len(body), columns=parent_columns
+                    )
+                    pieces.append(
+                        pd.concat(
+                            [parent_frame.reset_index(drop=True), body],
+                            axis=1,
+                        )
+                    )
+                if not pieces:
+                    return tf._with_pdf(
+                        pdf.iloc[0:0].drop(columns=column),
+                        groups=_result_groups(
+                            tf, [name for name in columns if name != column]
+                        ),
+                        rowwise=False,
+                    )
+                output = pd.concat(pieces, ignore_index=True)
+                return tf._with_pdf(
+                    output,
+                    groups=_result_groups(tf, output.columns),
+                    rowwise=False,
+                )
+
             if not keep_empty:
                 keep = pdf[column].map(
                     lambda value: isinstance(value, (list, tuple))

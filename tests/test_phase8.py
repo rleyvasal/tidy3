@@ -250,7 +250,13 @@ def test_nest_join_preserves_left_rows_and_collects_matches(backend):
     result = left >> nest_join(right, by="id", name="matches")
     out = as_pandas(result)
 
-    assert [[row["value"] for row in rows] for rows in out["matches"]] == [
+    def nested_values(cell):
+        # pandas: nested DataFrame; polars handoff: list/array of structs/dicts
+        if hasattr(cell, "columns") and "value" in getattr(cell, "columns", []):
+            return list(cell["value"])
+        return [row["value"] for row in cell]
+
+    assert [nested_values(rows) for rows in out["matches"]] == [
         [10, 11],
         [20],
         [],
