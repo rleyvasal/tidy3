@@ -34,6 +34,7 @@ _AGG = {
     "mean": "mean", "sum": "sum", "min": "min", "max": "max",
     "median": "median", "std": "std", "var": "var", "count": "count",
     "n_unique": "nunique", "first": "first", "last": "last",
+    "any": "any", "all": "all",
 }
 
 # polars method name → pandas per-row/window method name
@@ -159,11 +160,54 @@ def _ev_func(
     mode: str,
 ) -> Any:
     _, name, raw_args, raw_kwargs = node
+    descending = bool(
+        name
+        in {"row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist", "ntile"}
+        and raw_args
+        and raw_args[0][0] == "desc"
+    )
+    if descending:
+        raw_args = (raw_args[0][1], *raw_args[1:])
     args = tuple(_ev(arg, df, groups, mode) for arg in raw_args)
     kwargs = {key: _ev(value, df, groups, mode) for key, value in raw_kwargs.items()}
 
+    if name == "cur_group_id":
+        group_names = tuple(kwargs.get("groups", ()))
+        if not group_names:
+            return pd.Series(1, index=df.index, dtype="Int64")
+        # Match the stable group ordering used by tidy3's grouped operations.
+        return (
+            df.groupby(list(group_names), sort=True, **_GB_KW)
+            .ngroup()
+            .add(1)
+            .astype("Int64")
+        )
+
+    if name == "n_groups":
+        group_names = tuple(kwargs.get("groups", ()))
+        count = (
+            int(df.groupby(list(group_names), sort=True, **_GB_KW).ngroups)
+            if group_names
+            else 1
+        )
+        return pd.Series(count, index=df.index, dtype="Int64")
+
     if name == "n_distinct":
-        value = _as_series(args[0], df.index)
+        if len(args) == 1:
+            value = _as_series(args[0], df.index)
+        else:
+            values = pd.concat(
+                [_as_series(argument, df.index) for argument in args], axis=1
+            )
+            missing = values.isna().any(axis=1)
+            value = values.apply(
+                lambda row: tuple(
+                    None if pd.isna(item) else item for item in row
+                ),
+                axis=1,
+            )
+            if bool(kwargs["na_rm"]):
+                value = value.mask(missing)
         dropna = bool(kwargs["na_rm"])
         if groups:
             grouped = _grouped(value, df, groups)
@@ -171,6 +215,74 @@ def _ev_func(
                 return grouped.nunique(dropna=dropna)
             return grouped.transform(lambda series: series.nunique(dropna=dropna))
         return value.nunique(dropna=dropna)
+
+    if name == "nth":
+        value = _as_series(args[0], df.index)
+        order = args[1]
+        position = int(kwargs["n"])
+        default = kwargs["default"]
+        na_rm = bool(kwargs["na_rm"])
+
+        def choose(positions):
+            selected = value.iloc[positions]
+            if isinstance(order, pd.Series):
+                ordering = order.iloc[positions]
+                ranked = ordering.sort_values(kind="stable", na_position="last")
+                selected = selected.loc[ranked.index]
+            if na_rm:
+                selected = selected.dropna()
+            index = position - 1 if position > 0 else position
+            if position == 0 or abs(index) >= len(selected) + int(index < 0):
+                return default
+            try:
+                return selected.iloc[index]
+            except IndexError:
+                return default
+
+        if groups:
+            grouped = df.groupby(list(groups), sort=False, **_GB_KW)
+            values = [choose(pos) for pos in grouped.indices.values()]
+            result = pd.Series(values, index=grouped.size().index)
+            if mode == "agg":
+                return result
+            broadcast = pd.Series(index=df.index, dtype="object")
+            for positions, selected in zip(grouped.indices.values(), values):
+                broadcast.iloc[positions] = selected
+            return broadcast.infer_objects()
+        return choose(np.arange(len(df)))
+
+    if name == "near":
+        return (args[0] - args[1]).abs() <= float(kwargs["tolerance"])
+
+    if name == "na_if":
+        value = _as_series(args[0], df.index)
+        return value.mask(value == args[1])
+
+    if name == "between":
+        value, left, right = args
+        bounds = kwargs["bounds"]
+        lower = value >= left if bounds[0] == "[" else value > left
+        upper = value <= right if bounds[1] == "]" else value < right
+        return lower & upper
+
+    if name == "consecutive_id":
+        values = pd.concat(
+            [_as_series(value, df.index) for value in args], axis=1
+        )
+        previous = (
+            values.groupby(_keys(df, groups), **_GB_KW).shift()
+            if groups
+            else values.shift()
+        )
+        equal = values.eq(previous) | (values.isna() & previous.isna())
+        changed = ~equal.all(axis=1)
+        if groups:
+            first = df.groupby(list(groups), sort=False, **_GB_KW).cumcount() == 0
+            changed = changed | first
+            return changed.groupby(_keys(df, groups), **_GB_KW).cumsum().astype(int)
+        if len(changed):
+            changed.iloc[0] = True
+        return changed.cumsum().astype(int)
 
     if name in {
         "row_number",
@@ -201,8 +313,18 @@ def _ev_func(
                 "dense_rank": "dense",
             }[name]
             if grouped is not None:
-                return grouped.rank(method=method, na_option="keep")
-            return value.rank(method=method, na_option="keep")
+                rank = grouped.rank(
+                    method=method,
+                    na_option="keep",
+                    ascending=not descending,
+                )
+            else:
+                rank = value.rank(
+                    method=method,
+                    na_option="keep",
+                    ascending=not descending,
+                )
+            return rank.astype("Int64")
         if name in {"percent_rank", "cume_dist", "ntile"}:
             method = "max" if name == "cume_dist" else (
                 "first" if name == "ntile" else "min"
@@ -210,8 +332,16 @@ def _ev_func(
             rank = (
                 grouped.rank(method=method, na_option="keep")
                 if grouped is not None
-                else value.rank(method=method, na_option="keep")
+                else value.rank(
+                    method=method,
+                    na_option="keep",
+                    ascending=not descending,
+                )
             )
+            if grouped is not None and descending:
+                rank = grouped.rank(
+                    method=method, na_option="keep", ascending=False
+                )
             count = (
                 grouped.transform("count")
                 if grouped is not None
@@ -221,19 +351,45 @@ def _ev_func(
                 return (rank - 1) / (count - 1)
             if name == "cume_dist":
                 return rank / count
-            return np.floor((rank - 1) * int(kwargs["n"]) / count) + 1
+            return (
+                np.floor((rank - 1) * int(kwargs["n"]) / count) + 1
+            ).astype("Int64")
         if name in {"lead", "lag"}:
             periods = -int(kwargs["n"]) if name == "lead" else int(kwargs["n"])
             default = kwargs["default"]
+            order = args[1]
+            if isinstance(order, pd.Series):
+                result = pd.Series(index=df.index, dtype="object")
+                position_groups = (
+                    df.groupby(list(groups), sort=False, **_GB_KW).indices.values()
+                    if groups
+                    else [np.arange(len(df))]
+                )
+                for positions in position_groups:
+                    values = value.iloc[positions]
+                    ordering = order.iloc[positions]
+                    ranked = ordering.sort_values(
+                        kind="stable", na_position="last"
+                    )
+                    shifted = values.loc[ranked.index].shift(
+                        periods, fill_value=default
+                    )
+                    result.loc[shifted.index] = shifted
+                return result.infer_objects()
             if grouped is not None:
                 return grouped.shift(periods, fill_value=default)
             return value.shift(periods, fill_value=default)
         if name == "cummean":
+            missing_seen = (
+                _grouped(value.isna(), df, groups).cummax()
+                if groups
+                else value.isna().cummax()
+            )
             if grouped is not None:
                 result = grouped.expanding().mean()
                 result = result.droplevel(list(range(len(groups))))
                 if df.index.is_unique:
-                    return result.reindex(df.index)
+                    return result.reindex(df.index).mask(missing_seen)
                 positioned = pd.Series(value.to_numpy(), index=range(len(value)))
                 keys = [
                     pd.Series(df[group].to_numpy(), index=positioned.index)
@@ -242,8 +398,8 @@ def _ev_func(
                 result = positioned.groupby(keys, **_GB_KW).expanding().mean()
                 result = result.droplevel(list(range(len(groups)))).sort_index()
                 result.index = df.index
-                return result
-            return value.expanding().mean()
+                return result.mask(missing_seen.to_numpy())
+            return value.expanding().mean().mask(missing_seen)
         operation = "cummin" if name == "cumall" else "cummax"
         if grouped is not None:
             return grouped.transform(operation)
@@ -294,19 +450,46 @@ def _ev_call(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str)
 
     if name in _AGG:
         pdname = _AGG[name]
+        na_rm = bool(kwargs.pop("na_rm", False))
         if not isinstance(b, pd.Series):
             b = pd.Series(b, index=df.index)
         if groups:
             g = _grouped(b, df, groups)
+            if pdname in {"first", "last"} and not na_rm:
+                index = 0 if pdname == "first" else -1
+                if mode == "window":
+                    return g.transform(lambda series: series.iloc[index])
+                return g.apply(lambda series: series.iloc[index])
             if mode == "window":
-                return g.transform(pdname)
-            return getattr(g, pdname)()
+                result = g.transform(pdname)
+                if na_rm:
+                    return result
+                missing = g.transform(lambda series: series.isna().any())
+            else:
+                result = getattr(g, pdname)()
+                if na_rm:
+                    return result
+                missing = g.apply(lambda series: series.isna().any())
+            if pdname == "any":
+                return result.mask(~result.astype(bool) & missing)
+            if pdname == "all":
+                return result.mask(result.astype(bool) & missing)
+            return result.mask(missing)
         # ungrouped → scalar (broadcasts in window mode, one row in agg mode)
         if pdname == "first":
-            return b.iloc[0]
+            values = b.dropna() if na_rm else b
+            return values.iloc[0] if len(values) else np.nan
         if pdname == "last":
-            return b.iloc[-1]
-        return getattr(b, pdname)()
+            values = b.dropna() if na_rm else b
+            return values.iloc[-1] if len(values) else np.nan
+        result = getattr(b, pdname)()
+        if na_rm or not b.isna().any():
+            return result
+        if pdname == "any" and bool(result):
+            return True
+        if pdname == "all" and not bool(result):
+            return False
+        return np.nan
 
     if name in _WINDOW:
         if mode != "window":
@@ -315,8 +498,15 @@ def _ev_call(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str)
         if not isinstance(b, pd.Series):
             b = pd.Series(b, index=df.index)
         if groups:
-            return getattr(_grouped(b, df, groups), pdname)(*args, **kwargs)
-        return getattr(b, pdname)(*args, **kwargs)
+            result = getattr(_grouped(b, df, groups), pdname)(*args, **kwargs)
+            if name in {"cum_sum", "cumsum", "cum_max", "cum_min", "cum_prod"}:
+                missing_seen = _grouped(b.isna(), df, groups).cummax()
+                result = result.mask(missing_seen)
+            return result
+        result = getattr(b, pdname)(*args, **kwargs)
+        if name in {"cum_sum", "cumsum", "cum_max", "cum_min", "cum_prod"}:
+            result = result.mask(b.isna().cummax())
+        return result
 
     if name in _ELEM:
         return _ELEM[name](b, *args, **kwargs)
@@ -365,7 +555,13 @@ def _fast_grouped_window(
     node = expr.node if isinstance(expr, Expr) else None
     if node is None:
         return _NO_FAST_WINDOW
-    if node[0] == "call" and node[1] in _AGG and not node[3] and not node[4]:
+    if (
+        node[0] == "call"
+        and node[1] in _AGG
+        and not node[3]
+        and set(node[4]) <= {"na_rm"}
+        and node[4].get("na_rm", False)
+    ):
         base = node[2]
         if base[0] == "col":
             return grouped[base[1]].transform(_AGG[node[1]])
@@ -383,6 +579,10 @@ def _fast_grouped_window(
         for key, value in kwargs.items()
     }
     if name in {"lead", "lag"}:
+        if len(args) > 1 and not (
+            args[1][0] == "lit" and args[1][1] is None
+        ):
+            return _NO_FAST_WINDOW
         periods = int(literal_kwargs["n"])
         periods = -periods if name == "lead" else periods
         return series_group.shift(periods, fill_value=literal_kwargs["default"])
@@ -392,12 +592,15 @@ def _fast_grouped_window(
             "min_rank": "min",
             "dense_rank": "dense",
         }[name]
-        return series_group.rank(method=method, na_option="keep")
+        return series_group.rank(method=method, na_option="keep").astype("Int64")
     if name == "cummean":
         result = series_group.expanding().mean()
         result = result.droplevel(list(range(len(groups))))
         if df.index.is_unique:
-            return result.reindex(df.index)
+            missing_seen = series_group.transform(
+                lambda series: series.isna().cummax()
+            )
+            return result.reindex(df.index).mask(missing_seen)
     return _NO_FAST_WINDOW
 
 
@@ -431,7 +634,7 @@ def _has_agg(x) -> bool:
     if (
         x[0] == "n"
         or (x[0] == "call" and x[1] in _AGG)
-        or (x[0] == "func" and x[1] == "n_distinct")
+        or (x[0] == "func" and x[1] in {"n_distinct", "nth"})
     ):
         return True
     if x[0] == "call":
@@ -444,7 +647,13 @@ def _has_agg(x) -> bool:
     return any(_has_agg(p) for p in x[1:])
 
 
-def _fast_summarise(df: pd.DataFrame, kwargs: dict, groups: list[str]) -> pd.DataFrame | None:
+def _fast_summarise(
+    df: pd.DataFrame,
+    kwargs: dict,
+    groups: list[str],
+    *,
+    observed: bool = True,
+) -> pd.DataFrame | None:
     """Single groupby().agg() pass when every kwarg is a plain aggregation.
 
     This matches hand-written pandas performance (one key factorization for
@@ -461,7 +670,13 @@ def _fast_summarise(df: pd.DataFrame, kwargs: dict, groups: list[str]) -> pd.Dat
             extra.setdefault("__tidy3_ones", pd.Series(1, index=df.index))
             named[k] = ("__tidy3_ones", "size")
             continue
-        if not (node[0] == "call" and node[1] in _AGG and not node[3] and not node[4]):
+        if not (
+            node[0] == "call"
+            and node[1] in _AGG
+            and not node[3]
+            and set(node[4]) <= {"na_rm"}
+            and node[4].get("na_rm", False)
+        ):
             return None
         base = node[2]
         if _has_agg(base):
@@ -480,17 +695,35 @@ def _fast_summarise(df: pd.DataFrame, kwargs: dict, groups: list[str]) -> pd.Dat
         named[k] = (src, _AGG[node[1]])
     work = df.assign(**extra) if extra else df
     out = (
-        work.groupby(list(groups), sort=False, **_GB_KW)
+        work.groupby(
+            list(groups),
+            sort=False,
+            dropna=False,
+            observed=observed,
+        )
         .agg(**{k: pd.NamedAgg(column=c, aggfunc=f) for k, (c, f) in named.items()})
         .reset_index()
     )
     return out
 
 
-def do_summarise(df: pd.DataFrame, kwargs: dict, groups: list[str] | None) -> pd.DataFrame:
+def do_summarise(
+    df: pd.DataFrame,
+    kwargs: dict,
+    groups: list[str] | None,
+    *,
+    sort_groups: bool = True,
+    observed: bool = True,
+) -> pd.DataFrame:
     if groups:
-        fast = _fast_summarise(df, kwargs, groups)
+        fast = _fast_summarise(
+            df, kwargs, groups, observed=observed
+        )
         if fast is not None:
+            if sort_groups:
+                fast = fast.sort_values(
+                    list(groups), kind="stable", na_position="last"
+                ).reset_index(drop=True)
             return fast
     vals = {k: eval_expr(v, df, groups, "agg") for k, v in kwargs.items()}
     if groups:
@@ -503,6 +736,23 @@ def do_summarise(df: pd.DataFrame, kwargs: dict, groups: list[str] | None) -> pd
             if k not in series:
                 out[k] = v
         out = out[list(vals.keys())].reset_index()
+        if sort_groups:
+            out = out.sort_values(
+                list(groups), kind="stable", na_position="last"
+            ).reset_index(drop=True)
+        else:
+            marker = "__tidy3_group_order"
+            while marker in out.columns:
+                marker += "_"
+            order = df.loc[:, list(groups)].drop_duplicates().assign(
+                **{marker: lambda frame: range(len(frame))}
+            )
+            out = (
+                out.merge(order, on=list(groups), how="left", sort=False)
+                .sort_values(marker, kind="stable")
+                .drop(columns=marker)
+                .reset_index(drop=True)
+            )
         return out
     return pd.DataFrame({k: [v] for k, v in vals.items()})
 
@@ -516,7 +766,11 @@ def _reframe_values(value: Any) -> list[Any]:
 
 
 def do_reframe(
-    df: pd.DataFrame, kwargs: dict, groups: list[str] | None
+    df: pd.DataFrame,
+    kwargs: dict,
+    groups: list[str] | None,
+    *,
+    sort_groups: bool = True,
 ) -> pd.DataFrame:
     """Return an arbitrary number of rows per group, always ungrouped."""
     pieces = []
@@ -543,7 +797,12 @@ def do_reframe(
             expanded = {**keys, **expanded}
         pieces.append(pd.DataFrame(expanded))
     if pieces:
-        return pd.concat(pieces, ignore_index=True)
+        output = pd.concat(pieces, ignore_index=True)
+        if groups and sort_groups:
+            output = output.sort_values(
+                list(groups), kind="stable", na_position="last"
+            ).reset_index(drop=True)
+        return output
     return pd.DataFrame(columns=[*(groups or []), *kwargs.keys()])
 
 
@@ -791,6 +1050,7 @@ def do_count(
     *,
     wt: Any = None,
     sort: bool = False,
+    observed: bool = True,
 ) -> pd.DataFrame:
     values = None
     if wt is not None:
@@ -799,10 +1059,23 @@ def do_count(
             values = pd.Series(values, index=df.index)
     if cols:
         if values is None:
-            counts = df.groupby(list(cols), sort=False, **_GB_KW).size()
+            counts = df.groupby(
+                list(cols),
+                sort=False,
+                dropna=False,
+                observed=observed,
+            ).size()
         else:
-            counts = _grouped(values, df, list(cols)).sum(min_count=0)
+            counts = values.groupby(
+                _keys(df, list(cols)),
+                sort=False,
+                dropna=False,
+                observed=observed,
+            ).sum(min_count=0)
         out = counts.reset_index(name=name)
+        out = out.sort_values(
+            list(cols), kind="stable", na_position="last"
+        ).reset_index(drop=True)
     else:
         value = len(df) if values is None else values.sum()
         out = pd.DataFrame({name: [value]})
@@ -845,6 +1118,33 @@ def do_add_count(
 def do_join(
     df: pd.DataFrame, right: pd.DataFrame, on, how: str, **kwargs
 ) -> pd.DataFrame:
+    if how == "outer":
+        left_order = "__tidy3_left_order"
+        right_order = "__tidy3_right_order"
+        occupied = set(df.columns) | set(right.columns)
+        while left_order in occupied:
+            left_order += "_"
+        occupied.add(left_order)
+        while right_order in occupied:
+            right_order += "_"
+        left = df.assign(**{left_order: range(len(df))})
+        other = right.assign(**{right_order: range(len(right))})
+        params = {
+            "how": how,
+            "suffixes": ("", "_right"),
+            "on": on,
+            **kwargs,
+        }
+        return (
+            left.merge(other, **params)
+            .sort_values(
+                [left_order, right_order],
+                kind="stable",
+                na_position="last",
+            )
+            .drop(columns=[left_order, right_order])
+            .reset_index(drop=True)
+        )
     params = {"how": how, "suffixes": ("", "_right"), **kwargs}
     if how != "cross":
         params["on"] = on

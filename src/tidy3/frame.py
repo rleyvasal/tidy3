@@ -10,6 +10,23 @@ from tidy3.options import get_options, options  # re-export
 
 __all__ = ["TidyFrame", "tidy", "options"]
 
+_POLARS_EXECUTION_ENGINES = frozenset({"auto", "streaming", "gpu"})
+
+
+def _validate_execution_engine(engine: Any, *, backend: str) -> None:
+    if isinstance(engine, str) and engine not in _POLARS_EXECUTION_ENGINES:
+        choices = ", ".join(sorted(_POLARS_EXECUTION_ENGINES))
+        raise ValueError(f"engine must be one of: {choices}")
+    if backend == "pandas" and engine != "auto":
+        raise ValueError(
+            "engine is a Polars execution option; use engine='auto' with "
+            "the pandas backend"
+        )
+
+
+def _uses_gpu_engine(engine: Any) -> bool:
+    return engine == "gpu" or isinstance(engine, pl.GPUEngine)
+
 
 class TidyFrame:
     """dplyr-style frame with ``>>`` pipes: lazy Polars (default) or eager pandas.
@@ -18,7 +35,13 @@ class TidyFrame:
     different engine) — see ``tidy(df, backend="pandas")`` and ``tidy3.bench``.
     """
 
-    __slots__ = ("_data", "_groups", "_rowwise")
+    __slots__ = (
+        "_data",
+        "_groups",
+        "_rowwise",
+        "_group_drop",
+        "_category_levels",
+    )
 
     def __init__(
         self,
@@ -26,6 +49,8 @@ class TidyFrame:
         groups: list[str] | None = None,
         *,
         rowwise: bool = False,
+        group_drop: bool = True,
+        category_levels: dict[str, list[Any]] | None = None,
     ):
         if not isinstance(data, pl.LazyFrame):
             import pandas as pd
@@ -37,6 +62,16 @@ class TidyFrame:
         self._data = data
         self._groups = list(groups) if groups else None
         self._rowwise = bool(rowwise)
+        self._group_drop = bool(group_drop) if self._groups else True
+        if category_levels is None and self.backend == "pandas":
+            import pandas as pd
+
+            category_levels = {
+                str(name): series.cat.categories.tolist()
+                for name, series in data.items()
+                if isinstance(series.dtype, pd.CategoricalDtype)
+            }
+        self._category_levels = dict(category_levels or {})
 
     @property
     def backend(self) -> str:
@@ -65,11 +100,21 @@ class TidyFrame:
         groups: list[str] | None = None,
         *,
         rowwise: bool | None = None,
+        group_drop: bool | None = None,
+        category_levels: dict[str, list[Any]] | None = None,
     ) -> TidyFrame:
         return TidyFrame(
             lf,
             groups=groups,
             rowwise=self._rowwise if rowwise is None else rowwise,
+            group_drop=(
+                self._group_drop if group_drop is None else group_drop
+            ),
+            category_levels=(
+                self._category_levels
+                if category_levels is None
+                else category_levels
+            ),
         )
 
     def _with_pdf(
@@ -78,11 +123,21 @@ class TidyFrame:
         groups: list[str] | None = None,
         *,
         rowwise: bool | None = None,
+        group_drop: bool | None = None,
+        category_levels: dict[str, list[Any]] | None = None,
     ) -> TidyFrame:
         return TidyFrame(
             pdf,
             groups=groups,
             rowwise=self._rowwise if rowwise is None else rowwise,
+            group_drop=(
+                self._group_drop if group_drop is None else group_drop
+            ),
+            category_levels=(
+                self._category_levels
+                if category_levels is None
+                else category_levels
+            ),
         )
 
     # ── pipe ────────────────────────────────────────────────────────────
@@ -111,10 +166,25 @@ class TidyFrame:
 
         return self >> filter_out_verb(*predicates, by=by)
 
-    def mutate(self, *specs: Any, by: Any = None, **kwargs: Any) -> TidyFrame:
+    def mutate(
+        self,
+        *specs: Any,
+        by: Any = None,
+        keep: str = "all",
+        before: Any = None,
+        after: Any = None,
+        **kwargs: Any,
+    ) -> TidyFrame:
         from tidy3.verbs import mutate as mutate_verb
 
-        return self >> mutate_verb(*specs, by=by, **kwargs)
+        return self >> mutate_verb(
+            *specs,
+            by=by,
+            keep=keep,
+            before=before,
+            after=after,
+            **kwargs,
+        )
 
     def transmute(self, *specs: Any, by: Any = None, **kwargs: Any) -> TidyFrame:
         from tidy3.verbs import transmute as transmute_verb
@@ -161,35 +231,62 @@ class TidyFrame:
 
         return self >> glimpse_verb(n)
 
-    def arrange(self, *keys: Any) -> TidyFrame:
+    def arrange(self, *keys: Any, by_group: bool = False) -> TidyFrame:
         from tidy3.verbs import arrange as arrange_verb
 
-        return self >> arrange_verb(*keys)
+        return self >> arrange_verb(*keys, by_group=by_group)
 
-    def distinct(self, *cols: str) -> TidyFrame:
+    def distinct(
+        self,
+        *cols: Any,
+        keep_all: bool = False,
+        maintain_order: bool = True,
+        **computed: Any,
+    ) -> TidyFrame:
         from tidy3.verbs import distinct as distinct_verb
 
-        return self >> distinct_verb(*cols)
+        return self >> distinct_verb(
+            *cols,
+            keep_all=keep_all,
+            maintain_order=maintain_order,
+            **computed,
+        )
 
-    def group_by(self, *cols: str) -> TidyFrame:
+    def group_by(
+        self,
+        *cols: Any,
+        add: bool = False,
+        drop: bool | None = None,
+        **computed: Any,
+    ) -> TidyFrame:
         from tidy3.verbs import group_by as group_by_verb
 
-        return self >> group_by_verb(*cols)
+        return self >> group_by_verb(
+            *cols, add=add, drop=drop, **computed
+        )
 
     def rowwise(self, *cols: Any) -> TidyFrame:
         from tidy3.verbs import rowwise as rowwise_verb
 
         return self >> rowwise_verb(*cols)
 
-    def ungroup(self) -> TidyFrame:
+    def ungroup(self, *cols: Any) -> TidyFrame:
         from tidy3.verbs import ungroup as ungroup_verb
 
-        return self >> ungroup_verb()
+        return self >> ungroup_verb(*cols)
 
-    def summarise(self, *specs: Any, by: Any = None, **kwargs: Any) -> TidyFrame:
+    def summarise(
+        self,
+        *specs: Any,
+        by: Any = None,
+        groups: str | None = None,
+        **kwargs: Any,
+    ) -> TidyFrame:
         from tidy3.verbs import summarise as summarise_verb
 
-        return self >> summarise_verb(*specs, by=by, **kwargs)
+        return self >> summarise_verb(
+            *specs, by=by, groups=groups, **kwargs
+        )
 
     summarize = summarise
 
@@ -204,10 +301,13 @@ class TidyFrame:
         wt: Any = None,
         sort: bool = False,
         name: str | None = None,
+        drop: bool | None = None,
     ) -> TidyFrame:
         from tidy3.verbs import count as count_verb
 
-        return self >> count_verb(*cols, wt=wt, sort=sort, name=name)
+        return self >> count_verb(
+            *cols, wt=wt, sort=sort, name=name, drop=drop
+        )
 
     def tally(
         self,
@@ -329,6 +429,174 @@ class TidyFrame:
 
         return self >> sample_frac_verb(frac, seed=seed)
 
+    # ── reshape / missing data ─────────────────────────────────────────
+    def drop_na(self, *cols: Any) -> TidyFrame:
+        from tidy3.tidyr import drop_na as drop_na_verb
+
+        return self >> drop_na_verb(*cols)
+
+    def replace_na(self, replace: dict[str, Any]) -> TidyFrame:
+        from tidy3.tidyr import replace_na as replace_na_verb
+
+        return self >> replace_na_verb(replace)
+
+    def fill(
+        self, *cols: Any, direction: str = "down", by: Any = None
+    ) -> TidyFrame:
+        from tidy3.tidyr import fill as fill_verb
+
+        return self >> fill_verb(*cols, direction=direction, by=by)
+
+    def expand(self, *cols: Any) -> TidyFrame:
+        from tidy3.tidyr import expand as expand_verb
+
+        return self >> expand_verb(*cols)
+
+    def complete(
+        self,
+        *cols: Any,
+        fill: dict[str, Any] | None = None,
+        explicit: bool = True,
+    ) -> TidyFrame:
+        from tidy3.tidyr import complete as complete_verb
+
+        return self >> complete_verb(*cols, fill=fill, explicit=explicit)
+
+    def pivot_longer(
+        self,
+        cols: Any,
+        *,
+        names_to: Any = "name",
+        values_to: str = "value",
+        names_prefix: str | None = None,
+        names_sep: str | None = None,
+        names_pattern: str | None = None,
+        values_drop_na: bool = False,
+        cols_vary: str = "fastest",
+    ) -> TidyFrame:
+        from tidy3.tidyr import pivot_longer as pivot_longer_verb
+
+        return self >> pivot_longer_verb(
+            cols,
+            names_to=names_to,
+            values_to=values_to,
+            names_prefix=names_prefix,
+            names_sep=names_sep,
+            names_pattern=names_pattern,
+            values_drop_na=values_drop_na,
+            cols_vary=cols_vary,
+        )
+
+    def pivot_wider(
+        self,
+        *,
+        names_from: Any = "name",
+        values_from: Any = "value",
+        id_cols: Any = None,
+        names_prefix: str = "",
+        names_sort: bool = False,
+        values_fill: Any = None,
+        values_fn: str | None = None,
+        names: Any = None,
+    ) -> TidyFrame:
+        from tidy3.tidyr import pivot_wider as pivot_wider_verb
+
+        return self >> pivot_wider_verb(
+            names_from=names_from,
+            values_from=values_from,
+            id_cols=id_cols,
+            names_prefix=names_prefix,
+            names_sort=names_sort,
+            values_fill=values_fill,
+            values_fn=values_fn,
+            names=names,
+        )
+
+    def separate(
+        self,
+        column: str,
+        into: Any,
+        *,
+        sep: str = r"[^A-Za-z0-9]+",
+        remove: bool = True,
+        convert: bool = False,
+        extra: str = "warn",
+        fill: str = "warn",
+    ) -> TidyFrame:
+        from tidy3.tidyr import separate as separate_verb
+
+        return self >> separate_verb(
+            column,
+            into,
+            sep=sep,
+            remove=remove,
+            convert=convert,
+            extra=extra,
+            fill=fill,
+        )
+
+    def unite(
+        self,
+        column: str,
+        *cols: Any,
+        sep: str = "_",
+        remove: bool = True,
+        na_rm: bool = False,
+    ) -> TidyFrame:
+        from tidy3.tidyr import unite as unite_verb
+
+        return self >> unite_verb(
+            column, *cols, sep=sep, remove=remove, na_rm=na_rm
+        )
+
+    def nest(
+        self,
+        column: str = "data",
+        *,
+        cols: Any = None,
+        by: Any = None,
+    ) -> TidyFrame:
+        from tidy3.tidyr import nest as nest_verb
+
+        return self >> nest_verb(column, cols=cols, by=by)
+
+    def unnest_longer(
+        self,
+        column: str,
+        *,
+        values_to: str | None = None,
+        indices_to: str | None = None,
+        keep_empty: bool = False,
+    ) -> TidyFrame:
+        from tidy3.tidyr import unnest_longer as unnest_longer_verb
+
+        return self >> unnest_longer_verb(
+            column,
+            values_to=values_to,
+            indices_to=indices_to,
+            keep_empty=keep_empty,
+        )
+
+    def unnest(
+        self,
+        column: str,
+        *,
+        keep_empty: bool = False,
+        names_sep: str | None = None,
+    ) -> TidyFrame:
+        from tidy3.tidyr import unnest as unnest_verb
+
+        return self >> unnest_verb(
+            column, keep_empty=keep_empty, names_sep=names_sep
+        )
+
+    def unnest_wider(
+        self, column: str, *, names_sep: str | None = None
+    ) -> TidyFrame:
+        from tidy3.tidyr import unnest_wider as unnest_wider_verb
+
+        return self >> unnest_wider_verb(column, names_sep=names_sep)
+
     def left_join(
         self, right: Any, *, on: Any = None, by: Any = None, **kwargs: Any
     ) -> TidyFrame:
@@ -356,6 +624,27 @@ class TidyFrame:
         from tidy3.verbs import full_join as full_join_verb
 
         return self >> full_join_verb(right, on=on, by=by, **kwargs)
+
+    def nest_join(
+        self,
+        right: Any,
+        *,
+        on: Any = None,
+        by: Any = None,
+        name: str = "data",
+        keep: bool = False,
+        na_matches: str = "na",
+    ) -> TidyFrame:
+        from tidy3.verbs import nest_join as nest_join_verb
+
+        return self >> nest_join_verb(
+            right,
+            on=on,
+            by=by,
+            name=name,
+            keep=keep,
+            na_matches=na_matches,
+        )
 
     def semi_join(
         self,
@@ -497,33 +786,294 @@ class TidyFrame:
         return self._with_lf(out, groups=self._groups)
 
     # ── materialize ─────────────────────────────────────────────────────
-    def collect(self, as_: Literal["polars", "pandas", "arrow"] = "polars") -> Any:
+    def collect(
+        self,
+        as_: Literal["polars", "pandas", "arrow", "numpy"] = "polars",
+        *,
+        columns: Any = None,
+        arrow_backed: bool = False,
+        engine: Any = "auto",
+        dtype: Any = None,
+        order: Literal["c", "fortran"] = "fortran",
+        writable: bool = False,
+        allow_copy: bool = True,
+    ) -> Any:
+        """Materialize the frame, optionally projecting columns first.
+
+        ``arrow_backed=True`` returns a pandas DataFrame whose columns use
+        Arrow extension dtypes.  For the Polars backend this avoids copying
+        every column into NumPy buffers at the handoff boundary.
+
+        ``engine`` controls Polars execution: ``"auto"`` (the default),
+        ``"streaming"``, or ``"gpu"``. A configured ``polars.GPUEngine``
+        object is also accepted. Non-default engines require the Polars
+        backend.
+        """
+        _validate_execution_engine(engine, backend=self.backend)
+        if arrow_backed and as_ != "pandas":
+            raise ValueError("arrow_backed=True requires as_='pandas'")
+        numpy_options = (
+            dtype is not None
+            or order != "fortran"
+            or writable
+            or not allow_copy
+        )
+        if numpy_options and as_ != "numpy":
+            raise ValueError(
+                "dtype, order, writable, and allow_copy require as_='numpy'"
+            )
+        if as_ == "numpy":
+            return self.to_numpy(
+                columns=columns,
+                dtype=dtype,
+                order=order,
+                writable=writable,
+                allow_copy=allow_copy,
+                engine=engine,
+            )
+        selected = None
+        if columns is not None:
+            from tidy3.tidyselect import resolve_selection
+
+            selected = resolve_selection(self, [columns])
         if self.backend == "pandas":
-            pdf = self._data
+            pdf = self._data if selected is None else self._data.loc[:, selected]
             if as_ == "pandas":
+                if arrow_backed:
+                    return pdf.convert_dtypes(dtype_backend="pyarrow")
                 return pdf
             if as_ == "polars":
                 return pl.from_pandas(pdf)
             if as_ == "arrow":
                 return pl.from_pandas(pdf).to_arrow()
-            raise ValueError("as_ must be 'polars', 'pandas', or 'arrow'")
-        df = self._lf.collect()
+            raise ValueError(
+                "as_ must be 'polars', 'pandas', 'arrow', or 'numpy'"
+            )
+        lf = self._lf if selected is None else self._lf.select(selected)
+        df = lf.collect(engine=engine)
         if as_ == "polars":
             return df
         if as_ == "pandas":
-            return df.to_pandas()
+            return df.to_pandas(use_pyarrow_extension_array=arrow_backed)
         if as_ == "arrow":
             return df.to_arrow()
-        raise ValueError("as_ must be 'polars', 'pandas', or 'arrow'")
+        raise ValueError(
+            "as_ must be 'polars', 'pandas', 'arrow', or 'numpy'"
+        )
 
-    def to_polars(self) -> pl.DataFrame:
-        return self.collect(as_="polars")
+    def to_polars(
+        self, *, columns: Any = None, engine: Any = "auto"
+    ) -> pl.DataFrame:
+        return self.collect(as_="polars", columns=columns, engine=engine)
 
-    def to_pandas(self):
-        return self.collect(as_="pandas")
+    def to_pandas(
+        self,
+        *,
+        columns: Any = None,
+        arrow_backed: bool = False,
+        engine: Any = "auto",
+    ):
+        return self.collect(
+            as_="pandas",
+            columns=columns,
+            arrow_backed=arrow_backed,
+            engine=engine,
+        )
 
-    def to_arrow(self):
-        return self.collect(as_="arrow")
+    def to_arrow(self, *, columns: Any = None, engine: Any = "auto"):
+        return self.collect(as_="arrow", columns=columns, engine=engine)
+
+    def to_numpy(
+        self,
+        *,
+        columns: Any = None,
+        dtype: Any = None,
+        order: Literal["c", "fortran"] = "fortran",
+        writable: bool = False,
+        allow_copy: bool = True,
+        engine: Any = "auto",
+    ):
+        """Materialize selected columns as a host NumPy matrix.
+
+        The default Fortran order matches the columnar dataframe layout and
+        offers the best chance of avoiding a copy. Use ``order="c"`` and
+        ``writable=True`` for consumers that require a mutable C-contiguous
+        matrix. ``allow_copy=False`` turns an otherwise implicit copy into an
+        error. Polars execution is controlled independently by ``engine``.
+        """
+        import numpy as np
+
+        _validate_execution_engine(engine, backend=self.backend)
+        if order not in {"c", "fortran"}:
+            raise ValueError("order must be 'c' or 'fortran'")
+
+        selected = None
+        if columns is not None:
+            from tidy3.tidyselect import resolve_selection
+
+            selected = resolve_selection(self, [columns])
+
+        if self.backend == "polars":
+            lf = self._lf if selected is None else self._lf.select(selected)
+            frame = lf.collect(engine=engine)
+            array = frame.to_numpy(
+                order=order,
+                writable=writable,
+                allow_copy=allow_copy,
+            )
+            if dtype is not None and array.dtype != np.dtype(dtype):
+                if not allow_copy:
+                    raise RuntimeError(
+                        "requested NumPy dtype conversion requires a copy"
+                    )
+                array = array.astype(
+                    dtype,
+                    order="C" if order == "c" else "F",
+                    copy=False,
+                )
+            return array
+
+        frame = self._data if selected is None else self._data.loc[:, selected]
+        array = frame.to_numpy(dtype=dtype, copy=False)
+        if not allow_copy and array.size:
+            shares_data = any(
+                np.shares_memory(array, frame[name].to_numpy(copy=False))
+                for name in frame.columns
+            )
+            if not shares_data:
+                raise RuntimeError(
+                    "pandas cannot provide this NumPy matrix without copying"
+                )
+        contiguous = (
+            array.flags.c_contiguous
+            if order == "c"
+            else array.flags.f_contiguous
+        )
+        if not contiguous:
+            if not allow_copy:
+                raise RuntimeError(
+                    f"NumPy order={order!r} requires a copy for this frame"
+                )
+            array = np.array(
+                array, dtype=dtype, order="C" if order == "c" else "F", copy=True
+            )
+        if writable and not array.flags.writeable:
+            if not allow_copy:
+                raise RuntimeError("a writable NumPy matrix requires a copy")
+            array = array.copy(order="C" if order == "c" else "F")
+        return array
+
+    def __array__(self, dtype: Any = None, copy: bool | None = None):
+        """NumPy array protocol; materializes the complete lazy plan."""
+        array = self.to_numpy(dtype=dtype, allow_copy=copy is not False)
+        if copy is True:
+            return array.copy(order="K")
+        return array
+
+    # ── write results ──────────────────────────────────────────────────
+    def write_csv(
+        self,
+        path: Any,
+        *,
+        include_header: bool = True,
+        separator: str = ",",
+        engine: Any = "auto",
+        **kwargs: Any,
+    ) -> None:
+        """Execute and write CSV; Polars plans stream directly to disk."""
+        _validate_execution_engine(engine, backend=self.backend)
+        if self.backend == "polars":
+            if _uses_gpu_engine(engine):
+                self.collect(as_="polars", engine=engine).write_csv(
+                    path,
+                    include_header=include_header,
+                    separator=separator,
+                    **kwargs,
+                )
+                return
+            self._lf.sink_csv(
+                path,
+                include_header=include_header,
+                separator=separator,
+                engine=engine,
+                **kwargs,
+            )
+            return
+        self._data.to_csv(
+            path,
+            index=False,
+            header=include_header,
+            sep=separator,
+            **kwargs,
+        )
+
+    def write_parquet(
+        self,
+        path: Any,
+        *,
+        compression: str = "zstd",
+        engine: Any = "auto",
+        **kwargs: Any,
+    ) -> None:
+        """Execute and write Parquet; Polars plans stream directly to disk."""
+        _validate_execution_engine(engine, backend=self.backend)
+        if self.backend == "polars":
+            if _uses_gpu_engine(engine):
+                self.collect(as_="polars", engine=engine).write_parquet(
+                    path, compression=compression, **kwargs
+                )
+                return
+            self._lf.sink_parquet(
+                path, compression=compression, engine=engine, **kwargs
+            )
+            return
+        self._data.to_parquet(
+            path, index=False, compression=compression, **kwargs
+        )
+
+    def write_ipc(
+        self,
+        path: Any,
+        *,
+        compression: str | None = "uncompressed",
+        engine: Any = "auto",
+        **kwargs: Any,
+    ) -> None:
+        """Execute and write Arrow IPC/Feather output."""
+        _validate_execution_engine(engine, backend=self.backend)
+        if self.backend == "polars":
+            if _uses_gpu_engine(engine):
+                self.collect(as_="polars", engine=engine).write_ipc(
+                    path, compression=compression, **kwargs
+                )
+                return
+            self._lf.sink_ipc(
+                path, compression=compression, engine=engine, **kwargs
+            )
+            return
+        self._data.reset_index(drop=True).to_feather(
+            path, compression=compression, **kwargs
+        )
+
+    def write_excel(
+        self,
+        path: Any,
+        *,
+        worksheet: str | None = None,
+        engine: Any = "auto",
+        **kwargs: Any,
+    ) -> None:
+        """Materialize and write XLSX output using Polars/XlsxWriter."""
+        try:
+            self.collect(as_="polars", engine=engine).write_excel(
+                workbook=path, worksheet=worksheet, **kwargs
+            )
+        except ModuleNotFoundError as error:
+            if error.name == "xlsxwriter" or "xlsxwriter" in str(error).lower():
+                raise ImportError(
+                    "Excel output requires XlsxWriter; install tidy3[excel]"
+                ) from error
+            raise
 
     def lazy(self) -> pl.LazyFrame:
         return self._lf
@@ -627,6 +1177,8 @@ def tidy(data: Any = None, backend: str | None = None, **kwargs: Any) -> TidyFra
                 data.collect(as_="pandas"),
                 groups=data._groups,
                 rowwise=data._rowwise,
+                group_drop=data._group_drop,
+                category_levels=data._category_levels,
             )
         if isinstance(data, pd.DataFrame):
             return TidyFrame(data)
@@ -643,6 +1195,8 @@ def tidy(data: Any = None, backend: str | None = None, **kwargs: Any) -> TidyFra
             pl.from_pandas(data._pdf).lazy(),
             groups=data._groups,
             rowwise=data._rowwise,
+            group_drop=data._group_drop,
+            category_levels=data._category_levels,
         )
     if isinstance(data, pl.LazyFrame):
         return TidyFrame(data)
@@ -653,7 +1207,15 @@ def tidy(data: Any = None, backend: str | None = None, **kwargs: Any) -> TidyFra
         import pandas as pd
 
         if isinstance(data, pd.DataFrame):
-            return TidyFrame(pl.from_pandas(data).lazy())
+            category_levels = {
+                str(name): series.cat.categories.tolist()
+                for name, series in data.items()
+                if isinstance(series.dtype, pd.CategoricalDtype)
+            }
+            return TidyFrame(
+                pl.from_pandas(data).lazy(),
+                category_levels=category_levels,
+            )
     except ImportError:
         pass
     if isinstance(data, dict):

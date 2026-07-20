@@ -8,6 +8,8 @@ compiled to ``pl.Expr``) or pandas (eager — expressions are evaluated by
 from __future__ import annotations
 
 import math
+import random
+import re
 from typing import Any, Callable
 
 import polars as pl
@@ -20,6 +22,8 @@ from tidy3.tidyselect import (
     ColumnwisePredicate,
     HorizontalSpec,
     Selector,
+    _group_rows_token,
+    _reset_group_rows,
     resolve_selection,
 )
 
@@ -32,6 +36,21 @@ def _plx(v: Any) -> Any:
 def _pl_expr(v: Any) -> pl.Expr:
     value = _plx(v)
     return value if isinstance(value, pl.Expr) else pl.lit(value)
+
+
+def _dplyr_sort_expressions(
+    lf: pl.LazyFrame, values: list[Any]
+) -> list[pl.Expr]:
+    """Build sort keys with R's missing-last treatment, including NaN."""
+    expressions: list[pl.Expr] = []
+    for index, value in enumerate(values):
+        expression = pl.col(value) if isinstance(value, str) else _pl_expr(value)
+        name = f"__tidy3_sort_schema_{index}"
+        dtype = lf.select(expression.alias(name)).collect_schema()[name]
+        expressions.append(
+            expression.fill_nan(None) if dtype.is_float() else expression
+        )
+    return expressions
 
 
 def _pe():
@@ -63,6 +82,10 @@ class Verb:
                         other._data,
                         groups=other._groups,
                         rowwise=getattr(other, "_rowwise", False),
+                        group_drop=getattr(other, "_group_drop", True),
+                        category_levels=getattr(
+                            other, "_category_levels", None
+                        ),
                     )
                 except (AttributeError, TypeError) as e:
                     raise TypeError(
@@ -113,6 +136,162 @@ def _expanded_assignments(
     return expanded
 
 
+def _column_references(value: Any) -> set[str]:
+    """Return column names referenced by a backend-neutral expression."""
+    if not isinstance(value, Expr):
+        return set()
+    references: set[str] = set()
+
+    def visit(node: tuple) -> None:
+        if node[0] == "col":
+            references.add(node[1])
+            return
+        for child in _expression_children(node):
+            visit(child)
+
+    visit(value.node)
+    return references
+
+
+def _assignment_stages(assignments: dict[str, Any]) -> list[dict[str, Any]]:
+    """Batch independent assignments while preserving dplyr dependencies."""
+    stages: list[dict[str, Any]] = []
+    current: dict[str, Any] = {}
+    for name, value in assignments.items():
+        if _column_references(value) & set(current):
+            stages.append(current)
+            current = {}
+        current[name] = value
+    if current:
+        stages.append(current)
+    return stages
+
+
+def _sequential_summary_assignments(
+    assignments: dict[str, Any],
+) -> dict[str, Any]:
+    """Inline earlier summaries so later expressions can reference them."""
+
+    def replacement_node(value: Any) -> tuple:
+        if isinstance(value, Expr):
+            return value.node
+        if isinstance(value, pl.Expr):
+            return ("pl", value)
+        return ("lit", value)
+
+    def rewrite(node: tuple, prior: dict[str, Any]) -> tuple:
+        kind = node[0]
+        if kind == "col" and node[1] in prior:
+            return replacement_node(prior[node[1]])
+        if kind == "bin":
+            return (kind, node[1], rewrite(node[2], prior), rewrite(node[3], prior))
+        if kind in {"neg", "not", "desc"}:
+            return (kind, rewrite(node[1], prior))
+        if kind == "call":
+            references = _column_references(Expr(node[2]))
+            if references and references <= set(prior):
+                rewritten_base = rewrite(node[2], prior)
+                if node[1] in {
+                    "sum",
+                    "mean",
+                    "min",
+                    "max",
+                    "median",
+                    "first",
+                    "last",
+                    "any",
+                    "all",
+                }:
+                    return rewritten_base
+                if node[1] in {"std", "var"}:
+                    return ("lit", float("nan"))
+            return (
+                kind,
+                node[1],
+                rewrite(node[2], prior),
+                tuple(
+                    Expr(rewrite(value.node, prior))
+                    if isinstance(value, Expr)
+                    else value
+                    for value in node[3]
+                ),
+                {
+                    key: Expr(rewrite(value.node, prior))
+                    if isinstance(value, Expr)
+                    else value
+                    for key, value in node[4].items()
+                },
+            )
+        if kind == "func":
+            return (
+                kind,
+                node[1],
+                tuple(rewrite(value, prior) for value in node[2]),
+                {key: rewrite(value, prior) for key, value in node[3].items()},
+            )
+        if kind == "case_when":
+            return (
+                kind,
+                tuple(
+                    (rewrite(condition, prior), rewrite(value, prior))
+                    for condition, value in node[1]
+                ),
+                rewrite(node[2], prior),
+            )
+        return node
+
+    resolved: dict[str, Any] = {}
+    for name, value in assignments.items():
+        resolved[name] = (
+            Expr(rewrite(value.node, resolved))
+            if isinstance(value, Expr)
+            else value
+        )
+    return resolved
+
+
+def _mutate_column_order(
+    result: Any,
+    input_columns: list[str],
+    assignments: dict[str, Any],
+    groups: list[str] | None,
+    *,
+    keep: str,
+    before: Any,
+    after: Any,
+) -> list[str]:
+    referenced = (
+        set().union(
+            *(_column_references(value) for value in assignments.values())
+        )
+        if assignments
+        else set()
+    )
+    if keep == "all":
+        retained = set(input_columns)
+    elif keep == "used":
+        retained = set(input_columns) & referenced
+    elif keep == "unused":
+        retained = set(input_columns) - referenced
+    else:
+        retained = set()
+    retained |= set(groups or []) | (set(assignments) & set(input_columns))
+    base = [name for name in input_columns if name in retained]
+    new_columns = [name for name in assignments if name not in input_columns]
+    ordered = [*base, *new_columns]
+    anchor_spec = before if before is not None else after
+    if anchor_spec is not None and new_columns:
+        anchors = resolve_selection(result, [anchor_spec])
+        if len(anchors) != 1:
+            raise ValueError("mutate(): before/after must select one column")
+        anchor = anchors[0]
+        if anchor not in base:
+            raise ValueError("mutate(): before/after cannot select a new column")
+        position = base.index(anchor) + int(after is not None)
+        ordered = [*base[:position], *new_columns, *base[position:]]
+    return ordered
+
+
 def _operation_groups(tf: Any, by: Any, verb_name: str) -> tuple[list[str] | None, bool]:
     """Resolve transient ``by=`` groups and report whether they were supplied."""
     if by is None:
@@ -132,6 +311,217 @@ def _group_context(tf: Any, groups: list[str] | None):
     if tf._backend == "pandas":
         return tf._with_pdf(tf._pdf, groups=groups, rowwise=False)
     return tf._with_lf(tf._lf, groups=groups, rowwise=False)
+
+
+_AGGREGATE_CALLS = {
+    "mean",
+    "sum",
+    "min",
+    "max",
+    "median",
+    "std",
+    "var",
+    "count",
+    "n_unique",
+    "first",
+    "last",
+    "any",
+    "all",
+}
+
+_WINDOW_CALLS = {
+    "cum_sum",
+    "cumsum",
+    "cum_max",
+    "cum_min",
+    "cum_prod",
+    "shift",
+    "diff",
+    "rank",
+}
+
+_ELEMENT_CALLS = {
+    "abs",
+    "alias",
+    "ceil",
+    "exp",
+    "fill_null",
+    "floor",
+    "is_not_null",
+    "is_null",
+    "log",
+    "log10",
+    "round",
+    "sqrt",
+}
+
+_WINDOW_FUNCTIONS = {
+    "row_number",
+    "min_rank",
+    "dense_rank",
+    "percent_rank",
+    "cume_dist",
+    "ntile",
+    "lead",
+    "lag",
+    "cummean",
+    "cumall",
+    "cumany",
+    "n_distinct",
+    "nth",
+    "consecutive_id",
+}
+
+
+def _expression_children(node: tuple) -> list[tuple]:
+    kind = node[0]
+    if kind == "bin":
+        return [node[2], node[3]]
+    if kind in {"neg", "not", "desc"}:
+        return [node[1]]
+    if kind == "call":
+        return [
+            node[2],
+            *[value.node for value in node[3] if isinstance(value, Expr)],
+            *[
+                value.node
+                for value in node[4].values()
+                if isinstance(value, Expr)
+            ],
+        ]
+    if kind == "func":
+        return [*node[2], *node[3].values()]
+    if kind == "case_when":
+        return [
+            *[
+                child
+                for condition, value in node[1]
+                for child in (condition, value)
+            ],
+            node[2],
+        ]
+    return []
+
+
+def _is_aggregate_node(node: tuple) -> bool:
+    return (
+        node[0] == "n"
+        or (node[0] == "call" and node[1] in _AGGREGATE_CALLS)
+        or (node[0] == "func" and node[1] in {"n_distinct", "nth"})
+    )
+
+
+def _requires_group_window(node: tuple) -> bool:
+    if _is_aggregate_node(node):
+        return True
+    if node[0] == "call" and node[1] in _WINDOW_CALLS:
+        return True
+    if node[0] == "call" and node[1] not in _ELEMENT_CALLS:
+        return True
+    if node[0] == "func" and node[1] in _WINDOW_FUNCTIONS:
+        return True
+    return any(_requires_group_window(child) for child in _expression_children(node))
+
+
+def _grouped_polars_value(value: Any, groups: list[str] | None) -> Any:
+    compiled = _plx(value)
+    if not groups:
+        return compiled
+    if isinstance(value, Expr) and not _requires_group_window(value.node):
+        return compiled
+    return _windowed(compiled, groups)
+
+
+def _aggregate_cache_plan(
+    assignments: dict[str, Any], occupied: list[str]
+) -> tuple[dict[str, Expr], dict[str, Any], list[str]]:
+    """Extract reusable leaf aggregates from grouped mutate expressions."""
+    occurrences: dict[str, dict[str, Any]] = {}
+
+    def visit(node: tuple, *, root: bool) -> bool:
+        children = _expression_children(node)
+        child_has_aggregate = any(
+            [visit(child, root=False) for child in children]
+        )
+        aggregate = _is_aggregate_node(node)
+        if aggregate and not child_has_aggregate:
+            key = repr(node)
+            info = occurrences.setdefault(
+                key, {"node": node, "count": 0, "nested": False}
+            )
+            info["count"] += 1
+            info["nested"] = info["nested"] or not root
+        return aggregate or child_has_aggregate
+
+    for value in assignments.values():
+        if isinstance(value, Expr):
+            visit(value.node, root=True)
+
+    selected = {
+        key: info
+        for key, info in occurrences.items()
+        if info["nested"] or info["count"] > 1
+    }
+    if not selected:
+        return {}, assignments, []
+
+    temp_names: dict[str, str] = {}
+    used = [*occupied, *assignments]
+    for index, key in enumerate(selected, start=1):
+        name = _temp_column([*used, *temp_names.values()], f"__tidy3_agg_{index}")
+        temp_names[key] = name
+
+    def rewrite(node: tuple) -> tuple:
+        key = repr(node)
+        if key in temp_names:
+            return ("col", temp_names[key])
+        kind = node[0]
+        if kind == "bin":
+            return (kind, node[1], rewrite(node[2]), rewrite(node[3]))
+        if kind in {"neg", "not", "desc"}:
+            return (kind, rewrite(node[1]))
+        if kind == "call":
+            return (
+                kind,
+                node[1],
+                rewrite(node[2]),
+                tuple(
+                    Expr(rewrite(value.node)) if isinstance(value, Expr) else value
+                    for value in node[3]
+                ),
+                {
+                    key: Expr(rewrite(value.node))
+                    if isinstance(value, Expr)
+                    else value
+                    for key, value in node[4].items()
+                },
+            )
+        if kind == "func":
+            return (
+                kind,
+                node[1],
+                tuple(rewrite(value) for value in node[2]),
+                {key: rewrite(value) for key, value in node[3].items()},
+            )
+        if kind == "case_when":
+            return (
+                kind,
+                tuple(
+                    (rewrite(condition), rewrite(value))
+                    for condition, value in node[1]
+                ),
+                rewrite(node[2]),
+            )
+        return node
+
+    cached = {
+        temp_names[key]: Expr(info["node"]) for key, info in selected.items()
+    }
+    rewritten = {
+        name: Expr(rewrite(value.node)) if isinstance(value, Expr) else value
+        for name, value in assignments.items()
+    }
+    return cached, rewritten, list(cached)
 
 
 def filter(*predicates: Any, by: Any = None) -> Verb:  # noqa: A001
@@ -218,7 +608,14 @@ def filter_out(*predicates: Any, by: Any = None) -> Verb:
     return Verb(_apply, "filter_out")
 
 
-def mutate(*specs: Any, by: Any = None, **kwargs: Any) -> Verb:
+def mutate(
+    *specs: Any,
+    by: Any = None,
+    keep: str = "all",
+    before: Any = None,
+    after: Any = None,
+    **kwargs: Any,
+) -> Verb:
     """Add or overwrite columns.
 
     After ``group_by`` each expression is evaluated per group (dplyr window
@@ -227,11 +624,40 @@ def mutate(*specs: Any, by: Any = None, **kwargs: Any) -> Verb:
     """
     if not specs and not kwargs:
         raise TypeError("mutate() requires at least one assignment")
+    if keep not in {"all", "used", "unused", "none"}:
+        raise ValueError("mutate() keep must be all, used, unused, or none")
+    if before is not None and after is not None:
+        raise ValueError("mutate() accepts only one of before= or after=")
 
     def _apply(tf):
+        input_columns = _frame_columns(tf)
         groups, transient = _operation_groups(tf, by, "mutate")
         context = _group_context(tf, groups)
         assignments = _expanded_assignments(context, specs, kwargs, "mutate")
+        deleted_so_far: set[str] = set()
+        for name, value in assignments.items():
+            if value is None:
+                deleted_so_far.add(name)
+                continue
+            missing = _column_references(value) & deleted_so_far
+            if missing:
+                raise KeyError(
+                    "mutate() expression references columns deleted earlier "
+                    f"in the call: {sorted(missing)}"
+                )
+        deletions = [name for name, value in assignments.items() if value is None]
+        grouped_deletions = [
+            name for name in deletions if name in (tf._groups or [])
+        ]
+        if grouped_deletions:
+            raise ValueError(
+                f"mutate() cannot delete grouping columns: {grouped_deletions}"
+            )
+        assignments = {
+            name: value for name, value in assignments.items() if value is not None
+        }
+        input_columns = [name for name in input_columns if name not in deletions]
+        stages = _assignment_stages(assignments)
         if tf._backend == "pandas":
             work = tf._pdf
             marker = None
@@ -239,62 +665,94 @@ def mutate(*specs: Any, by: Any = None, **kwargs: Any) -> Verb:
                 marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
                 work = work.assign(**{marker: range(len(work))})
                 groups = [marker]
-            pdf = _pe().do_mutate(work, assignments, groups)
+            for stage in stages:
+                cached, stage, cache_columns = (
+                    _aggregate_cache_plan(stage, list(work.columns))
+                    if groups and not tf._rowwise
+                    else ({}, stage, [])
+                )
+                if cached:
+                    work = _pe().do_mutate(work, cached, groups)
+                work = _pe().do_mutate(work, stage, groups)
+                if cache_columns:
+                    work = work.drop(columns=cache_columns)
+            pdf = work
             if marker is not None:
                 pdf = pdf.drop(columns=marker)
-            return tf._with_pdf(pdf, groups=None if transient else tf._groups)
+            if deletions:
+                pdf = pdf.drop(columns=deletions, errors="ignore")
+            result = tf._with_pdf(
+                pdf, groups=None if transient else tf._groups
+            )
+            ordered = _mutate_column_order(
+                result,
+                input_columns,
+                assignments,
+                groups,
+                keep=keep,
+                before=before,
+                after=after,
+            )
+            return tf._with_pdf(
+                pdf.loc[:, ordered],
+                groups=None if transient else tf._groups,
+            )
         if tf._rowwise:
             marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
             lf = tf._lf.with_row_index(marker)
-            exprs = {k: _pl_expr(v).over(marker) for k, v in assignments.items()}
-            lf = lf.with_columns(**exprs).drop(marker)
+            for stage in stages:
+                exprs = {k: _pl_expr(v).over(marker) for k, v in stage.items()}
+                lf = lf.with_columns(**exprs)
+            lf = lf.drop(marker)
         else:
-            exprs = {
-                k: _windowed(_plx(v), groups) for k, v in assignments.items()
-            }
-            lf = tf._lf.with_columns(**exprs)
-        return tf._with_lf(lf, groups=None if transient else tf._groups)
+            lf = tf._lf
+            for stage in stages:
+                cached, stage, cache_columns = (
+                    _aggregate_cache_plan(stage, lf.collect_schema().names())
+                    if groups
+                    else ({}, stage, [])
+                )
+                if cached:
+                    lf = lf.with_columns(
+                        **{
+                            name: _grouped_polars_value(value, groups)
+                            for name, value in cached.items()
+                        }
+                    )
+                exprs = {
+                    k: _grouped_polars_value(v, groups)
+                    for k, v in stage.items()
+                }
+                lf = lf.with_columns(**exprs)
+                if cache_columns:
+                    lf = lf.drop(cache_columns)
+        if deletions:
+            existing = lf.collect_schema().names()
+            lf = lf.drop(*[name for name in deletions if name in existing])
+        result = tf._with_lf(
+            lf, groups=None if transient else tf._groups
+        )
+        ordered = _mutate_column_order(
+            result,
+            input_columns,
+            assignments,
+            groups,
+            keep=keep,
+            before=before,
+            after=after,
+        )
+        return tf._with_lf(
+            lf.select(ordered), groups=None if transient else tf._groups
+        )
 
     return Verb(_apply, "mutate")
 
 
 def transmute(*specs: Any, by: Any = None, **kwargs: Any) -> Verb:
     """Keep only newly defined columns (plus groups if set)."""
-    if not specs and not kwargs:
-        raise TypeError("transmute() requires at least one assignment")
-
-    def _apply(tf):
-        groups, transient = _operation_groups(tf, by, "transmute")
-        context = _group_context(tf, groups)
-        assignments = _expanded_assignments(context, specs, kwargs, "transmute")
-        keep = list(assignments.keys())
-        if groups:
-            keep = list(dict.fromkeys([*groups, *keep]))
-        if tf._backend == "pandas":
-            work = tf._pdf
-            if tf._rowwise:
-                marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
-                work = work.assign(**{marker: range(len(work))})
-                groups = [marker]
-            pdf = _pe().do_mutate(work, assignments, groups)
-            return tf._with_pdf(
-                pdf[keep], groups=None if transient else tf._groups
-            )
-        if tf._rowwise:
-            marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
-            lf = tf._lf.with_row_index(marker)
-            exprs = {k: _pl_expr(v).over(marker) for k, v in assignments.items()}
-            lf = lf.with_columns(**exprs)
-        else:
-            exprs = {
-                k: _windowed(_plx(v), groups) for k, v in assignments.items()
-            }
-            lf = tf._lf.with_columns(**exprs)
-        return tf._with_lf(
-            lf.select(keep), groups=None if transient else tf._groups
-        )
-
-    return Verb(_apply, "transmute")
+    verb = mutate(*specs, by=by, keep="none", **kwargs)
+    verb.name = "transmute"
+    return verb
 
 
 def select(*cols: Any, **renames: Any) -> Verb:
@@ -384,9 +842,21 @@ def rename(**kwargs: str) -> Verb:
 
     def _apply(tf):
         groups = [mapping.get(g, g) for g in tf._groups] if tf._groups else None
+        category_levels = {
+            mapping.get(name, name): levels
+            for name, levels in tf._category_levels.items()
+        }
         if tf._backend == "pandas":
-            return tf._with_pdf(tf._pdf.rename(columns=mapping), groups=groups)
-        return tf._with_lf(tf._lf.rename(mapping), groups=groups)
+            return tf._with_pdf(
+                tf._pdf.rename(columns=mapping),
+                groups=groups,
+                category_levels=category_levels,
+            )
+        return tf._with_lf(
+            tf._lf.rename(mapping),
+            groups=groups,
+            category_levels=category_levels,
+        )
 
     return Verb(_apply, "rename")
 
@@ -450,9 +920,21 @@ def rename_with(fn: Callable[[str], str], *cols: Any) -> Verb:
         if len(set(renamed)) != len(renamed):
             raise ValueError("rename_with() produced duplicate column names")
         groups = [mapping.get(group, group) for group in tf._groups] if tf._groups else None
+        category_levels = {
+            mapping.get(name, name): levels
+            for name, levels in tf._category_levels.items()
+        }
         if tf._backend == "pandas":
-            return tf._with_pdf(tf._pdf.rename(columns=mapping), groups=groups)
-        return tf._with_lf(tf._lf.rename(mapping), groups=groups)
+            return tf._with_pdf(
+                tf._pdf.rename(columns=mapping),
+                groups=groups,
+                category_levels=category_levels,
+            )
+        return tf._with_lf(
+            tf._lf.rename(mapping),
+            groups=groups,
+            category_levels=category_levels,
+        )
 
     return Verb(_apply, "rename_with")
 
@@ -523,16 +1005,23 @@ def glimpse(n: int = 10) -> Verb:
     return Verb(_apply, "glimpse")
 
 
-def arrange(*keys: Any) -> Verb:
+def arrange(*keys: Any, by_group: bool = False) -> Verb:
     if not keys:
         raise TypeError("arrange() requires at least one key")
+    if not isinstance(by_group, bool):
+        raise TypeError("arrange() by_group must be a boolean")
 
     def _apply(tf):
+        effective_keys = (
+            tuple([*(tf._groups or []), *keys]) if by_group else keys
+        )
         if tf._backend == "pandas":
-            return tf._with_pdf(_pe().do_arrange(tf._pdf, keys), groups=tf._groups)
+            return tf._with_pdf(
+                _pe().do_arrange(tf._pdf, effective_keys), groups=tf._groups
+            )
         expressions = []
         descending = []
-        for key in keys:
+        for key in effective_keys:
             node = key.node if isinstance(key, Expr) else None
             if node is not None and node[0] == "desc":
                 expressions.append(to_polars(Expr(node[1])))
@@ -540,24 +1029,58 @@ def arrange(*keys: Any) -> Verb:
             else:
                 expressions.append(_plx(key))
                 descending.append(False)
+        expressions = _dplyr_sort_expressions(tf._lf, expressions)
         return tf._with_lf(
-            tf._lf.sort(expressions, descending=descending), groups=tf._groups
+            tf._lf.sort(
+                expressions,
+                descending=descending,
+                nulls_last=True,
+                maintain_order=True,
+            ),
+            groups=tf._groups,
         )
 
     return Verb(_apply, "arrange")
 
 
-def distinct(*cols: str) -> Verb:
+def distinct(
+    *cols: Any,
+    keep_all: bool = False,
+    maintain_order: bool = True,
+    **computed: Any,
+) -> Verb:
+    """Keep unique rows, optionally creating keys before deduplication."""
+    if not isinstance(keep_all, bool):
+        raise TypeError("distinct() keep_all must be a boolean")
+    if not isinstance(maintain_order, bool):
+        raise TypeError("distinct() maintain_order must be a boolean")
+
     def _apply(tf):
-        if tf._backend == "pandas":
-            return tf._with_pdf(_pe().do_distinct(tf._pdf, cols), groups=tf._groups)
+        work = tf >> mutate(**computed) if computed else tf
+        columns = _frame_columns(work)
         if cols:
-            return tf._with_lf(
-                tf._lf.unique(subset=list(cols), keep="first", maintain_order=True),
-                groups=tf._groups,
-            )
-        return tf._with_lf(
-            tf._lf.unique(keep="first", maintain_order=True), groups=tf._groups
+            selected = resolve_selection(work, cols)
+        elif computed:
+            selected = []
+        else:
+            selected = columns
+        selected = [*selected, *computed]
+        keys = list(dict.fromkeys([*(work._groups or []), *selected]))
+        if work._backend == "pandas":
+            output = work._pdf.drop_duplicates(subset=keys).reset_index(drop=True)
+            if (cols or computed) and not keep_all:
+                output = output.loc[:, keys]
+            return work._with_pdf(output, groups=work._groups)
+        lf = work._lf.unique(
+            subset=keys,
+            keep="first",
+            maintain_order=maintain_order,
+        )
+        if (cols or computed) and not keep_all:
+            lf = lf.select(keys)
+        return work._with_lf(
+            lf,
+            groups=work._groups,
         )
 
     return Verb(_apply, "distinct")
@@ -859,47 +1382,333 @@ def rowwise(*cols: Any) -> Verb:
     return Verb(_apply, "rowwise")
 
 
-def group_by(*cols: str) -> Verb:
-    if not cols:
+def group_by(
+    *cols: Any,
+    add: bool = False,
+    drop: bool | None = None,
+    **computed: Any,
+) -> Verb:
+    if not cols and not computed:
         raise TypeError("group_by() requires at least one column")
+    if not isinstance(add, bool):
+        raise TypeError("group_by() add must be a boolean")
+    if drop is not None and not isinstance(drop, bool):
+        raise TypeError("group_by() drop must be a boolean or None")
 
     def _apply(tf):
+        context = _group_context(tf, None)
+        assignments = {
+            name: _resolved_value(context, value)
+            for name, value in computed.items()
+        }
         if tf._backend == "pandas":
-            return tf._with_pdf(tf._pdf, groups=list(cols), rowwise=False)
-        return tf._with_lf(tf._lf, groups=list(cols), rowwise=False)
+            pdf = tf._pdf
+            for stage in _assignment_stages(assignments):
+                pdf = _pe().do_mutate(pdf, stage, None)
+            selected = resolve_selection(
+                tf._with_pdf(pdf, groups=None, rowwise=False), cols
+            )
+            groups = list(
+                dict.fromkeys(
+                    [
+                        *((tf._groups or []) if add else []),
+                        *selected,
+                        *computed,
+                    ]
+                )
+            )
+            group_drop = (
+                tf._group_drop if drop is None and tf._groups else
+                True if drop is None else drop
+            )
+            return tf._with_pdf(
+                pdf,
+                groups=groups,
+                rowwise=False,
+                group_drop=group_drop,
+            )
+        lf = tf._lf
+        for stage in _assignment_stages(assignments):
+            lf = lf.with_columns(
+                **{name: _pl_expr(value) for name, value in stage.items()}
+            )
+        selected = resolve_selection(
+            tf._with_lf(lf, groups=None, rowwise=False), cols
+        )
+        groups = list(
+            dict.fromkeys(
+                [
+                    *((tf._groups or []) if add else []),
+                    *selected,
+                    *computed,
+                ]
+            )
+        )
+        group_drop = (
+            tf._group_drop if drop is None and tf._groups else
+            True if drop is None else drop
+        )
+        return tf._with_lf(
+            lf,
+            groups=groups,
+            rowwise=False,
+            group_drop=group_drop,
+        )
 
     return Verb(_apply, "group_by")
 
 
-def ungroup() -> Verb:
+def ungroup(*cols: Any) -> Verb:
     def _apply(tf):
+        if cols:
+            selected = resolve_selection(tf, cols)
+            not_grouped = [name for name in selected if name not in (tf._groups or [])]
+            if not_grouped:
+                raise ValueError(
+                    f"ungroup() columns are not grouping columns: {not_grouped}"
+                )
+            groups = [name for name in (tf._groups or []) if name not in selected]
+            groups = groups or None
+        else:
+            groups = None
         if tf._backend == "pandas":
-            return tf._with_pdf(tf._pdf, groups=None, rowwise=False)
-        return tf._with_lf(tf._lf, groups=None, rowwise=False)
+            return tf._with_pdf(tf._pdf, groups=groups, rowwise=False)
+        return tf._with_lf(tf._lf, groups=groups, rowwise=False)
 
     return Verb(_apply, "ungroup")
 
 
-def summarise(*specs: Any, by: Any = None, **kwargs: Any) -> Verb:
+def with_groups(cols: Any, fn: Any) -> Verb:
+    """Run a callable with temporary grouping, then restore prior groups."""
+    if not callable(fn):
+        raise TypeError("with_groups() fn must be callable")
+    selected = (cols,) if isinstance(cols, str) else tuple(cols)
+    if not selected:
+        raise TypeError("with_groups() requires at least one grouping column")
+
+    def _apply(tf):
+        original_groups = tf._groups
+        grouped = tf >> group_by(*selected)
+        result = fn(grouped)
+        if not hasattr(result, "_backend"):
+            raise TypeError("with_groups() fn must return a TidyFrame")
+        if result._backend == "pandas":
+            return result._with_pdf(
+                result._pdf,
+                groups=original_groups,
+                rowwise=False,
+                group_drop=tf._group_drop,
+            )
+        return result._with_lf(
+            result._lf,
+            groups=original_groups,
+            rowwise=False,
+            group_drop=tf._group_drop,
+        )
+
+    return Verb(_apply, "with_groups")
+
+
+def _grouped_parts(
+    tf: Any, cols: tuple[Any, ...]
+) -> list[tuple[dict[str, Any], Any, tuple[int, ...]]]:
+    """Materialize stable group partitions for Python group callbacks."""
+    from tidy3.frame import tidy
+
+    names = resolve_selection(tf, cols) if cols else list(tf._groups or [])
+    if not names:
+        raise ValueError("group workflow requires at least one grouping column")
+    pdf = tf.collect(as_="pandas")
+    parts: list[tuple[dict[str, Any], Any, tuple[int, ...]]] = []
+    grouping_key = names[0] if len(names) == 1 else names
+    for key, positions in pdf.groupby(grouping_key, sort=False, dropna=False).groups.items():
+        key_tuple = key if isinstance(key, tuple) else (key,)
+        subset = pdf.loc[positions].reset_index(drop=True)
+        key_map = dict(zip(names, key_tuple))
+        row_positions = tuple(int(index) for index in pdf.index.get_indexer(positions))
+        parts.append((key_map, tidy(subset, backend=tf._backend), row_positions))
+    return parts
+
+
+def group_split(*cols: Any) -> Verb:
+    """Split a grouped frame into a list of ungrouped ``TidyFrame`` objects."""
+
+    def _apply(tf):
+        return [part for _, part, _ in _grouped_parts(tf, tuple(cols))]
+
+    return Verb(_apply, "group_split")
+
+
+def group_map(fn: Any, *cols: Any) -> Verb:
+    """Apply ``fn(.x, .y)`` to each group and return the callback results."""
+    if not callable(fn):
+        raise TypeError("group_map() fn must be callable")
+
+    def _apply(tf):
+        outputs = []
+        for key, part, rows in _grouped_parts(tf, tuple(cols)):
+            token = _group_rows_token(rows)
+            try:
+                outputs.append(fn(part, key))
+            finally:
+                _reset_group_rows(token)
+        return outputs
+
+    return Verb(_apply, "group_map")
+
+
+def group_modify(fn: Any, *cols: Any) -> Verb:
+    """Apply a frame-returning callback per group and bind the results."""
+    if not callable(fn):
+        raise TypeError("group_modify() fn must be callable")
+
+    def _apply(tf):
+        from tidy3.frame import tidy
+
+        outputs = []
+        for key, part, rows in _grouped_parts(tf, tuple(cols)):
+            token = _group_rows_token(rows)
+            try:
+                result = fn(part, key)
+            finally:
+                _reset_group_rows(token)
+            if hasattr(result, "collect"):
+                outputs.append(result.collect(as_="pandas"))
+            else:
+                import pandas as pd
+
+                outputs.append(pd.DataFrame(result))
+        if not outputs:
+            return tidy({}, backend=tf._backend)
+        import pandas as pd
+
+        return tidy(pd.concat(outputs, ignore_index=True), backend=tf._backend)
+
+    return Verb(_apply, "group_modify")
+
+
+def group_nest(*cols: Any, name: str = "data") -> Verb:
+    """Nest each group's rows into a list column named ``data``."""
+    if not isinstance(name, str) or not name:
+        raise TypeError("group_nest() name must be a non-empty string")
+
+    def _apply(tf):
+        import pandas as pd
+        from tidy3.frame import tidy
+
+        rows = []
+        for key, part, _ in _grouped_parts(tf, tuple(cols)):
+            nested = part.collect(as_="pandas").drop(columns=list(key))
+            value = (
+                nested
+                if tf._backend == "pandas"
+                else nested.to_dict(orient="records")
+            )
+            rows.append({**key, name: value})
+        return tidy(pd.DataFrame(rows), backend=tf._backend)
+
+    return Verb(_apply, "group_nest")
+
+
+def _complete_polars_empty_groups(
+    tf: Any,
+    result: pl.LazyFrame,
+    groups: list[str],
+    assignments: dict[str, Any],
+) -> pl.LazyFrame:
+    """Add factor levels omitted by Polars group_by when drop=False."""
+    schema = tf._lf.collect_schema()
+    grids: list[pl.LazyFrame] = []
+    for name in groups:
+        levels = tf._category_levels.get(name)
+        if levels is not None:
+            grid = pl.DataFrame({name: levels}).lazy().with_columns(
+                pl.col(name).cast(schema[name])
+            )
+        else:
+            grid = tf._lf.select(name).unique(maintain_order=True)
+        grids.append(grid)
+    grid = grids[0]
+    for other in grids[1:]:
+        grid = grid.join(other, how="cross")
+
+    marker = _temp_column(
+        [*result.collect_schema().names(), *groups],
+        "__tidy3_observed_group",
+    )
+    defaults_frame = tf._lf.limit(0).select(
+        *(
+            (_plx(expr) if isinstance(_plx(expr), pl.Expr) else pl.lit(expr))
+            .alias(name)
+            for name, expr in assignments.items()
+        )
+    ).collect()
+    defaults = defaults_frame.row(0, named=True)
+    joined = grid.join(
+        result.with_columns(pl.lit(True).alias(marker)),
+        on=groups,
+        how="left",
+        maintain_order="left",
+    )
+    return joined.select(
+        *groups,
+        *(
+            pl.when(pl.col(marker).is_null())
+            .then(pl.lit(defaults[name]))
+            .otherwise(pl.col(name))
+            .alias(name)
+            for name in assignments
+        ),
+    )
+
+
+def summarise(
+    *specs: Any,
+    by: Any = None,
+    groups: str | None = None,
+    **kwargs: Any,
+) -> Verb:
     """Aggregate; uses current ``group_by`` if set."""
     if not specs and not kwargs:
         raise TypeError("summarise() requires at least one aggregation")
+    if groups not in {None, "drop_last", "drop", "keep", "rowwise"}:
+        raise ValueError(
+            "summarise() groups must be drop_last, drop, keep, rowwise, or None"
+        )
+    if by is not None and groups not in {None, "drop"}:
+        raise ValueError("summarise() groups cannot be used with by=")
+    requested_groups = groups
 
     def _apply(tf):
-        groups, transient = _operation_groups(tf, by, "summarise")
-        context = _group_context(tf, groups)
+        operation_groups, transient = _operation_groups(tf, by, "summarise")
+        input_groups = list(operation_groups or [])
+        grouping_policy = (
+            "keep" if tf._rowwise and requested_groups is None
+            else "drop_last" if requested_groups is None
+            else requested_groups
+        )
+        if transient or grouping_policy == "drop":
+            result_groups = None
+        elif grouping_policy == "keep":
+            result_groups = input_groups or None
+        elif grouping_policy == "rowwise":
+            result_groups = input_groups or None
+        else:
+            result_groups = input_groups[:-1] or None
+        result_rowwise = grouping_policy == "rowwise"
+        context = _group_context(tf, operation_groups)
         assignments = _expanded_assignments(context, specs, kwargs, "summarise")
+        assignments = _sequential_summary_assignments(assignments)
         if tf._rowwise:
             marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
             keys = [*(tf._groups or []), marker]
-            result_groups = list(tf._groups) if tf._groups else None
             if tf._backend == "pandas":
                 work = tf._pdf.assign(**{marker: range(len(tf._pdf))})
-                pdf = _pe().do_reframe(work, assignments, keys).drop(
-                    columns=marker
-                )
+                pdf = _pe().do_reframe(
+                    work, assignments, keys, sort_groups=False
+                ).drop(columns=marker)
                 return tf._with_pdf(
-                    pdf, groups=result_groups, rowwise=False
+                    pdf, groups=result_groups, rowwise=result_rowwise
                 )
             named = []
             for name, expr in assignments.items():
@@ -910,12 +1719,20 @@ def summarise(*specs: Any, by: Any = None, **kwargs: Any) -> Verb:
                 .agg(named)
                 .drop(marker)
             )
-            return tf._with_lf(lf, groups=result_groups, rowwise=False)
+            return tf._with_lf(
+                lf, groups=result_groups, rowwise=result_rowwise
+            )
         if tf._backend == "pandas":
             return tf._with_pdf(
-                _pe().do_summarise(tf._pdf, assignments, groups),
-                groups=None,
-                rowwise=False,
+                _pe().do_summarise(
+                    tf._pdf,
+                    assignments,
+                    operation_groups,
+                    sort_groups=not transient,
+                    observed=tf._group_drop or transient,
+                ),
+                groups=result_groups,
+                rowwise=result_rowwise,
             )
         named = []
         for name, expr in assignments.items():
@@ -924,11 +1741,27 @@ def summarise(*specs: Any, by: Any = None, **kwargs: Any) -> Verb:
                 named.append(e.alias(name))
             else:
                 named.append(pl.lit(e).alias(name))
-        if groups:
-            lf = tf._lf.group_by(groups, maintain_order=transient).agg(named)
-            return tf._with_lf(lf, groups=None, rowwise=False)
+        if operation_groups:
+            lf = tf._lf.group_by(
+                operation_groups, maintain_order=transient
+            ).agg(named)
+            if not transient and not tf._group_drop:
+                lf = _complete_polars_empty_groups(
+                    tf, lf, input_groups, assignments
+                )
+            if not transient:
+                lf = lf.sort(
+                    _dplyr_sort_expressions(lf, list(operation_groups)),
+                    nulls_last=True,
+                    maintain_order=True,
+                )
+            return tf._with_lf(
+                lf, groups=result_groups, rowwise=result_rowwise
+            )
         lf = tf._lf.select(named)
-        return tf._with_lf(lf, groups=None, rowwise=False)
+        return tf._with_lf(
+            lf, groups=result_groups, rowwise=result_rowwise
+        )
 
     return Verb(_apply, "summarise")
 
@@ -942,7 +1775,7 @@ def reframe(*specs: Any, by: Any = None, **kwargs: Any) -> Verb:
         raise TypeError("reframe() requires at least one expression")
 
     def _apply(tf):
-        groups, _ = _operation_groups(tf, by, "reframe")
+        groups, transient = _operation_groups(tf, by, "reframe")
         context = _group_context(tf, groups)
         assignments = _expanded_assignments(context, specs, kwargs, "reframe")
         if tf._backend == "pandas":
@@ -952,7 +1785,12 @@ def reframe(*specs: Any, by: Any = None, **kwargs: Any) -> Verb:
                 marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
                 work = work.assign(**{marker: range(len(work))})
                 groups = [*(tf._groups or []), marker]
-            pdf = _pe().do_reframe(work, assignments, groups)
+            pdf = _pe().do_reframe(
+                work,
+                assignments,
+                groups,
+                sort_groups=not transient and marker is None,
+            )
             if marker is not None:
                 pdf = pdf.drop(columns=marker)
             return tf._with_pdf(pdf, groups=None, rowwise=False)
@@ -967,6 +1805,12 @@ def reframe(*specs: Any, by: Any = None, **kwargs: Any) -> Verb:
             groups.append(marker)
         if groups:
             lf = lf.group_by(groups, maintain_order=True).agg(named)
+            if not transient and marker is None:
+                lf = lf.sort(
+                    _dplyr_sort_expressions(lf, groups),
+                    nulls_last=True,
+                    maintain_order=True,
+                )
         else:
             lf = lf.select(named)
         schema = lf.collect_schema()
@@ -1010,11 +1854,19 @@ def _count_rows(
     sort: bool,
     name: str | None,
     result_groups: list[str] | None,
+    drop: bool,
 ):
     eff = list(dict.fromkeys([*(tf._groups or []), *cols]))
     out_name = _count_name(tf, name, eff)
     if tf._backend == "pandas":
-        pdf = _pe().do_count(tf._pdf, tuple(eff), out_name, wt=wt, sort=sort)
+        pdf = _pe().do_count(
+            tf._pdf,
+            tuple(eff),
+            out_name,
+            wt=wt,
+            sort=sort,
+            observed=drop,
+        )
         return tf._with_pdf(pdf, groups=result_groups)
 
     if wt is None:
@@ -1028,10 +1880,27 @@ def _count_rows(
         agg = agg.sum()
     if eff:
         lf = tf._lf.group_by(eff).agg(agg.alias(out_name))
+        if not drop:
+            lf = _complete_polars_empty_groups(
+                tf, lf, eff, {out_name: agg}
+            )
     else:
         lf = tf._lf.select(agg.alias(out_name))
-    if sort:
-        lf = lf.sort(out_name, descending=True)
+    if eff:
+        group_keys = _dplyr_sort_expressions(lf, eff)
+        if sort:
+            lf = lf.sort(
+                [pl.col(out_name), *group_keys],
+                descending=[True, *([False] * len(group_keys))],
+                nulls_last=True,
+                maintain_order=True,
+            )
+        else:
+            lf = lf.sort(
+                group_keys, nulls_last=True, maintain_order=True
+            )
+    elif sort:
+        lf = lf.sort(out_name, descending=True, maintain_order=True)
     return tf._with_lf(lf, groups=result_groups)
 
 
@@ -1040,17 +1909,30 @@ def count(
     wt: Any = None,
     sort: bool = False,
     name: str | None = None,
+    drop: bool | None = None,
 ) -> Verb:
     """Count rows per group (dplyr): existing ``group_by`` groups plus *cols*.
 
     ``group_by("a") >> count()`` ≡ R's ``group_by(a) %>% tally()``.
     Existing groups are used for the calculation and preserved on the result.
     """
+    if drop is not None and not isinstance(drop, bool):
+        raise TypeError("count() drop must be a boolean or None")
 
     def _apply(tf):
         groups = list(tf._groups) if tf._groups else None
+        effective_drop = (
+            tf._group_drop if drop is None and tf._groups else
+            True if drop is None else drop
+        )
         return _count_rows(
-            tf, cols, wt=wt, sort=sort, name=name, result_groups=groups
+            tf,
+            cols,
+            wt=wt,
+            sort=sort,
+            name=name,
+            result_groups=groups,
+            drop=effective_drop,
         )
 
     return Verb(_apply, "count")
@@ -1062,7 +1944,13 @@ def tally(*, wt: Any = None, sort: bool = False, name: str | None = None) -> Ver
     def _apply(tf):
         groups = list(tf._groups[:-1]) if tf._groups and len(tf._groups) > 1 else None
         return _count_rows(
-            tf, (), wt=wt, sort=sort, name=name, result_groups=groups
+            tf,
+            (),
+            wt=wt,
+            sort=sort,
+            name=name,
+            result_groups=groups,
+            drop=tf._group_drop,
         )
 
     return Verb(_apply, "tally")
@@ -1202,8 +2090,155 @@ def slice_sample(
             )
             return tf._with_pdf(pdf, groups=None if transient else tf._groups)
         if weight_by is not None:
-            raise NotImplementedError(
-                "slice_sample() weight_by currently requires backend='pandas'"
+            columns = _frame_columns(tf)
+            row_name = _temp_column(columns, "__tidy3_sample_row")
+            weight_name = _temp_column(
+                [*columns, row_name], "__tidy3_sample_weight"
+            )
+            key_name = _temp_column(
+                [*columns, row_name, weight_name], "__tidy3_sample_key"
+            )
+            seed_value = (
+                seed if seed is not None else random.randrange(2**32)
+            )
+            weight = (
+                pl.col(weight_by)
+                if isinstance(weight_by, str)
+                else _plx(weight_by)
+            )
+            if not isinstance(weight, pl.Expr):
+                raise TypeError(
+                    "slice_sample() weight_by must be a column or expression"
+                )
+            base = tf._lf.with_row_index(row_name).with_columns(
+                weight.cast(pl.Float64).alias(weight_name)
+            )
+            invalid = base.filter(
+                pl.col(weight_name).is_null()
+                | ~pl.col(weight_name).is_finite()
+                | (pl.col(weight_name) < 0)
+            )
+            base = _pl_guard_no_rows(
+                base,
+                invalid,
+                "slice_sample() weights must be finite, non-missing, and non-negative",
+            )
+            target = _windowed(_slice_target(n, prop), groups)
+            positive = _windowed(
+                (pl.col(weight_name) > 0).sum(), groups
+            )
+            if not replace:
+                too_few = base.filter(positive < target)
+                base = _pl_guard_no_rows(
+                    base,
+                    too_few,
+                    "slice_sample() cannot take a larger sample than the number of positive weights",
+                )
+                modulus = float(2**53 - 1)
+                uniform = (
+                    (
+                        pl.col(row_name).hash(seed=seed_value)
+                        % (2**53 - 1)
+                    ).cast(pl.Float64)
+                    + 1.0
+                ) / modulus
+                key = (-uniform.log() / pl.col(weight_name)).alias(key_name)
+                lf = base.with_columns(key)
+                rank = _windowed(
+                    pl.col(key_name).rank(method="ordinal"), groups
+                )
+                lf = lf.filter(rank <= target)
+                sort_keys = [*(groups or []), key_name]
+                lf = lf.sort(sort_keys, maintain_order=True)
+                return tf._with_lf(
+                    lf.select(columns),
+                    groups=None if transient else tf._groups,
+                )
+
+            no_positive = base.filter((positive == 0) & (target > 0))
+            base = _pl_guard_no_rows(
+                base,
+                no_positive,
+                "slice_sample() has too few positive weights",
+            )
+
+            group_keys = list(groups or [])
+            dummy = None
+            if not group_keys:
+                dummy = _temp_column(
+                    [*columns, row_name, weight_name, key_name],
+                    "__tidy3_sample_group",
+                )
+                base = base.with_columns(pl.lit(0).alias(dummy))
+                group_keys = [dummy]
+            cumulative = _temp_column(
+                [*columns, row_name, weight_name, key_name, *group_keys],
+                "__tidy3_sample_cumulative",
+            )
+            total = _temp_column(
+                [*columns, row_name, weight_name, key_name, cumulative],
+                "__tidy3_sample_total",
+            )
+            length = _temp_column(
+                [*columns, row_name, weight_name, key_name, cumulative, total],
+                "__tidy3_sample_length",
+            )
+            draw = _temp_column(
+                [
+                    *columns,
+                    row_name,
+                    weight_name,
+                    key_name,
+                    cumulative,
+                    total,
+                    length,
+                ],
+                "__tidy3_sample_draw",
+            )
+            base = base.with_columns(
+                pl.col(weight_name).cum_sum().over(group_keys).alias(cumulative)
+            )
+            group_info = base.group_by(
+                group_keys, maintain_order=True
+            ).agg(
+                pl.col(weight_name).sum().alias(total),
+                pl.len().alias(length),
+            )
+            if n is not None:
+                target_count = (
+                    pl.lit(n) if n >= 0 else pl.col(length) + n
+                )
+            else:
+                factor = prop if prop >= 0 else 1.0 + prop
+                target_count = (pl.col(length) * factor).floor()
+            group_info = group_info.with_columns(
+                pl.int_ranges(0, target_count).alias(draw)
+            ).explode(draw, empty_as_null=False)
+            modulus = float(2**53 - 1)
+            uniform = (
+                (
+                    pl.struct([*group_keys, draw]).hash(seed=seed_value)
+                    % (2**53 - 1)
+                ).cast(pl.Float64)
+                + 1.0
+            ) / modulus
+            draws = group_info.with_columns(
+                (uniform * pl.col(total)).alias(key_name)
+            )
+            candidates = (
+                draws.join(base, on=group_keys, how="inner")
+                .filter(pl.col(cumulative) > pl.col(key_name))
+                .sort([*group_keys, draw, cumulative], maintain_order=True)
+                .unique(
+                    subset=[*group_keys, draw],
+                    keep="first",
+                    maintain_order=True,
+                )
+                .sort([*group_keys, draw], maintain_order=True)
+            )
+            return tf._with_lf(
+                candidates.select(columns),
+                groups=None if transient else tf._groups,
             )
         if not replace:
             context = _group_context(tf, groups)
@@ -1602,9 +2637,18 @@ def _mutating_join(
             }
             if how == "full":
                 params["coalesce"] = True
-            return tf._with_lf(
-                tf._lf.join(r, on=keys, how=how, **params), groups=tf._groups
-            )
+            lf = tf._lf.join(r, on=keys, how=how, **params)
+            left_columns = tf._lf.collect_schema().names()
+            right_columns = r.collect_schema().names()
+            key_columns = [keys] if isinstance(keys, str) else list(keys)
+            ordered = [*left_columns]
+            for column in right_columns:
+                if column in key_columns:
+                    continue
+                ordered.append(
+                    f"{column}_right" if column in left_columns else column
+                )
+            return tf._with_lf(lf.select(ordered), groups=tf._groups)
         key_names = [keys] if isinstance(keys, str) else list(keys)
         return _join_by_operation(tf, r, join_by(*key_names), how, kwargs)
 
@@ -1680,6 +2724,86 @@ def full_join(
         verb_name="full_join",
         **kwargs,
     )
+
+
+def nest_join(
+    right: Any,
+    *,
+    on: str | list[str] | None = None,
+    by: str | list[str] | None = None,
+    name: str = "data",
+    keep: bool = False,
+    na_matches: str = "na",
+) -> Verb:
+    """Attach matching right-hand rows as a list-column of row records."""
+    if on is not None and by is not None:
+        raise ValueError("supply only one of on= or by=")
+    if not isinstance(name, str) or not name:
+        raise TypeError("nest_join() name must be a non-empty string")
+    if na_matches not in {"na", "never"}:
+        raise ValueError("na_matches must be 'na' or 'never'")
+    join_keys = by if by is not None else on
+
+    def _apply(tf):
+        columns = _frame_columns(tf)
+        if name in columns:
+            raise ValueError(f"nest_join() output column exists: {name!r}")
+        r = _right_frame(right, tf._backend)
+        keys = _join_keys(
+            tf._pdf if tf._backend == "pandas" else tf._lf,
+            r,
+            join_keys,
+        )
+        key_columns = [keys] if isinstance(keys, str) else list(keys)
+        if tf._backend == "pandas":
+            import pandas as pd
+
+            nested_columns = [
+                column
+                for column in r.columns
+                if keep or column not in key_columns
+            ]
+            grouped = r.groupby(
+                key_columns, sort=False, dropna=na_matches == "never", observed=True
+            )
+            rows = []
+            for key, piece in grouped:
+                values = key if isinstance(key, tuple) else (key,)
+                row = dict(zip(key_columns, values))
+                row[name] = piece.loc[:, nested_columns].to_dict(orient="records")
+                rows.append(row)
+            nested = pd.DataFrame(rows, columns=[*key_columns, name])
+            output = tf._pdf.merge(
+                nested, on=key_columns, how="left", sort=False
+            )
+            output[name] = output[name].map(
+                lambda value: value if isinstance(value, list) else []
+            )
+            return tf._with_pdf(output, groups=tf._groups, rowwise=False)
+
+        right_columns = r.collect_schema().names()
+        nested_columns = [
+            column
+            for column in right_columns
+            if keep or column not in key_columns
+        ]
+        nested = r.group_by(key_columns, maintain_order=True).agg(
+            pl.struct(nested_columns).alias(name)
+        )
+        output = tf._lf.join(
+            nested,
+            on=key_columns,
+            how="left",
+            nulls_equal=na_matches == "na",
+            maintain_order="left",
+        )
+        dtype = output.collect_schema()[name]
+        output = output.with_columns(
+            pl.col(name).fill_null(pl.lit([], dtype=dtype)).alias(name)
+        )
+        return tf._with_lf(output, groups=tf._groups, rowwise=False)
+
+    return Verb(_apply, "nest_join")
 
 
 def _filter_join(
@@ -1808,8 +2932,32 @@ def bind_rows(*others: Any, id: str | None = None) -> Verb:  # noqa: A002
     return Verb(_apply, "bind_rows")
 
 
+def _repair_bind_names(names: list[str]) -> list[str]:
+    """Apply the default vctrs-style unique repair used by bind_cols()."""
+    bases = [re.sub(r"\.\.\.[0-9]+$", "", name) for name in names]
+    counts: dict[str, int] = {}
+    for name in bases:
+        counts[name] = counts.get(name, 0) + 1
+    repaired = [
+        f"{name}...{position}"
+        if not name or counts[name] > 1
+        else name
+        for position, name in enumerate(bases, start=1)
+    ]
+    return repaired
+
+
+def _common_recycled_size(sizes: list[int]) -> int:
+    non_scalar = {size for size in sizes if size != 1}
+    if len(non_scalar) > 1:
+        raise ValueError(
+            "bind_cols() inputs must have the same row count or one row"
+        )
+    return next(iter(non_scalar)) if non_scalar else 1
+
+
 def bind_cols(*others: Any) -> Verb:
-    """Combine frames column-wise; duplicate column names are rejected."""
+    """Combine frames column-wise with unique names and size-one recycling."""
     if not others:
         raise TypeError("bind_cols() requires at least one frame")
 
@@ -1823,20 +2971,70 @@ def bind_cols(*others: Any) -> Verb:
             for frame in frames
         ]
         all_columns = [column for columns in column_sets for column in columns]
-        if len(set(all_columns)) != len(all_columns):
-            raise ValueError("bind_cols() inputs must have unique column names")
+        repaired = _repair_bind_names(all_columns)
+        repaired_sets: list[list[str]] = []
+        offset = 0
+        for columns in column_sets:
+            repaired_sets.append(repaired[offset : offset + len(columns)])
+            offset += len(columns)
+        groups = None
+        if tf._groups:
+            left_mapping = dict(zip(column_sets[0], repaired_sets[0]))
+            groups = [left_mapping[name] for name in tf._groups]
         if tf._backend == "pandas":
             import pandas as pd
+            import numpy as np
 
-            sizes = {len(frame) for frame in frames}
-            if len(sizes) > 1:
-                raise ValueError("bind_cols() inputs must have the same row count")
+            sizes = [len(frame) for frame in frames]
+            target = _common_recycled_size(sizes)
+            recycled = []
+            for frame, size, names in zip(frames, sizes, repaired_sets):
+                work = frame.copy(deep=False)
+                work.columns = names
+                if size == 1 and target != 1:
+                    if target == 0:
+                        work = work.iloc[:0]
+                    else:
+                        work = work.take(np.zeros(target, dtype=np.intp))
+                recycled.append(work.reset_index(drop=True))
             pdf = pd.concat(
-                [frame.reset_index(drop=True) for frame in frames], axis=1
+                recycled, axis=1
             )
-            return tf._with_pdf(pdf, groups=tf._groups)
+            return tf._with_pdf(pdf, groups=groups)
+        sizes = [
+            int(frame.select(pl.len()).collect().item()) for frame in frames
+        ]
+        target = _common_recycled_size(sizes)
+        renamed = [
+            frame.rename(dict(zip(columns, names)))
+            for frame, columns, names in zip(
+                frames, column_sets, repaired_sets
+            )
+        ]
+        base_index = next(
+            (index for index, size in enumerate(sizes) if size == target), 0
+        )
+        horizontal = [renamed[base_index]]
+        for index, (frame, size, names) in enumerate(
+            zip(renamed, sizes, repaired_sets)
+        ):
+            if index == base_index:
+                continue
+            if size == target:
+                horizontal.append(frame)
+                continue
+            if target == 0:
+                horizontal.append(frame.head(0))
+                continue
+            row = frame.collect().row(0, named=True)
+            horizontal.append(
+                horizontal[0].with_columns(
+                    *(pl.lit(row[name]).alias(name) for name in names)
+                ).select(names)
+            )
+        lf = pl.concat(horizontal, how="horizontal_extend").select(repaired)
         return tf._with_lf(
-            pl.concat(frames, how="horizontal_extend"), groups=tf._groups
+            lf, groups=groups
         )
 
     return Verb(_apply, "bind_cols")
@@ -2233,13 +3431,56 @@ def rows_delete(
     )
 
 
-def collect(as_: str = "polars") -> Verb:
+def collect(
+    as_: str = "polars",
+    *,
+    columns: Any = None,
+    arrow_backed: bool = False,
+    engine: Any = "auto",
+    dtype: Any = None,
+    order: str = "fortran",
+    writable: bool = False,
+    allow_copy: bool = True,
+) -> Verb:
     """Materialize — returns pandas/polars DataFrame (not TidyFrame)."""
 
     def _apply(tf):
-        return tf.collect(as_=as_)
+        return tf.collect(
+            as_=as_,
+            columns=columns,
+            arrow_backed=arrow_backed,
+            engine=engine,
+            dtype=dtype,
+            order=order,
+            writable=writable,
+            allow_copy=allow_copy,
+        )
 
     return Verb(_apply, "collect")
+
+
+def to_numpy(
+    *,
+    columns: Any = None,
+    dtype: Any = None,
+    order: str = "fortran",
+    writable: bool = False,
+    allow_copy: bool = True,
+    engine: Any = "auto",
+) -> Verb:
+    """Materialize selected columns as a NumPy matrix."""
+
+    def _apply(tf):
+        return tf.to_numpy(
+            columns=columns,
+            dtype=dtype,
+            order=order,
+            writable=writable,
+            allow_copy=allow_copy,
+            engine=engine,
+        )
+
+    return Verb(_apply, "to_numpy")
 
 
 def peek(n: int | None = None) -> Verb:

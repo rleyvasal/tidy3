@@ -307,7 +307,9 @@ def test_grouped_sample_frac_truncates_within_each_group():
 def test_distinct_keeps_first_occurrence_order_on_both_backends():
     data = pd.DataFrame({"x": [3, 1, 2, 1, 3], "y": list("abcde")})
     for backend in ("polars", "pandas"):
-        out = (tidy(data, backend=backend) >> distinct("x")).collect(as_="pandas")
+        out = (
+            tidy(data, backend=backend) >> distinct("x", keep_all=True)
+        ).collect(as_="pandas")
         assert out["x"].tolist() == [3, 1, 2]
         assert out["y"].tolist() == ["a", "b", "c"]
 
