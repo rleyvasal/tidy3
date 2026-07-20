@@ -844,6 +844,20 @@ there are no expected-failure parity cases. Random sampling and explicit
 materialization boundaries use deterministic invariants where byte-for-byte
 comparison with R would be inappropriate.
 
+## Examples
+
+Local end-to-end prep for algorithms (no CRAFT required):
+
+```bash
+pip install -e ".[dev]"
+python examples/prep_for_ml.py
+python examples/prep_for_ml.py --torch   # if torch is installed
+```
+
+That script builds a tidy feature frame, materializes a NumPy matrix with
+`to_numpy`, optionally wraps it for PyTorch, and writes a plot3 scatter when
+plot3 is on the path.
+
 ## Development
 
 ```bash
