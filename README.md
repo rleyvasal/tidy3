@@ -3,17 +3,145 @@
 dplyr-style **lazy** data manipulation for Python, powered by [Polars](https://pola.rs/).
 
 - Readable multi-line pipes (`>>` ≈ R’s `|>`)
-- **Partial pipeline run in any Jupyter** (SolveIt, JupyterLab, classic, …) — no VS Code extension
+- Works **locally** (VS Code, terminal, JupyterLab) or under **CRAFT / gpudev**
 - Lazy until `collect()` / plot / preview (`LIMIT n` only)
-- Optional bridge to [plot3](https://github.com/rleyvasal/plot3) and [gpudev](https://github.com/rleyvasal/gpudev)
+- Handoffs for ML (`to_numpy`, pandas/Arrow) and optional [plot3](https://github.com/rleyvasal/plot3)
 
-## Install
+CRAFT/`%gpu` is an optional remote path. The default product surface is a normal
+Python environment on your machine.
+
+## Install (local)
 
 ```bash
 cd /path/to/tidy3
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 ```
+
+Optional extras:
+
+```bash
+pip install -e ".[jupyter]"        # IPython extension for multi-line >> pipes
+pip install -e ".[excel]"          # write_excel
+# plot3 is a separate package — clone it and pip install -e that repo if you plot
+```
+
+Verify:
+
+```bash
+python -c "import tidy3; print(tidy3.__version__)"
+python -m pytest -q
+```
+
+## VS Code (local IDE)
+
+tidy3 is a normal editable package. No CRAFT, SolveIt, or remote kernel is
+required.
+
+### One-time setup
+
+1. Open the `tidy3` folder (or a workspace that includes it) in VS Code.
+2. Create/select the project interpreter:
+   - Command Palette → **Python: Select Interpreter** → `./.venv/bin/python`
+3. Install the package into that environment (terminal in VS Code):
+
+```bash
+source .venv/bin/activate
+pip install -e ".[dev,jupyter]"
+```
+
+4. Recommended extensions: **Python**, **Jupyter** (for notebooks). Optional:
+   **Polars** is not required as an extension; it is a library dependency.
+
+### Scripts (`.py`)
+
+Parentheses around multi-line `>>` pipes are required (standard Python):
+
+```python
+# analysis.py
+from tidy3 import tidy, filter, mutate, group_by, summarise, col, n, mean
+
+result = (
+    tidy({"cyl": [4, 4, 6], "mpg": [22.0, 24.0, 18.0]})
+    >> filter(col("mpg") > 20)
+    >> mutate(km=col("mpg") * 1.609)
+    >> group_by("cyl")
+    >> summarise(n=n(), avg=mean("mpg"))
+)
+
+print(result.collect())                 # Polars DataFrame
+print(result.collect(as_="pandas"))     # for sklearn / export
+# features = result.to_numpy(columns=["avg"], dtype="float32")
+```
+
+Run:
+
+```bash
+python analysis.py
+# or VS Code: Run Python File
+```
+
+### Interactive window / notebook
+
+1. Create `analysis.ipynb` (or open the Interactive Window).
+2. Pick the same `.venv` kernel (**Select Kernel** → your tidy3 venv).
+3. In the first cell, either import normally or load the pipe rewriter:
+
+```python
+# Option A — plain Python (parentheses required)
+from tidy3 import tidy, filter, col
+
+# Option B — multi-line >> without outer parentheses
+%load_ext tidy3.jupyter
+```
+
+With the extension loaded:
+
+```python
+tidy(cars)
+>> filter(col("mpg") > 20)
+>> mutate(km=col("mpg") * 1.609)
+```
+
+Partial pipes for debugging:
+
+```python
+%%tidy3_run
+tidy(cars)
+>> filter(col("mpg") > 20)
+```
+
+```text
+%tidy3_pipes on|off|status
+```
+
+### Handoffs from a local session
+
+```python
+# Algorithms / sklearn
+df = result.collect(as_="pandas", columns=["cyl", "avg"], arrow_backed=True)
+
+# NumPy → PyTorch (CPU)
+import numpy as np
+# import torch
+X = result.to_numpy(columns=["avg"], dtype=np.float32, writable=True, order="c")
+# t = torch.from_numpy(X)
+
+# plot3 (optional; install plot3 separately)
+# from plot3 import aes, geom_point, ggplot
+# result >> ggplot(aes(x="cyl", y="avg")) + geom_point()
+```
+
+### Local vs CRAFT at a glance
+
+| | Local (VS Code) | CRAFT / `%gpu` |
+|--|-----------------|----------------|
+| Install | `pip install -e .` in a venv | Addon seed to remote kernel |
+| Paths | Your machine | Paths on the GPU host |
+| Pipes | Parentheses in `.py`; extension optional in notebooks | Same extension after seed |
+| Data size | Laptop RAM / local Polars | Remote GPU box + large files |
+| Default for new users | **Yes** | Optional power path |
 
 ## Quick start
 
@@ -98,7 +226,31 @@ result.collect().write_csv("summary.csv")          # Polars API
 result.collect(as_="pandas").to_csv("summary.csv", index=False)
 ```
 
-## Jupyter / SolveIt
+## plot3 (optional)
+
+plot3 is a **separate** project. Install it in the same venv if you use it:
+
+```bash
+pip install -e /path/to/plot3
+```
+
+```python
+from plot3 import aes, geom_point, ggplot
+
+tidy(big)
+>> filter(col("intensity") > 10)
+>> select("x", "y", "z", "intensity")
+>> ggplot(aes(x="x", y="y", z="z", colour="intensity"))
++ geom_point()
+```
+
+The method handoff remains available as ``tidy(df).ggplot(aes(...))``.
+The bridge materializes to pandas for plot3; aggregate large data first.
+
+## CRAFT / gpudev / SolveIt (optional remote)
+
+Use this when data or compute live on a GPU host. Local VS Code setup above
+is enough for everyday work on your laptop.
 
 ### Load (same as other gpudev addons)
 
@@ -109,7 +261,8 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 %gpu
 ```
 
-Or without CRAFT: `%load_ext tidy3.jupyter` / `pip install -e .`
+Or without CRAFT on a normal Jupyter kernel: `%load_ext tidy3.jupyter` after
+`pip install -e ".[jupyter]"`.
 
 Under **`%gpu`**, cells run on the remote kernel — a separate namespace and
 filesystem. The addon handles this automatically: on the first `%gpu` cell it
@@ -119,7 +272,7 @@ Jupyter extension remotely (API names, `>>` rewriting, `%%tidy3_run`). It
 re-seeds by itself after `%restart_kernel` and after local source edits
 (content stamp). If something goes sideways: `seed_tidy3_remote(force=True)`.
 
-Then just use normal tidy3 with **paths on the GPU host**:
+Then use normal tidy3 with **paths on the GPU host**:
 
 ```python
 # after %gpu — file path is on the GPU box
@@ -129,9 +282,9 @@ scan_parquet("/home/gpudev/data/huge.parquet")
 >> summarise(n=n(), avg=mean("value"))
 ```
 
-### Partial run
+### Partial run (any Jupyter)
 
-- **Run Selected Text** (if SolveIt has it): highlight a pipe prefix → run selection  
+- **Run Selected Text** (if the UI has it): highlight a pipe prefix → run selection  
 - Own cell with only the prefix  
 - `%%tidy3_run` with the prefix pasted in  
 
@@ -145,32 +298,11 @@ tidy(cars)
 %tidy3_pipes on|off|status
 ```
 
-## plot3
-
-```python
-from plot3 import aes, geom_point, ggplot
-
-tidy(big)
->> filter(col("intensity") > 10)
->> select("x", "y", "z", "intensity")
->> ggplot(aes(x="x", y="y", z="z", colour="intensity"))
-+ geom_point()
-```
-
-The existing method handoff remains available as
-``tidy(df).ggplot(aes(...))``.
-
-## gpudev / CRAFT / SolveIt
-
-```text
-%local
-%run /path/to/gpudev/CRAFT.py
-%run /path/to/gpudev/addons/tidy3.py
-%run /path/to/gpudev/addons/plot3.py
-```
+### Symlink addon (CRAFT layout)
 
 ```bash
 ln -s ../../tidy3 /path/to/gpudev/addons/tidy3   # if needed
+# optional plot3 addon similarly
 ```
 
 ## API (v0.2)
