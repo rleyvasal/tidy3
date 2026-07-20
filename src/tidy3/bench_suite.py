@@ -7,7 +7,9 @@ so the Polars result includes the cost of the common ML handoff::
 
     python -m tidy3.bench_suite --rows 1000000 --repeat 5
 
-Use ``--output native`` to keep the Polars result as a Polars DataFrame.
+Use ``--output native`` to keep the Polars result as a Polars DataFrame, or
+``--output pandas-arrow`` for a zero-copy-friendly pandas handoff backed by
+Arrow extension arrays.
 The smaller canonical benchmark in ``tidy3.bench`` retains optional datar
 coverage as a semantic/performance backstop; datar is intentionally not in
 this primary adoption benchmark.
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import math
 import statistics
 import time
 from dataclasses import dataclass
@@ -26,7 +29,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-__all__ = ["make_realistic_data", "run"]
+__all__ = ["geometric_ratio", "make_realistic_data", "run"]
 
 
 @dataclass(frozen=True)
@@ -116,6 +119,7 @@ def _build_workloads(
     pl_dimension: pl.DataFrame,
     *,
     output: str,
+    polars_engine: Any,
 ) -> list[Workload]:
     from tidy3 import (
         arrange,
@@ -125,6 +129,8 @@ def _build_workloads(
         desc,
         distinct,
         filter,
+        group_modify,
+        group_nest,
         if_else,
         lag,
         left_join,
@@ -140,13 +146,23 @@ def _build_workloads(
         tidy,
     )
 
-    polars_output = "pandas" if output == "pandas" else "polars"
+    def collect_polars(frame, *, columns=None):
+        if output == "native":
+            return frame.collect(
+                as_="polars", columns=columns, engine=polars_engine
+            )
+        return frame.collect(
+            as_="pandas",
+            columns=columns,
+            arrow_backed=output == "pandas-arrow",
+            engine=polars_engine,
+        )
 
     def tp(pipe):
         return lambda: pipe(tidy(pdf, backend="pandas")).collect(as_="pandas")
 
     def tl(pipe):
-        return lambda: pipe(tidy(pldf)).collect(as_=polars_output)
+        return lambda: collect_polars(pipe(tidy(pldf)))
 
     selected = ["customer_id", "segment", "amount", "score"]
 
@@ -177,6 +193,30 @@ def _build_workloads(
         positive=if_else(col("score") > 0, 1, 0),
     )
 
+    projected_columns = ["customer_id", "net", "margin", "positive"]
+
+    def raw_projected_features():
+        return pd.DataFrame(
+            {
+                "customer_id": pdf["customer_id"],
+                "net": pdf["amount"] * (1 - pdf["discount"]),
+                "margin": pdf["amount"] - pdf["cost"],
+                "positive": (pdf["score"] > 0).astype(np.int8),
+            }
+        )
+
+    projection_pipe = lambda frame: frame >> mutate(
+        net=col("amount") * (1 - col("discount")),
+        margin=col("amount") - col("cost"),
+        positive=if_else(col("score") > 0, 1, 0),
+    )
+    projected_pandas = lambda: projection_pipe(
+        tidy(pdf, backend="pandas")
+    ).collect(as_="pandas", columns=projected_columns)
+    projected_polars = lambda: collect_polars(
+        projection_pipe(tidy(pldf)), columns=projected_columns
+    )
+
     def raw_group():
         return (
             pdf.groupby(["segment", "channel"], sort=False, observed=True, dropna=False)
@@ -192,10 +232,10 @@ def _build_workloads(
 
     group_pipe = lambda frame: frame >> summarise(
         transactions=n(),
-        revenue=sum("amount"),
-        average=mean("amount"),
-        variability=std("score"),
-        maximum=max("amount"),
+        revenue=sum("amount", na_rm=True),
+        average=mean("amount", na_rm=True),
+        variability=std("score", na_rm=True),
+        maximum=max("amount", na_rm=True),
         by=["segment", "channel"],
     )
 
@@ -207,7 +247,11 @@ def _build_workloads(
     sort_pipe = lambda frame: frame >> arrange("segment", desc("amount"))
 
     def raw_distinct():
-        return pdf.drop_duplicates(["customer_id", "channel"]).reset_index(drop=True)
+        return (
+            pdf.loc[:, ["customer_id", "channel"]]
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
 
     distinct_pipe = lambda frame: frame >> distinct("customer_id", "channel")
 
@@ -217,9 +261,9 @@ def _build_workloads(
     pandas_join = lambda: (
         tidy(pdf, backend="pandas") >> left_join(dimension, on="customer_id")
     ).collect(as_="pandas")
-    polars_join = lambda: (
+    polars_join = lambda: collect_polars(
         tidy(pldf) >> left_join(pl_dimension, on="customer_id")
-    ).collect(as_=polars_output)
+    )
 
     def raw_window():
         grouped = pdf.groupby("customer_id", sort=False, observed=True, dropna=False)
@@ -230,7 +274,7 @@ def _build_workloads(
         )
 
     window_pipe = lambda frame: frame >> mutate(
-        customer_average=mean("amount"),
+        customer_average=mean("amount", na_rm=True),
         previous_amount=lag("amount"),
         event_number=row_number(),
         by="customer_id",
@@ -257,9 +301,9 @@ def _build_workloads(
             >> filter(col("active") & (col("amount") > 0))
             >> summarise(
                 transactions=n(),
-                revenue=sum("amount"),
-                average_score=mean("score"),
-                last_event=max("event_time"),
+                revenue=sum("amount", na_rm=True),
+                average_score=mean("score", na_rm=True),
+                last_event=max("event_time", na_rm=True),
                 by="customer_id",
             )
             >> left_join(dim, on="customer_id")
@@ -269,8 +313,8 @@ def _build_workloads(
     customer_pandas = lambda: customer_pipe(
         tidy(pdf, backend="pandas"), dimension
     ).collect(as_="pandas")
-    customer_polars = lambda: customer_pipe(tidy(pldf), pl_dimension).collect(
-        as_=polars_output
+    customer_polars = lambda: collect_polars(
+        customer_pipe(tidy(pldf), pl_dimension)
     )
 
     ml_columns = ["segment", "feature_a", "feature_b", "amount", "score"]
@@ -293,12 +337,14 @@ def _build_workloads(
         frame
         >> select(*ml_columns)
         >> mutate(
-            feature_a_filled=coalesce(col("feature_a"), mean("feature_a")),
+            feature_a_filled=coalesce(
+                col("feature_a"), mean("feature_a", na_rm=True)
+            ),
             feature_a_z=(
-                coalesce(col("feature_a"), mean("feature_a"))
-                - mean("feature_a")
+                coalesce(col("feature_a"), mean("feature_a", na_rm=True))
+                - mean("feature_a", na_rm=True)
             )
-            / std("feature_a"),
+            / std("feature_a", na_rm=True),
             feature_ratio=col("feature_b") / (col("amount") + 1),
             log_amount=(col("amount") + 1).log(),
             high_score=if_else(col("score") > 1, 1, 0),
@@ -318,8 +364,8 @@ def _build_workloads(
         frame
         >> select(*ml_columns)
         >> mutate(
-            __feature_mean=mean("feature_a"),
-            __feature_std=std("feature_a"),
+            __feature_mean=mean("feature_a", na_rm=True),
+            __feature_std=std("feature_a", na_rm=True),
             by="segment",
         )
         >> mutate(
@@ -403,8 +449,8 @@ def _build_workloads(
             >> summarise(
                 customers=col("customer_id").n_unique(),
                 events=n(),
-                revenue=sum("adjusted"),
-                average_score=mean("score"),
+                revenue=sum("adjusted", na_rm=True),
+                average_score=mean("score", na_rm=True),
                 by=["region", "channel"],
             )
             >> arrange("region", "channel")
@@ -413,13 +459,60 @@ def _build_workloads(
     join_aggregate_pandas = lambda: join_aggregate_pipe(
         tidy(pdf, backend="pandas"), dimension
     ).collect(as_="pandas")
-    join_aggregate_polars = lambda: join_aggregate_pipe(
-        tidy(pldf), pl_dimension
-    ).collect(as_=polars_output)
+    join_aggregate_polars = lambda: collect_polars(
+        join_aggregate_pipe(tidy(pldf), pl_dimension)
+    )
+
+    def raw_group_callback():
+        return (
+            pdf.groupby("segment", sort=False, observed=True, dropna=False)
+            .agg(rows=("amount", "size"), average=("amount", "mean"))
+            .reset_index()
+        )
+
+    def callback(part, key):
+        values = part.collect(as_="pandas")
+        return pd.DataFrame(
+            {
+                "segment": [key["segment"]],
+                "rows": [len(values)],
+                "average": [values["amount"].mean()],
+            }
+        )
+
+    group_callback_pandas = lambda: (
+        tidy(pdf, backend="pandas") >> group_modify(callback, "segment")
+    ).collect(as_="pandas")
+    group_callback_polars = lambda: (
+        tidy(pldf) >> group_modify(callback, "segment")
+    ).collect(as_="pandas")
+
+    def raw_group_nest():
+        return (
+            pdf.groupby("segment", sort=False, observed=True, dropna=False)
+            .size()
+            .rename("rows")
+            .reset_index()
+        )
+
+    def nested_counts(frame):
+        nested = (frame >> group_nest("segment", name="records")).collect(as_="pandas")
+        nested["rows"] = nested["records"].map(len)
+        return nested[["segment", "rows"]]
+
+    group_nest_pandas = lambda: nested_counts(tidy(pdf, backend="pandas"))
+    group_nest_polars = lambda: nested_counts(tidy(pldf))
 
     return [
         Workload("Everyday", "filter + select", raw_filter, tp(filter_pipe), tl(filter_pipe)),
         Workload("Everyday", "mutate 4 features", raw_mutate, tp(mutate_pipe), tl(mutate_pipe)),
+        Workload(
+            "Everyday",
+            "projected feature handoff",
+            raw_projected_features,
+            projected_pandas,
+            projected_polars,
+        ),
         Workload("Everyday", "group + 5 summaries", raw_group, tp(group_pipe), tl(group_pipe)),
         Workload("Everyday", "sort 2 columns", raw_sort, tp(sort_pipe), tl(sort_pipe)),
         Workload("Everyday", "distinct 2 columns", raw_distinct, tp(distinct_pipe), tl(distinct_pipe)),
@@ -448,6 +541,20 @@ def _build_workloads(
             join_aggregate_pandas,
             join_aggregate_polars,
         ),
+        Workload(
+            "Materialization",
+            "group callback summarize",
+            raw_group_callback,
+            group_callback_pandas,
+            group_callback_polars,
+        ),
+        Workload(
+            "Materialization",
+            "group nest and count",
+            raw_group_nest,
+            group_nest_pandas,
+            group_nest_polars,
+        ),
     ]
 
 
@@ -462,6 +569,23 @@ def _measure(fn: Callable[[], Any], repeat: int) -> tuple[list[float], Any]:
     return samples, result
 
 
+def geometric_ratio(
+    results: dict[str, dict[str, dict[str, float]]],
+    engine: str,
+    *,
+    minimum_pandas_ms: float = 0.0,
+) -> float:
+    """Equal-weight geometric mean ratio for budget-worthy workloads."""
+    ratios = [
+        workload[engine]["vs_pandas"]
+        for workload in results.values()
+        if workload["pandas"]["median_seconds"] * 1000 >= minimum_pandas_ms
+    ]
+    if not ratios:
+        raise ValueError("no workloads meet the performance-budget minimum")
+    return math.exp(sum(math.log(value) for value in ratios) / len(ratios))
+
+
 def run(
     rows: int = 1_000_000,
     *,
@@ -470,15 +594,32 @@ def run(
     seed: int = 0,
     output: str = "pandas",
     match: str | None = None,
+    polars_engine: str = "auto",
 ) -> dict[str, dict[str, dict[str, float]]]:
     """Run all workloads and print median wall times and pandas-relative ratios."""
     if repeat < 1 or warmup < 0:
         raise ValueError("repeat must be positive and warmup non-negative")
-    if output not in {"pandas", "native"}:
-        raise ValueError("output must be 'pandas' or 'native'")
+    if output not in {"pandas", "pandas-arrow", "native"}:
+        raise ValueError(
+            "output must be 'pandas', 'pandas-arrow', or 'native'"
+        )
+    if polars_engine not in {"auto", "streaming", "gpu"}:
+        raise ValueError(
+            "polars_engine must be 'auto', 'streaming', or 'gpu'"
+        )
+    execution_engine: Any = polars_engine
+    if polars_engine == "gpu":
+        # Polars normally falls back to CPU for unsupported GPU queries.
+        # Benchmarks must fail instead of reporting disguised CPU timings.
+        execution_engine = pl.GPUEngine(raise_on_fail=True)
     pdf, pldf, dimension, pl_dimension = make_realistic_data(rows, seed)
     workloads = _build_workloads(
-        pdf, pldf, dimension, pl_dimension, output=output
+        pdf,
+        pldf,
+        dimension,
+        pl_dimension,
+        output=output,
+        polars_engine=execution_engine,
     )
     if match:
         patterns = [value.strip().casefold() for value in match.split(",") if value.strip()]
@@ -492,7 +633,7 @@ def run(
     engines = ["pandas", "tidy3[pandas]", "tidy3[polars]"]
     print(
         f"tidy3 comprehensive benchmark: rows={rows:,}, repeat={repeat}, "
-        f"warmup={warmup}, output={output}"
+        f"warmup={warmup}, output={output}, polars_engine={polars_engine}"
     )
     print("times are medians; ratios are relative to raw pandas")
 
@@ -567,19 +708,49 @@ def _main() -> None:
     parser.add_argument("--repeat", type=int, default=5)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--output", choices=["pandas", "native"], default="pandas")
+    parser.add_argument(
+        "--output",
+        choices=["pandas", "pandas-arrow", "native"],
+        default="pandas",
+    )
     parser.add_argument(
         "--match", help="comma-separated workload-name substrings to run"
     )
+    parser.add_argument(
+        "--polars-engine",
+        choices=["auto", "streaming", "gpu"],
+        default="auto",
+        help="Polars execution mode; gpu is strict and fails on CPU fallback",
+    )
+    parser.add_argument("--max-tidy-pandas-geo", type=float)
+    parser.add_argument("--max-tidy-polars-geo", type=float)
+    parser.add_argument("--budget-min-ms", type=float, default=10.0)
     args = parser.parse_args()
-    run(
+    results = run(
         rows=args.rows,
         repeat=args.repeat,
         warmup=args.warmup,
         seed=args.seed,
         output=args.output,
         match=args.match,
+        polars_engine=args.polars_engine,
     )
+    budgets = {
+        "tidy3[pandas]": args.max_tidy_pandas_geo,
+        "tidy3[polars]": args.max_tidy_polars_geo,
+    }
+    failures = []
+    for engine, maximum in budgets.items():
+        if maximum is None:
+            continue
+        ratio = geometric_ratio(
+            results, engine, minimum_pandas_ms=args.budget_min_ms
+        )
+        print(f"budget {engine}: {ratio:.3f}x <= {maximum:.3f}x")
+        if ratio > maximum:
+            failures.append(f"{engine} {ratio:.3f}x exceeds {maximum:.3f}x")
+    if failures:
+        raise SystemExit("performance budget failed: " + "; ".join(failures))
 
 
 if __name__ == "__main__":
