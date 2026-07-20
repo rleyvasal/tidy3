@@ -8,19 +8,18 @@ version = "0.2.0"
 description = "dplyr-style lazy data manipulation on Polars, with R-like partial pipeline run"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "rleyvasal" }]
 keywords = ["dplyr", "polars", "dataframe", "tidyverse", "lazy"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-  "polars>=1.0",
+  "polars>=1.39",
   "pandas>=2.0",
   "pyarrow>=14.0",
 ]
@@ -29,6 +28,7 @@ dependencies = [
 dev = ["pytest>=7.0"]
 jupyter = ["ipython>=8.0"]
 plot3 = []  # plot3 is optional external; bridge imports if present
+excel = ["xlsxwriter>=3.0"]
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/tidy3"

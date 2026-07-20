@@ -18,19 +18,85 @@ pip install -e ".[dev]"
 ## Quick start
 
 ```python
-from tidy3 import tidy, filter, mutate, group_by, summarise, col, n, mean, collect
+from tidy3 import scan_parquet, filter, mutate, group_by, summarise, col, n, mean
 
-out = (
-    tidy(cars)                          # pandas or polars
+result = (
+    scan_parquet("cars.parquet")        # lazy: reads only when needed
     >> filter(col("mpg") > 20)
     >> mutate(km=col("mpg") * 1.609)
     >> group_by("cyl")
     >> summarise(n=n(), avg=mean("mpg"))
-    >> collect()                        # polars; collect(as_="pandas") for pandas
+)
+
+result                              # TidyFrame preview; keep piping if needed
+polars_df = result.collect()        # materialize as Polars
+pandas_df = result.collect(as_="pandas")
+numpy_array = result.collect(as_="numpy")
+```
+
+For in-memory data, replace the scan with `tidy(cars)`. Starting from
+`scan_parquet()`, `scan_csv()`, or `scan_ipc()` avoids first building a pandas
+copy and lets Polars push projections and filters into the file scan.
+
+With the Jupyter extension loaded you can omit the outer parentheses — the **kernel** rewrites multi-line `>>` pipes before parse.
+
+## Save results
+
+Write a pipeline directly without first calling `collect()`:
+
+```python
+result.write_parquet("summary.parquet")  # recommended for data pipelines
+result.write_csv("summary.csv")
+result.write_ipc("summary.arrow")        # Arrow IPC / Feather
+```
+
+With the default Polars backend, these execute the lazy plan and stream its
+result to disk, avoiding a second fully materialized DataFrame in memory.
+The same methods also work with `backend="pandas"`. GPU writers execute the
+plan on the GPU, then materialize before serialization because current GPU
+file sinks are not stable across all formats; `auto` and `streaming` retain
+direct lazy sinks.
+
+Choose how Polars executes when the plan is materialized or written:
+
+```python
+result.collect(engine="auto")             # default: let Polars choose
+result.collect(engine="streaming")        # execute in streaming batches
+result.collect(engine="gpu")              # GPU where supported; may fall back
+
+result.write_parquet("summary.parquet", engine="streaming")
+result.write_csv("summary.csv", engine="gpu")
+result.write_ipc("summary.arrow", engine="auto")
+```
+
+The same `engine=` argument is available on `to_polars()`, `to_pandas()`,
+`to_arrow()`, and `write_excel()`. It applies only to the default Polars
+backend. For a GPU run that must not silently fall back to CPU, pass
+`engine=polars.GPUEngine(raise_on_fail=True)`; the benchmark suite does this
+automatically whenever `--polars-engine gpu` is selected.
+
+Excel output is intended for smaller reporting datasets and must materialize
+the result:
+
+```bash
+pip install "tidy3[excel]"
+```
+
+```python
+result.write_excel(
+    "summary.xlsx",
+    worksheet="Summary",
+    autofit=True,
+    freeze_panes="A2",
 )
 ```
 
-With the Jupyter extension loaded you can omit the outer parentheses — the **kernel** rewrites multi-line `>>` pipes before parse.
+You can still collect first when another library needs the result:
+
+```python
+result.collect().write_csv("summary.csv")          # Polars API
+result.collect(as_="pandas").to_csv("summary.csv", index=False)
+```
 
 ## Jupyter / SolveIt
 
@@ -112,20 +178,41 @@ ln -s ../../tidy3 /path/to/gpudev/addons/tidy3   # if needed
 | Area | Symbols |
 |------|---------|
 | Frame | `tidy`, `scan_parquet`, `scan_csv`, `scan_ipc`, `TidyFrame` |
+| Output | `collect`, `to_numpy`, `TidyFrame.write_parquet`, `TidyFrame.write_csv`, `TidyFrame.write_ipc`, `TidyFrame.write_excel` |
 | Rows | `filter`, `filter_out`, `arrange`, `distinct`, `slice`, `slice_head`, `slice_tail`, `slice_min`, `slice_max`, `slice_sample`, `head`, `sample_n`, `sample_frac` |
 | Columns | `mutate`, `transmute`, `select`, `drop`, `rename`, `rename_with`, `relocate`, `pull`, `glimpse` |
-| Groups | `group_by`, `rowwise`, `ungroup`, `summarise`, `reframe`, `count`, `tally`, `add_count`, `add_tally` |
-| Joins | `left_join`, `right_join`, `inner_join`, `full_join`, `semi_join`, `anti_join`, `cross_join` |
+| Groups | `group_by`, `rowwise`, `ungroup`, `with_groups`, `group_split`, `group_map`, `group_modify`, `group_nest`, `summarise`, `reframe`, `count`, `tally`, `add_count`, `add_tally` |
+| Missing data | `drop_na`, `replace_na`, `fill`, `complete`, `expand`, `nesting` |
+| Reshape | `pivot_longer`, `pivot_wider`, `separate`, `separate_longer_delim`, `separate_wider_delim`, `unite`, `nest`, `unnest`, `unnest_longer`, `unnest_wider`, `hoist`, `pack`, `unpack` |
+| Joins | `left_join`, `right_join`, `inner_join`, `full_join`, `semi_join`, `anti_join`, `cross_join`, `nest_join` |
 | Join specs | `join_by`, `eq`, `ge`, `gt`, `le`, `lt`, `closest`, `between`, `within`, `overlaps` |
 | Bind/set | `bind_rows`, `bind_cols`, `union`, `union_all`, `intersect`, `setdiff`, `symdiff`, `setequal` |
 | Row mutation | `rows_insert`, `rows_append`, `rows_update`, `rows_patch`, `rows_upsert`, `rows_delete` |
 | Selectors | `everything`, `col_range`, `last_col`, `group_cols`, `starts_with`, `ends_with`, `contains`, `matches`, `num_range`, `all_of`, `any_of`, `where` |
 | Column-wise | `across`, `if_any`, `if_all`, `pick`, `c_across` |
 | Materialize | `collect`, `pull`, `glimpse`, `peek` |
-| Expr | `col`, `n`, `mean`, `sum`, `min`, `max`, `median`, `std`, `first`, `last`, `desc`, ranking/window helpers, `n_distinct`, `coalesce`, `if_else`, `case_when` |
+| Expr | `col`, `n`, `mean`, `sum`, `min`, `max`, `median`, `std`/`sd`, `var`, `any`, `all`, `first`, `last`, `nth`, `near`, `na_if`, `between`, `consecutive_id`, `case_match`, `recode`, ranking/window helpers, `n_distinct`, `coalesce`, `if_else`, `case_when` |
 | Jupyter | `%load_ext tidy3.jupyter`, `%tidy3_run`, `%%tidy3_run`, `%tidy3_pipes` |
 | Partial | `partial_run`, `maybe_rewrite_cell`, `normalize_pipe_source` |
 | Escape | `TidyFrame.with_polars(fn)` |
+
+### API maturity (v0.2)
+
+tidy3 is alpha. Symbols work today, but not every verb is equally polished for
+production pipelines or R byte-for-byte parity. Prefer the **stable core** when
+you need predictable performance and semantics.
+
+| Tier | Intent | Symbols / areas |
+|------|--------|-----------------|
+| **Stable core** | Daily driver: declarative dplyr on Polars, dual-backend tests, R oracle where installed | `tidy`, `scan_*`, `filter`, `filter_out`, `mutate`, `transmute`, `select`, `drop`, `rename`, `relocate`, `arrange`, `distinct`, `group_by`, `ungroup`, `summarise`/`summarize`, `count`, `tally`, `add_count`, `add_tally`, equality joins (`left`/`right`/`inner`/`full`/`semi`/`anti`/`cross`), `bind_rows`/`bind_cols`, set ops (`union`, `union_all`, `intersect`, `setdiff`, `symdiff`, `setequal`), `head`/`slice`/`slice_head`/`slice_tail`/`slice_min`/`slice_max`, core expr helpers (`col`, `n`, `mean`, `sum`, …), tidyselect basics, `collect` and file writers |
+| **Growing** | Feature-complete enough for real work; more edge cases and schema-discovery cost | tidyr missing/reshape (`drop_na`, `replace_na`, `fill`, `complete`, `expand`, `pivot_*`, `separate`, `unite`, `nest`/`unnest*`), `across`/`if_any`/`if_all`/`pick`/`c_across`, `rowwise`, `reframe`, `rename_with`, `join_by` inequality joins, `nest_join`, `rows_*`, advanced ranking/window helpers, NumPy/`to_numpy` handoff |
+| **Experimental** | Correctness-first or Python-callback paths; may materialize eagerly or lag R oracle coverage | `group_split`, `group_map`, `group_modify`, `group_nest`, `with_groups`, `hoist`, `pack`, `unpack`, `separate_longer_delim`, `separate_wider_delim`, stochastic sampling (`sample_n`, `sample_frac`, `slice_sample`) |
+
+**Performance note:** the stable core is the path that tracks raw Polars and
+beats pandas on realistic sizes. Experimental group-callback and nest verbs
+currently Python-loop after materialization — fine for small groups, not for
+hot large-data paths. Prefer declarative `summarise` / `nest` alternatives
+when performance matters.
 
 ## Backends
 
@@ -165,9 +252,78 @@ tidy(df)
 `is_string`, `is_boolean`, and `is_temporal`. `all_of(names)` is strict about
 missing columns while `any_of(names)` silently ignores them.
 
+### Reshape and missing data
+
+The familiar tidyr operations work as pipe verbs or `TidyFrame` methods on
+both backends:
+
+```python
+from tidy3 import (
+    drop_na, fill, pivot_longer, pivot_wider, replace_na,
+    separate, starts_with, tidy, unite, unnest_longer,
+)
+
+long = (
+    tidy(measurements)
+    >> fill("patient_id", direction="down")
+    >> pivot_longer(
+        starts_with("week_"),
+        names_to="week",
+        names_prefix="week_",
+        values_to="reading",
+        values_drop_na=True,
+    )
+)
+
+wide = long >> pivot_wider(
+    names_from="week",
+    values_from="reading",
+    names_prefix="week_",
+    values_fill=0,
+)
+
+# Multiple measures use tidyr's value-first names (sales_Q1, cost_Q1).
+wide_measures = tidy(long_measures) >> pivot_wider(
+    names_from="quarter", values_from=["sales", "cost"]
+)
+
+# .value takes output value-column names from the input column names.
+tidy(measurements) >> pivot_longer(
+    starts_with(("mean_", "sd_")),
+    names_to=[".value", "visit"],
+    names_sep="_",
+)
+
+tidy(labels) >> separate("code", ["region", "id"], sep="-")
+tidy(labels) >> unite("code", "region", "id", sep="-")
+tidy(events) >> unnest_longer("items", indices_to="item_index")
+tidy(values) >> replace_na({"score": 0}) >> drop_na("required_field")
+
+tidy(observations) >> complete(
+    "subject", "visit", fill={"score": 0}, explicit=False
+)
+
+nested = tidy(events) >> nest("records", cols=["time", "value"])
+restored = nested >> unnest("records")
+```
+
+`fill(..., by=...)` provides temporary grouping, while an existing
+`group_by()` is respected automatically. Most Polars operations add only lazy
+plan nodes. `pivot_wider()` must know its output schema, so it discovers the
+distinct `names_from` values unless `names=[...]` is supplied; providing
+`names` avoids that metadata query for known categories. `unnest_wider()`
+similarly discovers the width of unnamed list values.
+
+`pivot_wider()` accepts multiple `names_from` and `values_from` columns.
+`pivot_longer()` supports the `.value` sentinel, and `separate(convert=True)`
+performs R-style logical/numeric inference on both backends. Schema-dependent
+reshape and conversion operations issue a metadata-only query on Polars.
+
 Use `across` as a positional argument to `mutate`, `transmute`, or
 `summarise`. Python name templates accept `{col}` and `{fn}`; dplyr-style
-`{.col}` and `{.fn}` are accepted too:
+`{.col}` and `{.fn}` are accepted too. Use `cur_column()` inside a function
+when its calculation depends on the selected column name, and
+`cur_group()["group_name"]` when it depends on a grouped key:
 
 ```python
 tidy(df)
@@ -179,6 +335,32 @@ tidy(df)
         where(is_numeric),
         {"mean": mean, "sd": std},
         names="{col}_{fn}",
+    )
+)
+
+tidy(df) >> mutate(
+    across(starts_with("x"), lambda x: x + len(cur_column()))
+)
+
+tidy(df) >> group_by("team") >> mutate(
+    across(starts_with("x"), lambda x: x - cur_group()["team"])
+)
+
+tidy(df) >> group_by("team") >> mutate(
+    across(starts_with("x"), lambda x: x + cur_group_id())
+)
+```
+
+Functions passed to `across` can return a mapping of named expressions. Pass
+`unpack=True` to expand those fields into regular columns; use an
+`{outer}`/`{inner}` template to control the resulting names:
+
+```python
+tidy(df) >> mutate(
+    across(
+        starts_with("x"),
+        lambda x: {"double": x * 2, "plus_one": x + 1},
+        unpack="{outer}__{inner}",
     )
 )
 ```
@@ -216,6 +398,39 @@ tidy(df)
 >> group_by("team")
 >> reframe(score=col("score"), team_mean=mean("score"))
 ```
+
+### dplyr-compatible evaluation controls
+
+Assignments in one `mutate()` are evaluated from left to right, so later
+expressions can use columns created earlier. Independent assignments are
+still fused into one backend operation:
+
+```python
+tidy(df) >> mutate(
+    doubled=col("x") * 2,
+    squared=col("doubled") ** 2,
+    keep="used",                  # all, used, unused, or none
+    before="x",
+)
+```
+
+`distinct("id")` returns only the grouping columns and `id`, matching
+dplyr. Use `distinct("id", keep_all=True)` to retain the first complete row.
+Multi-level summaries default to dropping only the final group; override this
+with `groups="drop"`, `"drop_last"`, `"keep"`, or `"rowwise"`.
+
+Computed and additive groups and partial ungrouping are supported:
+
+```python
+tidy(df)
+>> group_by("region")
+>> group_by(add=True, decade=col("year") // 10)
+>> ungroup("decade")
+```
+
+Aggregates accept `na_rm=` and default to `False`, matching dplyr: a missing
+value propagates unless removal is requested explicitly. Use
+`mean("x", na_rm=True)` to ignore missing values.
 
 ### Row mutation and advanced joins
 
@@ -298,7 +513,7 @@ tidy(events) >> mutate(
 Ranking helpers are `row_number`, `min_rank`, `dense_rank`, `percent_rank`,
 `cume_dist`, and `ntile`. Window and value helpers include `lead`, `lag`,
 `cummean`, `cumall`, `cumany`, `n_distinct`, `coalesce`, `if_else`, and
-`case_when`.
+`case_when`. `lead`, `lag`, `first`, `last`, and `nth` accept `order_by=`.
 
 Mutating joins accept dplyr-style safety controls:
 
@@ -318,20 +533,88 @@ orders >> left_join(
 `many-to-many`; `multiple` accepts `all`, `any`, `first`, or `last`.
 Polars relationship and unmatched checks remain lazy and raise on collection.
 
-Every frame-returning Phase 1–5 verb stays lazy on the Polars backend. `pull`,
+Every frame-returning Phase 1–8 verb stays lazy on the Polars backend. `pull`,
 `setequal`, plotting, previews, and explicit `collect` are intentional
-materialization boundaries. `slice_sample(weight_by=...)` is currently
-available on the pandas backend; unweighted sampling (including
-`replace=True`) is supported on both. Experimental `across(..., unpack=...)`,
-`nest_join`, ordered `lead`/`lag`, and additional vector helpers are future
-phases.
+materialization boundaries. Schema-dependent reshape operations may run a
+small metadata query as described above. `slice_sample(weight_by=...)`,
+including `replace=True`, is supported on both backends. Group-context helpers
+and additional vector helpers remain future phases.
+
+### Performance controls
+
+Grouped `mutate()` expressions automatically reuse embedded or repeated
+statistics. Expressions such as the following compute each group mean and
+standard deviation once on both backends; temporary columns never appear in
+the result:
+
+```python
+tidy(features) >> mutate(
+    filled=coalesce(col("x"), mean("x", na_rm=True)),
+    z=(
+        coalesce(col("x"), mean("x", na_rm=True))
+        - mean("x", na_rm=True)
+    ) / std("x", na_rm=True),
+    by="segment",
+)
+```
+
+Project before a pandas/Arrow handoff without adding another pipeline verb:
+
+```python
+matrix = result.collect(
+    as_="pandas",
+    columns=["customer_id", starts_with("feature_")],
+    arrow_backed=True,
+)
+```
+
+`arrow_backed=True` still returns a pandas DataFrame, but avoids copying
+Polars columns into NumPy buffers. Leave it off when a downstream library
+specifically requires NumPy-backed pandas dtypes.
+
+`distinct(..., maintain_order=True)` preserves dplyr row order by default.
+Use `maintain_order=False` when output order is irrelevant and throughput is
+more important.
+
+### NumPy, Numba, and PyTorch
+
+Build the matrix directly from the lazy pipeline and project away identifiers
+or string columns before materializing:
+
+```python
+import numpy as np
+from tidy3 import starts_with, to_numpy
+
+features = result.to_numpy(
+    columns=["feature_a", "feature_b", "feature_c"],
+    dtype=np.float32,
+    order="c",
+    writable=True,
+)
+
+# Equivalent output boundaries
+features = result.collect(as_="numpy", columns=starts_with("feature_"))
+features = result >> to_numpy(columns=starts_with("feature_"))
+features = np.asarray(result)  # all columns; materializes the lazy plan
+```
+
+Numba functions accept the returned array directly. For PyTorch,
+`torch.from_numpy(features)` shares the CPU array's memory, so request
+`writable=True`; use `order="c"` when a consumer requires C-contiguous input.
+The default is Fortran order because tidy3/Polars are columnar and it offers
+the best chance of avoiding a copy. Set `allow_copy=False` when an unexpected
+copy should be an error.
+
+This is a host-memory bridge even when `engine="gpu"`: Polars may execute the
+query on the GPU, but the NumPy result resides in CPU memory. A future DLPack
+bridge would be needed for a direct device-to-PyTorch handoff.
 
 ## Benchmark vs datar
 
 ```python
 from tidy3 import bench
 bench.run(rows=10_000_000)        # full pipeline; pip install datar datar-pandas for the datar row
-bench.run_ops(rows=10_000_000)    # each verb in isolation vs raw pandas
+bench.run_ops(rows=10_000_000)    # isolated verbs with each output boundary labelled
 ```
 
 For the adoption-oriented suite, which covers everyday operations plus ML,
@@ -339,16 +622,31 @@ event-history, customer aggregation, and join/filter/aggregate workflows:
 
 ```bash
 python -m tidy3.bench_suite --rows 1000000 --repeat 5 --output pandas
+python -m tidy3.bench_suite --rows 1000000 --repeat 5 --output pandas-arrow
 python -m tidy3.bench_suite --rows 1000000 --repeat 5 --output native
+
+# Compare Polars execution modes (GPU mode is strict: no silent CPU fallback)
+python -m tidy3.bench_suite --rows 1000000 --repeat 5 --output native --polars-engine auto
+python -m tidy3.bench_suite --rows 1000000 --repeat 5 --output native --polars-engine streaming
+python -m tidy3.bench_suite --rows 1000000 --repeat 5 --output native --polars-engine gpu
+
+# Ratio-based CI budgets; workloads under 10ms are ignored as noise-prone
+python -m tidy3.bench_suite --rows 1000000 --repeat 5 --output native \
+  --max-tidy-pandas-geo 1.25 --max-tidy-polars-geo 1.25 \
+  --budget-min-ms 10
 ```
 
-The default `pandas` output makes every engine return a pandas DataFrame and
-therefore includes the Polars-to-pandas ML handoff. `native` keeps Polars
-results in Polars and isolates execution from conversion. Data generation,
-warm-up, garbage collection, and correctness validation are outside recorded
-times; every measured result is checked against raw pandas. The suite reports
-medians and rotates engine order between repetitions. Optional datar coverage
-remains in the smaller `tidy3.bench` benchmark as a backup comparison.
+The default `pandas` output makes every engine return a NumPy-backed pandas
+DataFrame and therefore includes the Polars-to-pandas ML handoff.
+`pandas-arrow` still returns pandas but usually avoids that copy; `native`
+keeps results in Polars and isolates execution from conversion. Data
+generation, warm-up, garbage collection, and correctness validation are
+outside recorded times; every measured result is checked against raw pandas.
+The suite reports medians and rotates engine order between repetitions.
+`--polars-engine` accepts `auto`, `streaming`, and `gpu`; GPU benchmarking
+uses strict Polars GPU execution and stops if a query would fall back to CPU.
+Optional datar coverage remains in the smaller `tidy3.bench` benchmark as a
+backup comparison.
 
 Apple-silicon laptop, 10M rows × 100 groups, filter→mutate→group_by→summarise→arrange:
 
@@ -360,25 +658,81 @@ Apple-silicon laptop, 10M rows × 100 groups, filter→mutate→group_by→summa
 | **tidy3[pandas]** | 60.8ms | 1.5x |
 | datar[pandas] | 166.3ms | 4.1x |
 
-Per operation (`run_ops`; ratios vs raw pandas; tidy3[polars] includes plan
-execution + `to_pandas`):
+An isolated one-expression mutate is a useful boundary stress test because
+pandas Copy-on-Write makes the baseline unusually cheap. On the same laptop,
+10M rows, median of 7 runs after 2 warm-ups:
 
-| op | pandas | tidy3[pandas] | datar | tidy3[polars] |
-|---|---|---|---|---|
-| filter x>0 | 27.4ms | 22.9ms (0.8x) | 25.6ms (0.9x) | 25.1ms (0.9x) |
-| mutate z=x*2+y | 4.8ms | 5.1ms (1.1x) | 13.0ms (2.7x) | 41.9ms (8.7x)¹ |
-| group+summarise | 66.3ms | 67.7ms (**1.0x**) | 264.2ms (4.0x) | 54.5ms (**0.8x**) |
-| arrange y | 1141.8ms | 1308.9ms (1.1x) | 1363.6ms (1.2x) | 240.6ms (**0.2x**) |
+| execution and output boundary | time | vs raw pandas |
+|---|---:|---:|
+| tidy3[pandas] → pandas | 5.0ms | 1.0x |
+| raw pandas → pandas | 5.1ms | 1.0x |
+| tidy3[polars] → native Polars | 10.4ms | 2.1x |
+| raw Polars → native Polars | 10.7ms | 2.1x |
+| tidy3[polars] → Arrow-backed pandas | 11.1ms | 2.2x |
+| datar[pandas] → pandas | 11.3ms | 2.2x |
+| tidy3[polars] → NumPy-backed pandas | 32.2ms | 6.4x |
 
-¹ the op itself is ~free in polars; timed in isolation, the cost is
-materializing 40M values back to pandas — in a real lazy pipeline that
-happens once at the end (see the pipeline table).
+This replaces the old `41.9ms (8.7x)` cell, which combined Polars execution
+with a full NumPy conversion and presented the total as one engine number.
+The remaining 2.1x on this deliberately tiny operation is Polars engine cost:
+tidy3 tracks raw Polars within measurement noise. For a single cheap mutate
+followed immediately by NumPy pandas, use the pandas backend. For longer lazy
+pipelines, collect once at the end, project needed columns first, and prefer
+native or Arrow-backed output. Aggregations, joins, sorts, and full workflows
+are the adoption-relevant comparison in `bench_suite`.
 
-The takeaway: **tidy3's wrapper is free on both engines** (simple
-aggregations batch into one `groupby().agg()` pass, matching hand-written
-pandas), datar pays 2.7–4x everywhere it matters, and the polars backend
-wins outright. Under `%gpu`, run the same `bench.run(...)` on the remote
-kernel (`!uv pip install datar datar-pandas` there first for the datar row).
+Under `%gpu`, run the same benchmarks on the remote kernel. Install Polars GPU
+support there first, then use `--polars-engine gpu`; the comprehensive suite
+does not require datar.
+
+### R semantic-parity oracle
+
+`tests/test_r_oracle_parity.py` compares every public frame verb with dplyr or
+tidyr, or assigns it to an explicit invariant/materialization category. The
+suite includes missing and empty inputs, persistent and transient grouping,
+categorical levels, duplicate names, and type coercion. Install R with dplyr,
+tidyr, and jsonlite, then run:
+
+```bash
+pytest -q tests/test_r_oracle_parity.py
+```
+
+If R is kept in a Pixi environment, point the suite at its manifest:
+
+```bash
+TIDY3_R_ORACLE_MANIFEST=/path/to/pixi.toml \
+  pytest -q tests/test_r_oracle_parity.py
+```
+
+All supported verb contracts in the oracle are strict tests on both backends;
+there are no expected-failure parity cases. Random sampling and explicit
+materialization boundaries use deterministic invariants where byte-for-byte
+comparison with R would be inappropriate.
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+python -m pytest -q
+```
+
+CI (GitHub Actions):
+
+- **Tests** — `pytest` on Python 3.10–3.12 for every push/PR; optional **R
+  semantic oracle** job installs dplyr/tidyr/jsonlite and runs the differential
+  suite
+- **Performance budget** — `python -m tidy3.bench_suite` geometric ratios vs raw
+  pandas (see `.github/workflows/`)
+
+On a machine without R, oracle tests skip automatically. To run them locally:
+
+```bash
+# after installing R + dplyr, tidyr, jsonlite
+pytest -q tests/test_r_oracle_parity.py
+```
+
+Uncommitted work on `expand-dplyr-parity` is staged in logical commits via
+`docs/commit-plan-expand-dplyr-parity.md`.
 
 ## Notes
 
@@ -390,10 +744,13 @@ kernel (`!uv pip install datar datar-pandas` there first for the datar row).
   output, and sslive exports. Under `%gpu`, bare polars DataFrames are
   restyled the same way (`seed_tidy3_remote(style_polars=False)` to opt out).
 - **Builtins are shadowed** by design: injecting the API puts `filter`, `slice`,
-  `sum`, `min`, `max` into the notebook namespace (dplyr ergonomics). Use
+  `sum`, `min`, `max`, `any`, and `all` into the notebook namespace. Use
   `builtins.filter` etc. when you need the Python originals.
 - **Plotting big remote data**: aggregate remotely, then let plot3's own
   remote path pull the small result: `%plot3 res.to_pandas() x=... y=...`.
+- **API maturity tiers** (stable / growing / experimental) are listed under
+  [API maturity](#api-maturity-v02). Prefer the stable core for adoption and
+  performance-sensitive work.
 
 ## Why not datar?
 
