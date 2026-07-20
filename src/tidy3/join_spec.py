@@ -103,12 +103,27 @@ def _bounds(bounds: str) -> tuple[bool, bool]:
 
 
 def between(
-    left: str,
-    right_lower: str,
-    right_upper: str,
+    left: Any,
+    right_lower: Any,
+    right_upper: Any,
     *,
     bounds: str = "[]",
-) -> JoinConditions:
+) -> Any:
+    if (
+        not isinstance(left, str)
+        or not isinstance(right_lower, str)
+        or not isinstance(right_upper, str)
+    ):
+        from tidy3.expr import between_values
+
+        value = left
+        if isinstance(left, str):
+            from tidy3.expr import col
+
+            value = col(left)
+        return between_values(
+            value, right_lower, right_upper, bounds=bounds
+        )
     lower, upper = _bounds(bounds)
     return JoinConditions(
         (

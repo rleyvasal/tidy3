@@ -120,9 +120,9 @@ def test_grouped_reframe_returns_each_value_and_recycles_scalars(backend):
     out = result.collect(as_="pandas")
     expected = pd.DataFrame(
         {
-            "g": ["b", "b", "a"],
-            "value": [2.0, 4.0, 10.0],
-            "avg": [3.0, 3.0, 10.0],
+            "g": ["a", "b", "b"],
+            "value": [10.0, 2.0, 4.0],
+            "avg": [10.0, 3.0, 3.0],
         }
     )
     pd.testing.assert_frame_equal(out, expected, check_dtype=False)

@@ -104,10 +104,21 @@ def test_slice_sample_supports_replacement(backend):
     assert out.groupby("g").size().tolist() == [2, 2]
 
 
-def test_slice_sample_supports_weights_on_pandas():
-    frame = tidy({"x": [1, 2], "w": [0.0, 1.0]}, backend="pandas")
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_slice_sample_supports_weights(backend):
+    frame = tidy({"x": [1, 2], "w": [0.0, 1.0]}, backend=backend)
     out = frame >> slice_sample(n=3, weight_by="w", replace=True, seed=2)
     assert values(out, "x") == [2, 2, 2]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_slice_sample_rejects_all_zero_weights(backend):
+    frame = tidy({"x": [1, 2], "w": [0.0, 0.0]}, backend=backend)
+    with pytest.raises(ValueError, match="weights|positive"):
+        (
+            frame
+            >> slice_sample(n=1, weight_by="w", replace=True, seed=2)
+        ).collect()
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

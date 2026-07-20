@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import re
+from contextvars import ContextVar
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict, is_dataclass
 from typing import Any
 
 import polars as pl
 
-from tidy3.expr import Expr, col
+from tidy3.expr import Expr, col, cur_group_id as _expr_cur_group_id, n_groups as _expr_n_groups
+
+
+_CURRENT_COLUMN: ContextVar[str | None] = ContextVar("tidy3_current_column", default=None)
+_CURRENT_GROUPS: ContextVar[tuple[str, ...] | None] = ContextVar(
+    "tidy3_current_groups", default=None
+)
+_CURRENT_GROUP_ROWS: ContextVar[tuple[int, ...] | None] = ContextVar(
+    "tidy3_current_group_rows", default=None
+)
 
 
 class Selector:
@@ -360,13 +371,43 @@ def _format_name(template: str, column: str, function: str) -> str:
         raise ValueError("names must use {col}/{fn} (or {.col}/{.fn})") from error
 
 
-class AcrossSpec:
-    __slots__ = ("selector", "functions", "names")
+def _format_unpack_name(template: str, outer: str, inner: str) -> str:
+    """Format a name for a field returned by an unpacked across function."""
+    template = template.replace("{.outer}", "{outer}").replace(
+        "{.inner}", "{inner}"
+    )
+    try:
+        return template.format(outer=outer, inner=inner)
+    except (KeyError, ValueError) as error:
+        raise ValueError(
+            "across(unpack=...) names must use {outer}/{inner} "
+            "(or {.outer}/{.inner})"
+        ) from error
 
-    def __init__(self, selector: Any, fns: Any, names: str | None):
+
+def _unpack_fields(value: Any) -> Mapping[str, Any] | None:
+    """Normalize supported structured across results to named fields."""
+    if isinstance(value, Mapping):
+        return value
+    if is_dataclass(value) and not isinstance(value, type):
+        return asdict(value)
+    if hasattr(value, "_asdict") and callable(value._asdict):
+        return value._asdict()
+    return None
+
+
+class AcrossSpec:
+    __slots__ = ("selector", "functions", "names", "unpack")
+
+    def __init__(
+        self, selector: Any, fns: Any, names: str | None, unpack: bool | str
+    ):
         self.selector = as_selector(selector)
         self.functions = _functions(fns)
         self.names = names
+        if not isinstance(unpack, (bool, str)):
+            raise TypeError("across() unpack must be False, True, or a name template")
+        self.unpack = unpack
 
     def expand(self, tf: Any) -> dict[str, Any]:
         columns = resolve_selection(tf, [self.selector])
@@ -380,9 +421,42 @@ class AcrossSpec:
                 name = _format_name(template, column, function_name)
                 if not name:
                     raise ValueError("across() produced an empty column name")
-                if name in result:
-                    raise ValueError(f"across() produced duplicate column {name!r}")
-                result[name] = fn(col(column))
+                column_token = _CURRENT_COLUMN.set(column)
+                groups_token = _CURRENT_GROUPS.set(tuple(tf._groups or ()))
+                try:
+                    value = fn(col(column))
+                finally:
+                    _CURRENT_GROUPS.reset(groups_token)
+                    _CURRENT_COLUMN.reset(column_token)
+                if self.unpack:
+                    fields = _unpack_fields(value)
+                    if fields is None:
+                        raise TypeError(
+                            "across(unpack=True) functions must return a mapping, "
+                            "named tuple, or dataclass of expressions"
+                        )
+                    unpack_template = (
+                        self.unpack if isinstance(self.unpack, str) else "{outer}_{inner}"
+                    )
+                    for inner, field_value in fields.items():
+                        output_name = _format_unpack_name(
+                            unpack_template, name, str(inner)
+                        )
+                        if not output_name:
+                            raise ValueError("across() produced an empty column name")
+                        if output_name in result:
+                            raise ValueError(
+                                f"across() produced duplicate column {output_name!r}"
+                            )
+                        result[output_name] = field_value
+                else:
+                    if _unpack_fields(value) is not None:
+                        raise TypeError(
+                            "across() function returned multiple fields; use unpack=True"
+                        )
+                    if name in result:
+                        raise ValueError(f"across() produced duplicate column {name!r}")
+                    result[name] = value
         return result
 
 
@@ -474,8 +548,86 @@ class ColumnSet:
         return self._tidy3_aggregate("last")
 
 
-def across(selector: Any, fns: Any, *, names: str | None = None) -> AcrossSpec:
-    return AcrossSpec(selector, fns, names)
+def across(
+    selector: Any,
+    fns: Any,
+    *,
+    names: str | None = None,
+    unpack: bool | str = False,
+) -> AcrossSpec:
+    """Apply one or more functions to selected columns.
+
+    When ``unpack`` is true (or a ``{outer}/{inner}`` template), each function
+    may return a mapping of field names to expressions.  The fields become
+    ordinary output columns, mirroring dplyr's ``across(.unpack=...)``.
+    """
+    return AcrossSpec(selector, fns, names, unpack)
+
+
+def cur_column() -> str:
+    """Return the name currently being processed by ``across``.
+
+    This is available while an across function is being expanded, matching
+    dplyr's ``cur_column()`` for column-dependent lambdas.
+    """
+    column = _CURRENT_COLUMN.get()
+    if column is None:
+        raise RuntimeError("cur_column() can only be used inside across()")
+    return column
+
+
+def cur_group() -> dict[str, Expr]:
+    """Return grouped keys as expressions inside an ``across`` function.
+
+    The mapping mirrors the one-row ``cur_group()`` data frame in dplyr while
+    remaining vectorized: indexing a key (for example ``cur_group()["g"]``)
+    yields the grouped column expression and therefore works in both mutate
+    and summarise pipelines.
+    """
+    groups = _CURRENT_GROUPS.get()
+    if groups is None:
+        raise RuntimeError("cur_group() can only be used inside across()")
+    return {name: col(name) for name in groups}
+
+
+def cur_group_id() -> Expr:
+    """Return the 1-based current group identifier inside ``across``."""
+    groups = _CURRENT_GROUPS.get()
+    if groups is None:
+        raise RuntimeError("cur_group_id() can only be used inside across()")
+    return _expr_cur_group_id(groups)
+
+
+def group_vars() -> tuple[str, ...]:
+    """Return grouping variable names inside an ``across`` function."""
+    groups = _CURRENT_GROUPS.get()
+    if groups is None:
+        raise RuntimeError("group_vars() can only be used inside across()")
+    return groups
+
+
+def n_groups() -> Expr:
+    """Return the number of groups inside an ``across`` function."""
+    groups = _CURRENT_GROUPS.get()
+    if groups is None:
+        raise RuntimeError("n_groups() can only be used inside across()")
+    return _expr_n_groups(groups)
+
+
+def _group_rows_token(rows: tuple[int, ...]):
+    return _CURRENT_GROUP_ROWS.set(rows)
+
+
+def _reset_group_rows(token: Any) -> None:
+    _CURRENT_GROUP_ROWS.reset(token)
+
+
+def cur_group_rows() -> tuple[int, ...]:
+    """Return zero-based source row positions in a group callback."""
+    rows = _CURRENT_GROUP_ROWS.get()
+    if rows is None:
+        raise RuntimeError("cur_group_rows() can only be used inside group callbacks")
+    return rows
 
 
 def if_any(selector: Any, predicate: Any) -> ColumnwisePredicate:
@@ -510,6 +662,12 @@ __all__ = [
     "HorizontalSpec",
     "Selector",
     "across",
+    "cur_column",
+    "cur_group",
+    "cur_group_id",
+    "group_vars",
+    "n_groups",
+    "cur_group_rows",
     "all_of",
     "any_of",
     "c_across",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import namedtuple
+
 import pandas as pd
 import polars as pl
 import pytest
@@ -10,11 +12,21 @@ from tidy3 import (
     any_of,
     col_range,
     col,
+    case_match,
     contains,
+    cur_column,
+    cur_group,
+    cur_group_id,
+    cur_group_rows,
     drop,
     ends_with,
     everything,
     group_by,
+    group_map,
+    group_modify,
+    group_nest,
+    group_split,
+    hoist,
     group_cols,
     if_all,
     if_any,
@@ -25,15 +37,23 @@ from tidy3 import (
     matches,
     mean,
     mutate,
+    n_groups,
     num_range,
     relocate,
+    pack,
+    separate_longer_delim,
+    separate_wider_delim,
+    recode,
     rename_with,
     select,
+    sum,
     starts_with,
     summarise,
     tidy,
     transmute,
+    unpack,
     where,
+    with_groups,
 )
 
 
@@ -158,6 +178,196 @@ def test_across_summarise_multiple_functions_and_groups(backend):
         3.0,
         4.0,
     ]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_across_unpack_mapping_in_mutate_and_summarise(backend):
+    data = tidy(
+        {"g": ["a", "a", "b"], "x": [1.0, 3.0, 10.0], "y": [2.0, 4.0, 20.0]},
+        backend=backend,
+    )
+    mutated = data >> mutate(
+        across(
+            starts_with(("x", "y")),
+            lambda value: {"double": value * 2, "plus_one": value + 1},
+            unpack=True,
+        )
+    )
+    out = mutated.collect(as_="pandas")
+    assert list(out.columns) == ["g", "x", "y", "x_double", "x_plus_one", "y_double", "y_plus_one"]
+    assert out["x_double"].tolist() == [2.0, 6.0, 20.0]
+    assert out["y_plus_one"].tolist() == [3.0, 5.0, 21.0]
+
+    summary = data >> group_by("g") >> summarise(
+        across(
+            starts_with(("x", "y")),
+            lambda value: {"mean": mean(value), "max": value.max()},
+            names="{col}",
+            unpack="{outer}__{inner}",
+        )
+    )
+    summary_out = summary.collect(as_="pandas").sort_values("g").reset_index(drop=True)
+    assert list(summary_out.columns) == ["g", "x__mean", "x__max", "y__mean", "y__max"]
+    assert summary_out.loc[0, ["x__mean", "x__max", "y__mean", "y__max"]].tolist() == [
+        2.0,
+        3.0,
+        3.0,
+        4.0,
+    ]
+
+    Fields = namedtuple("Fields", ["double", "plus_one"])
+    structured = data >> mutate(
+        across(
+            ["x"],
+            lambda value: Fields(value * 2, value + 1),
+            unpack=True,
+        )
+    )
+    structured_out = structured.collect(as_="pandas")
+    assert structured_out[["x_double", "x_plus_one"]].values.tolist() == [
+        [2.0, 2.0],
+        [6.0, 4.0],
+        [20.0, 11.0],
+    ]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_across_unpack_requires_mapping(backend):
+    data = frame(backend)
+    with pytest.raises(TypeError, match="must return a mapping"):
+        data >> mutate(across(starts_with("x_"), lambda value: value * 2, unpack=True))
+    with pytest.raises(TypeError, match="use unpack=True"):
+        data >> mutate(
+            across(starts_with("x_"), lambda value: {"double": value * 2})
+        )
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_cur_column_is_available_inside_across(backend):
+    data = frame(backend)
+    result = data >> mutate(
+        across(starts_with("x_"), lambda value: value + len(cur_column()))
+    )
+    out = result.collect(as_="pandas")
+    assert out["x_1"].tolist() == [4.0, 5.0, 6.0]
+    assert out["x_2"].tolist() == [13.0, 23.0, 33.0]
+
+    with pytest.raises(RuntimeError, match="inside across"):
+        cur_column()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_cur_group_keys_are_available_inside_across(backend):
+    data = tidy({"g": [1, 1, 2], "x": [10.0, 20.0, 30.0]}, backend=backend)
+    result = data >> group_by("g") >> mutate(
+        across(["x"], lambda value: value + cur_group()["g"])
+    )
+    out = result.collect(as_="pandas")
+    assert out["x"].tolist() == [11.0, 21.0, 32.0]
+
+    with pytest.raises(RuntimeError, match="inside across"):
+        cur_group()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_cur_group_id_is_available_inside_across(backend):
+    data = tidy({"g": [2, 1, 2, 3], "x": [10.0, 20.0, 30.0, 40.0]}, backend=backend)
+    result = data >> group_by("g") >> mutate(
+        across(["x"], lambda value: value + cur_group_id())
+    )
+    out = result.collect(as_="pandas")
+    assert out["x"].tolist() == [12.0, 21.0, 32.0, 43.0]
+
+    with pytest.raises(RuntimeError, match="inside across"):
+        cur_group_id()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_n_groups_is_available_inside_across(backend):
+    data = tidy({"g": [2, 1, 2, 3], "x": [10.0, 20.0, 30.0, 40.0]}, backend=backend)
+    result = data >> group_by("g") >> mutate(
+        across(["x"], lambda value: value + n_groups())
+    )
+    assert result.collect(as_="pandas")["x"].tolist() == [13.0, 23.0, 33.0, 43.0]
+    with pytest.raises(RuntimeError, match="inside across"):
+        n_groups()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_case_match_and_recode_are_backend_neutral(backend):
+    data = tidy({"code": [1, 2, 3, None], "label": ["a", "b", "c", "d"]}, backend=backend)
+    result = data >> mutate(
+        bucket=case_match(
+            "code",
+            ((1, 2), "low"),
+            (3, "high"),
+            default="other",
+        ),
+        recoded=recode("code", {1: "one", 2: "two"}, default="other", missing="missing"),
+    )
+    out = result.collect(as_="pandas")
+    assert out["bucket"].tolist() == ["low", "low", "high", "other"]
+    assert out["recoded"].tolist() == ["one", "two", "other", "missing"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_with_groups_restores_prior_grouping(backend):
+    data = tidy({"g": ["a", "a", "b"], "x": [1, 3, 10]}, backend=backend)
+    result = data >> with_groups(
+        "g", lambda grouped: grouped >> mutate(group_total=sum("x"))
+    )
+    assert result._groups is None
+    assert result.collect(as_="pandas")["group_total"].tolist() == [4, 4, 10]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_group_split_map_modify_and_nest(backend):
+    data = tidy({"g": ["a", "a", "b"], "x": [1, 3, 10]}, backend=backend)
+    parts = data >> group_by("g") >> group_split()
+    assert [part.collect(as_="pandas")["x"].tolist() for part in parts] == [[1, 3], [10]]
+
+    mapped = data >> group_map(lambda part, key: (key["g"], int(part.collect(as_="pandas")["x"].sum())), "g")
+    assert mapped == [("a", 4), ("b", 10)]
+    row_mapped = data >> group_map(lambda part, key: cur_group_rows(), "g")
+    assert row_mapped == [(0, 1), (2,)]
+
+    modified = data >> group_modify(
+        lambda part, key: tidy({"g": [key["g"]], "total": [int(part.collect(as_="pandas")["x"].sum())]}, backend=backend),
+        "g",
+    )
+    assert modified.collect(as_="pandas").to_dict("records") == [
+        {"g": "a", "total": 4},
+        {"g": "b", "total": 10},
+    ]
+
+    nested = data >> group_nest("g", name="rows")
+    nested_out = nested.collect(as_="pandas")
+    assert nested_out["g"].tolist() == ["a", "b"]
+    if backend == "pandas":
+        assert nested_out["rows"].iloc[0]["x"].tolist() == [1, 3]
+    else:
+        assert list(nested_out["rows"].iloc[0]) == [{"x": 1}, {"x": 3}]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_tidyr_struct_and_delimited_helpers(backend):
+    data = tidy(
+        {"id": [1, 2], "code": ["a|b", "c"], "x": [10, 20], "y": [1, 2],
+         "obj": [{"score": 3}, {"score": 4}]},
+        backend=backend,
+    )
+    longer = data >> separate_longer_delim("code", "|")
+    assert longer.collect(as_="pandas")["code"].tolist() == ["a", "b", "c"]
+    wider = data >> separate_wider_delim("code", ["left", "right"], "|")
+    wider_out = wider.collect(as_="pandas")
+    assert wider_out["right"].iloc[0] == "b"
+    assert pd.isna(wider_out["right"].iloc[1])
+    extracted = data >> hoist("obj", score="score")
+    assert extracted.collect(as_="pandas")["score"].tolist() == [3, 4]
+    packed = data >> pack("xy", "x", "y")
+    assert packed.collect(as_="pandas")["xy"].iloc[0]["x"] == 10
+    unpacked = packed >> unpack("xy")
+    assert unpacked.collect(as_="pandas")["x"].tolist() == [10, 20]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
