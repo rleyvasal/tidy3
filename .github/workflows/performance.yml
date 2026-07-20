@@ -1,0 +1,33 @@
+name: Performance budget
+
+on:
+  pull_request:
+    paths:
+      - "src/tidy3/**"
+      - "tests/test_bench_suite.py"
+      - ".github/workflows/performance.yml"
+  workflow_dispatch:
+
+jobs:
+  relative-performance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install tidy3
+        run: python -m pip install -e ".[dev]"
+      - name: Check relative performance budgets
+        run: >-
+          python -m tidy3.bench_suite
+          --rows 500000
+          --repeat 3
+          --warmup 1
+          --output native
+          --polars-engine auto
+          --budget-min-ms 5
+          --max-tidy-pandas-geo 1.35
+          --max-tidy-polars-geo 1.35

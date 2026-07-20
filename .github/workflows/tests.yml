@@ -1,0 +1,50 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, "expand-dplyr-parity"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install tidy3
+        run: python -m pip install -e ".[dev]"
+      - name: Run unit tests
+        run: python -m pytest -q --tb=short
+
+  # Optional semantic parity against real dplyr/tidyr. Skipped paths still
+  # exercise classification invariants when R is absent; this job enforces
+  # the full differential suite when R is available.
+  r-oracle:
+    name: R semantic oracle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install R and tidyverse packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends r-base r-base-dev
+          sudo Rscript -e 'install.packages(c("dplyr", "tidyr", "jsonlite"), repos = "https://cloud.r-project.org")'
+      - name: Install tidy3
+        run: python -m pip install -e ".[dev]"
+      - name: Run R oracle parity tests
+        run: python -m pytest -q --tb=short tests/test_r_oracle_parity.py tests/test_dplyr_semantic_parity.py
