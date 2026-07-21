@@ -352,3 +352,15 @@ __all__ = [
     "within",
     "__version__",
 ]
+
+# Inside IPython / SolveIt / Jupyter: enable multi-line ``>>`` rewriting even
+# when the user only did ``from tidy3 import …`` (without %load_ext / addon).
+try:
+    from IPython import get_ipython as _get_ipython
+
+    if _get_ipython is not None and _get_ipython() is not None:
+        from tidy3.jupyter import ensure_ipython_integration as _ensure_ip
+
+        _ensure_ip(quiet=True)
+except Exception:
+    pass

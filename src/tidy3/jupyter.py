@@ -148,13 +148,21 @@ def inject_api(ipython: Any | None = None) -> None:
         user_ns["tidy3"] = t3
 
 
+_MAGICS_REGISTERED = False
+
+
 def load_ipython_extension(ipython: Any) -> None:
+    global _MAGICS_REGISTERED
     from IPython.core.magic import Magics, cell_magic, line_magic, magics_class
 
     from tidy3.partial_run import partial_run
 
     enable_pipe_transform(ipython)
     inject_api(ipython)
+
+    if _MAGICS_REGISTERED and getattr(ipython, "magics_manager", None) is not None:
+        # Magics already registered this process; still re-enable transformer.
+        return
 
     @magics_class
     class Tidy3Magics(Magics):
@@ -190,11 +198,39 @@ def load_ipython_extension(ipython: Any) -> None:
             else:
                 on = tidy3_input_transformer in getattr(
                     self.shell, "input_transformers_cleanup", []
+                ) or tidy3_input_transformer in getattr(
+                    self.shell, "input_transformers_post", []
                 )
                 print(f"tidy3: pipe input transformer {'ON' if on else 'OFF'}")
 
     ipython.register_magics(Tidy3Magics)
+    _MAGICS_REGISTERED = True
+
+
+def ensure_ipython_integration(*, quiet: bool = True) -> bool:
+    """Enable multi-line ``>>`` rewrite if running inside IPython/SolveIt.
+
+    Safe to call multiple times. Used by ``import tidy3`` so bare imports
+    still get pipe rewriting (not only ``%load_ext tidy3.jupyter`` / the
+    CRAFT addon).
+    """
+    try:
+        from IPython import get_ipython
+    except Exception:
+        return False
+    ip = get_ipython()
+    if ip is None:
+        return False
+    try:
+        load_ipython_extension(ip)
+    except Exception as e:
+        if not quiet:
+            print(f"tidy3: could not enable IPython integration: {e}")
+        return False
+    return True
 
 
 def unload_ipython_extension(ipython: Any) -> None:
+    global _MAGICS_REGISTERED
     disable_pipe_transform(ipython)
+    _MAGICS_REGISTERED = False
