@@ -1187,6 +1187,14 @@ def tidy(data: Any = None, backend: str | None = None, **kwargs: Any) -> TidyFra
     ``"pandas"`` (eager — for 1:1 engine comparisons). The default comes
     from ``options(backend=...)``.
     """
+    # Best-effort: multi-line >> rewrite in IPython/SolveIt/CRAFT.
+    try:
+        from tidy3.jupyter import ensure_ipython_integration
+
+        ensure_ipython_integration(quiet=True)
+    except Exception:
+        pass
+
     if data is None and kwargs:
         data = kwargs
         kwargs = {}

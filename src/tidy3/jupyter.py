@@ -77,6 +77,13 @@ def tidy3_input_transformer(lines: list[str]) -> list[str]:
 
 
 def enable_pipe_transform(ipython: Any | None = None) -> bool:
+    """Install the multi-line ``>>`` rewriter.
+
+    Inserted at the **front** of ``input_transformers_cleanup`` so it runs
+    *before* CRAFT's mode router. Under ``%gpu`` the router captures the cell
+    as ``pending`` and only the transformed (parenthesized) source is valid
+    Python on the remote kernel.
+    """
     global _TRANSFORMER
     if ipython is None:
         try:
@@ -92,11 +99,12 @@ def enable_pipe_transform(ipython: Any | None = None) -> bool:
     if transformers is None:
         return False
     transformers[:] = [t for t in transformers if not _is_pipe_transformer(t)]
-    transformers.append(tidy3_input_transformer)
+    # Front of list: before CRAFT ``_router_transform`` (appended on %gpu).
+    transformers.insert(0, tidy3_input_transformer)
     post = getattr(ipython, "input_transformers_post", None)
     if isinstance(post, list):
         post[:] = [t for t in post if not _is_pipe_transformer(t)]
-        post.append(tidy3_input_transformer)
+        post.insert(0, tidy3_input_transformer)
     _TRANSFORMER = tidy3_input_transformer
     return True
 
@@ -149,10 +157,27 @@ def inject_api(ipython: Any | None = None) -> None:
 
 
 _MAGICS_REGISTERED = False
+_PRE_RUN_HOOK = None
+
+
+def _line_magic_registered(ipython: Any, name: str) -> bool:
+    try:
+        lines = ipython.magics_manager.magics.get("line", {})
+        return name in lines
+    except Exception:
+        return False
+
+
+def _ensure_transform_before_cell(_info=None) -> None:
+    """Re-assert tidy3 transformer at front (CRAFT %gpu re-appends its router)."""
+    try:
+        enable_pipe_transform()
+    except Exception:
+        pass
 
 
 def load_ipython_extension(ipython: Any) -> None:
-    global _MAGICS_REGISTERED
+    global _MAGICS_REGISTERED, _PRE_RUN_HOOK
     from IPython.core.magic import Magics, cell_magic, line_magic, magics_class
 
     from tidy3.partial_run import partial_run
@@ -160,8 +185,19 @@ def load_ipython_extension(ipython: Any) -> None:
     enable_pipe_transform(ipython)
     inject_api(ipython)
 
-    if _MAGICS_REGISTERED and getattr(ipython, "magics_manager", None) is not None:
-        # Magics already registered this process; still re-enable transformer.
+    # Keep tidy3 ahead of CRAFT's router after every %gpu / %local switch.
+    try:
+        if _PRE_RUN_HOOK is not None:
+            try:
+                ipython.events.unregister("pre_run_cell", _PRE_RUN_HOOK)
+            except Exception:
+                pass
+        ipython.events.register("pre_run_cell", _ensure_transform_before_cell)
+        _PRE_RUN_HOOK = _ensure_transform_before_cell
+    except Exception:
+        pass
+
+    if _MAGICS_REGISTERED and _line_magic_registered(ipython, "tidy3_pipes"):
         return
 
     @magics_class
@@ -191,17 +227,21 @@ def load_ipython_extension(ipython: Any) -> None:
             arg = (line or "status").strip().lower()
             if arg in ("on", "1", "true", "enable"):
                 enable_pipe_transform(self.shell)
-                print("tidy3: pipe input transformer ON")
+                print("tidy3: pipe input transformer ON (before CRAFT router)")
             elif arg in ("off", "0", "false", "disable"):
                 disable_pipe_transform(self.shell)
                 print("tidy3: pipe input transformer OFF")
             else:
-                on = tidy3_input_transformer in getattr(
-                    self.shell, "input_transformers_cleanup", []
-                ) or tidy3_input_transformer in getattr(
-                    self.shell, "input_transformers_post", []
+                cleanup = getattr(self.shell, "input_transformers_cleanup", []) or []
+                on = any(_is_pipe_transformer(t) for t in cleanup)
+                pos = next(
+                    (i for i, t in enumerate(cleanup) if _is_pipe_transformer(t)),
+                    None,
                 )
-                print(f"tidy3: pipe input transformer {'ON' if on else 'OFF'}")
+                print(
+                    f"tidy3: pipe input transformer {'ON' if on else 'OFF'}"
+                    + (f" at cleanup[{pos}]" if pos is not None else "")
+                )
 
     ipython.register_magics(Tidy3Magics)
     _MAGICS_REGISTERED = True
@@ -210,9 +250,9 @@ def load_ipython_extension(ipython: Any) -> None:
 def ensure_ipython_integration(*, quiet: bool = True) -> bool:
     """Enable multi-line ``>>`` rewrite if running inside IPython/SolveIt.
 
-    Safe to call multiple times. Used by ``import tidy3`` so bare imports
-    still get pipe rewriting (not only ``%load_ext tidy3.jupyter`` / the
-    CRAFT addon).
+    Safe to call multiple times. Used by ``import tidy3`` and ``tidy()`` so
+    bare imports still get pipe rewriting (not only ``%load_ext`` / the CRAFT
+    addon).
     """
     try:
         from IPython import get_ipython
@@ -231,6 +271,12 @@ def ensure_ipython_integration(*, quiet: bool = True) -> bool:
 
 
 def unload_ipython_extension(ipython: Any) -> None:
-    global _MAGICS_REGISTERED
+    global _MAGICS_REGISTERED, _PRE_RUN_HOOK
     disable_pipe_transform(ipython)
+    try:
+        if _PRE_RUN_HOOK is not None:
+            ipython.events.unregister("pre_run_cell", _PRE_RUN_HOOK)
+    except Exception:
+        pass
+    _PRE_RUN_HOOK = None
     _MAGICS_REGISTERED = False

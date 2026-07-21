@@ -61,9 +61,10 @@ def test_pipe_transform_registration_replaces_stale_module_copy():
     )
 
     assert enable_pipe_transform(ipython)
+    # tidy3 is inserted at the front so it runs before CRAFT's %gpu router.
     assert ipython.input_transformers_cleanup == [
-        unrelated,
         tidy3_input_transformer,
+        unrelated,
     ]
     assert ipython.input_transformers_post == [tidy3_input_transformer]
 
