@@ -36,6 +36,23 @@ Homepage = "https://github.com/rleyvasal/tidy3"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+tidy3 = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+# Pylance / Pyright: understand tidy3 >> pipes without notebook workarounds.
+[tool.pyright]
+include = ["src", "tests", "examples"]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+reportMissingImports = true
+# Expr uses rich operator overloading; keep comparisons usable in filters.
+reportUnnecessaryComparison = false
+
+[tool.basedpyright]
+include = ["src", "tests", "examples"]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"

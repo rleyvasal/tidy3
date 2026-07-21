@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal, overload
 
 import polars as pl
 
 from tidy3.options import get_options, options  # re-export
+
+if TYPE_CHECKING:
+    from tidy3.verbs import Verb
 
 __all__ = ["TidyFrame", "tidy", "options"]
 
@@ -41,6 +44,10 @@ class TidyFrame:
         "_rowwise",
         "_group_drop",
         "_category_levels",
+        # After select(): (pre-projection data, re-apply projection). Lets a
+        # later filter/filter_out reference columns dropped by select —
+        # equivalent to rewriting ``select >> filter`` as ``filter >> select``.
+        "_select_base",
     )
 
     def __init__(
@@ -51,6 +58,7 @@ class TidyFrame:
         rowwise: bool = False,
         group_drop: bool = True,
         category_levels: dict[str, list[Any]] | None = None,
+        select_base: Any | None = None,
     ):
         if not isinstance(data, pl.LazyFrame):
             import pandas as pd
@@ -72,6 +80,7 @@ class TidyFrame:
                 if isinstance(series.dtype, pd.CategoricalDtype)
             }
         self._category_levels = dict(category_levels or {})
+        self._select_base = select_base
 
     @property
     def backend(self) -> str:
@@ -102,7 +111,13 @@ class TidyFrame:
         rowwise: bool | None = None,
         group_drop: bool | None = None,
         category_levels: dict[str, list[Any]] | None = None,
+        select_base: Any | None = None,
+        keep_select_base: bool = False,
     ) -> TidyFrame:
+        # Default: clear select_base (most verbs invalidate the rewrite window).
+        # select/filter set select_base=...; pass keep_select_base to preserve.
+        if keep_select_base and select_base is None:
+            select_base = self._select_base
         return TidyFrame(
             lf,
             groups=groups,
@@ -115,6 +130,7 @@ class TidyFrame:
                 if category_levels is None
                 else category_levels
             ),
+            select_base=select_base,
         )
 
     def _with_pdf(
@@ -125,7 +141,11 @@ class TidyFrame:
         rowwise: bool | None = None,
         group_drop: bool | None = None,
         category_levels: dict[str, list[Any]] | None = None,
+        select_base: Any | None = None,
+        keep_select_base: bool = False,
     ) -> TidyFrame:
+        if keep_select_base and select_base is None:
+            select_base = self._select_base
         return TidyFrame(
             pdf,
             groups=groups,
@@ -138,11 +158,21 @@ class TidyFrame:
                 if category_levels is None
                 else category_levels
             ),
+            select_base=select_base,
         )
 
     # ── pipe ────────────────────────────────────────────────────────────
+    @overload
+    def __rshift__(self, other: Verb) -> TidyFrame: ...
+
+    @overload
+    def __rshift__(self, other: Callable[[TidyFrame], Any]) -> Any: ...
+
     def __rshift__(self, other: Any) -> Any:
-        """``tf >> verb`` — prefer Verb.__rrshift__, but support callables."""
+        """``tf >> verb`` — prefer Verb.__rrshift__, but support callables.
+
+        Annotated so Pylance treats ``tidy(df) >> select(...)`` as ``TidyFrame``.
+        """
         from tidy3.verbs import Verb
 
         other_cls = type(other)

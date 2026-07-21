@@ -60,7 +60,10 @@ def _pe():
 
 
 class Verb:
-    """Pipeable verb: ``tidy_frame >> verb`` via ``__rrshift__``."""
+    """Pipeable verb: ``tidy_frame >> verb`` via ``__rrshift__``.
+
+    Typed so Pylance/Pyright treat ``frame >> select(...)`` as ``TidyFrame``.
+    """
 
     __slots__ = ("_fn", "name")
 
@@ -68,15 +71,15 @@ class Verb:
         self._fn = fn
         self.name = name
 
-    def __rrshift__(self, other: Any) -> Any:
+    def __rrshift__(self, other: Any) -> "TidyFrame":
         from tidy3.frame import TidyFrame
 
         if not isinstance(other, TidyFrame):
             cls = type(other)
             if cls.__module__ == "tidy3.frame" and cls.__name__ == "TidyFrame":
-                # A remote re-seed creates a new TidyFrame class identity while
-                # frames already stored in the notebook still use the old one.
-                # Re-wrap its backend data in the current class at this seam.
+                # A remote re-seed / %autoreload creates a new TidyFrame class
+                # identity while frames already in the notebook still use the
+                # old one. Re-wrap backend data in the current class at this seam.
                 try:
                     other = TidyFrame(
                         other._data,
@@ -86,18 +89,29 @@ class Verb:
                         category_levels=getattr(
                             other, "_category_levels", None
                         ),
+                        select_base=getattr(other, "_select_base", None),
                     )
                 except (AttributeError, TypeError) as e:
                     raise TypeError(
                         "tidy3 pipe received an incompatible TidyFrame from "
-                        "another loaded copy"
+                        "another loaded copy — restart the kernel "
+                        "(%restart / Restart Kernel) and re-import tidy3"
                     ) from e
             else:
                 raise TypeError(
                     "tidy3 pipe expects TidyFrame on the left of >>, "
-                    f"got {cls.__name__}"
+                    f"got {cls.__name__!r}. "
+                    "If you used a documentation placeholder like "
+                    "slice_max(...), pass real arguments "
+                    '(e.g. slice_max(order_by="hp", n=1)). '
+                    "After editing tidy3 source, restart the kernel so "
+                    "pipes and verbs share one TidyFrame class."
                 )
         return self._fn(other)
+
+    # Also support ``verb(frame)`` call style for type checkers / tooling.
+    def __call__(self, other: Any) -> "TidyFrame":
+        return self.__rrshift__(other)
 
     def __repr__(self) -> str:
         return f"<tidy3.Verb {self.name}>"
@@ -524,45 +538,197 @@ def _aggregate_cache_plan(
     return cached, rewritten, list(cached)
 
 
+def _expr_column_names(value: Any) -> set[str]:
+    """Column names referenced by a tidy3 Expr / polars Expr / plain value."""
+    names: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, tuple) or not node:
+            return
+        kind = node[0]
+        if kind == "col":
+            names.add(str(node[1]))
+        elif kind == "lit":
+            return
+        elif kind == "pl":
+            try:
+                names.update(node[1].meta.root_names())
+            except Exception:
+                pass
+        elif kind in {"bin", "neg", "not", "desc"}:
+            for child in node[1:]:
+                if isinstance(child, tuple):
+                    walk(child)
+        elif kind == "call":
+            # ("call", name, base_node, args, kwargs)
+            walk(node[2])
+            for arg in node[3] or ():
+                if isinstance(arg, Expr):
+                    walk(arg.node)
+                elif isinstance(arg, tuple):
+                    walk(arg)
+            for val in (node[4] or {}).values():
+                if isinstance(val, Expr):
+                    walk(val.node)
+                elif isinstance(val, tuple):
+                    walk(val)
+        elif kind == "n":
+            return
+        else:
+            for child in node[1:]:
+                if isinstance(child, tuple):
+                    walk(child)
+
+    if isinstance(value, Expr):
+        walk(value.node)
+    elif isinstance(value, pl.Expr):
+        try:
+            names.update(value.meta.root_names())
+        except Exception:
+            pass
+    elif isinstance(value, str):
+        names.add(value)
+    return names
+
+
+def _predicate_column_names(predicates: tuple[Any, ...]) -> set[str]:
+    names: set[str] = set()
+    for predicate in predicates:
+        names |= _expr_column_names(predicate)
+    return names
+
+
+def _base_columns(data: Any) -> list[str]:
+    if isinstance(data, pl.LazyFrame):
+        return data.collect_schema().names()
+    return [str(c) for c in data.columns]
+
+
+def _maybe_widen_for_select_base(
+    tf: Any, needed: set[str] | None = None
+) -> tuple[Any, bool]:
+    """Evaluate a row verb on the pre-select frame when a select is still open.
+
+    Rewrites ``select(...) >> verb(...)`` into ``verb(...) >> select(...)`` for
+    row-preserving-column-set verbs (filter, arrange, slice_min/max). Always
+    operating on the wide base keeps stacked verbs correct (each updates the
+    base snapshot).
+
+    Returns ``(frame, widened)`` — re-project only when *widened* is True.
+    """
+    base = getattr(tf, "_select_base", None)
+    if base is None:
+        return tf, False
+    pre = base["data"]
+    pre_names = set(_base_columns(pre))
+    if needed and not needed <= pre_names:
+        # Column never existed (even before select) — let the normal path error.
+        return tf, False
+    if tf._backend == "pandas":
+        return (
+            tf._with_pdf(pre, groups=tf._groups, select_base=base),
+            True,
+        )
+    return tf._with_lf(pre, groups=tf._groups, select_base=base), True
+
+
+# Back-compat alias used by filter path during transition.
+def _maybe_widen_for_filter(
+    tf: Any, predicates: tuple[Any, ...]
+) -> tuple[Any, bool]:
+    return _maybe_widen_for_select_base(tf, _predicate_column_names(predicates))
+
+
+def _reproject_after_select_base(tf: Any, result: Any) -> Any:
+    """Re-apply a deferred select projection after a wide-frame row verb."""
+    base = getattr(tf, "_select_base", None)
+    if base is None:
+        return result
+    groups = None if result._groups is None else list(result._groups)
+    if result._backend == "pandas":
+        sel = base["sel"]
+        mapping = base["mapping"]
+        pdf = result._pdf[sel].rename(columns=mapping)
+        # Keep select_base pointed at the wide frame for later row verbs.
+        new_base = {**base, "data": result._pdf}
+        return result._with_pdf(pdf, groups=groups, select_base=new_base)
+    expressions = base["expressions"]
+    lf = result._lf.select(expressions)
+    new_base = {**base, "data": result._lf}
+    return result._with_lf(lf, groups=groups, select_base=new_base)
+
+
+def _reproject_after_filter(tf: Any, result: Any) -> Any:
+    return _reproject_after_select_base(tf, result)
+
+
+def _finish_select_base_verb(
+    wide: Any, out: Any, *, widened: bool
+) -> Any:
+    """Preserve select_base and re-project when the verb ran on a wide frame."""
+    if not widened:
+        # Still keep the open select snapshot for a later filter/arrange/slice.
+        return out
+    return _reproject_after_select_base(wide, out)
+
+
 def filter(*predicates: Any, by: Any = None) -> Verb:  # noqa: A001
     """Keep rows matching all predicates (AND).
 
     After ``group_by`` the predicate is evaluated per group (dplyr window
     semantics), so ``filter(col("x") > mean("x"))`` compares within groups.
+
+    ``select(...) >> filter(...)`` is rewritten when the filter needs columns
+    that select dropped (same result as ``filter >> select``).
     """
     if not predicates:
         raise TypeError("filter() requires at least one predicate")
 
     def _apply(tf):
-        groups, transient = _operation_groups(tf, by, "filter")
-        context = _group_context(tf, groups)
+        wide, widened = _maybe_widen_for_filter(tf, predicates)
+        groups, transient = _operation_groups(wide, by, "filter")
+        context = _group_context(wide, groups)
         resolved = tuple(
             _resolved_value(context, predicate) for predicate in predicates
         )
-        if tf._backend == "pandas":
-            work = tf._pdf
+        # Preserve select_base so a later filter can still widen if needed.
+        # When we widen, reproject updates base["data"] to the filtered wide plan.
+        keep_base = wide._select_base
+
+        if wide._backend == "pandas":
+            work = wide._pdf
             marker = None
-            if tf._rowwise:
-                marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
+            if wide._rowwise:
+                marker = _temp_column(_frame_columns(wide), "__tidy3_rowwise")
                 work = work.assign(**{marker: range(len(work))})
                 groups = [marker]
             pdf = _pe().do_filter(work, resolved, groups)
             if marker is not None:
                 pdf = pdf.drop(columns=marker)
-            return tf._with_pdf(pdf, groups=None if transient else tf._groups)
+            out = wide._with_pdf(
+                pdf,
+                groups=None if transient else wide._groups,
+                select_base=keep_base,
+            )
+            return _reproject_after_filter(wide, out) if widened else out
         expr = _plx(resolved[0])
         for p in resolved[1:]:
             expr = expr & _plx(p)
-        if tf._rowwise:
-            marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
+        if wide._rowwise:
+            marker = _temp_column(_frame_columns(wide), "__tidy3_rowwise")
             lf = (
-                tf._lf.with_row_index(marker)
+                wide._lf.with_row_index(marker)
                 .filter(_pl_expr(expr).over(marker))
                 .drop(marker)
             )
         else:
-            lf = tf._lf.filter(_windowed(expr, groups))
-        return tf._with_lf(lf, groups=None if transient else tf._groups)
+            lf = wide._lf.filter(_windowed(expr, groups))
+        out = wide._with_lf(
+            lf,
+            groups=None if transient else wide._groups,
+            select_base=keep_base,
+        )
+        return _reproject_after_filter(wide, out) if widened else out
 
     return Verb(_apply, "filter")
 
@@ -573,37 +739,50 @@ def filter_out(*predicates: Any, by: Any = None) -> Verb:
         raise TypeError("filter_out() requires at least one predicate")
 
     def _apply(tf):
-        groups, transient = _operation_groups(tf, by, "filter_out")
-        context = _group_context(tf, groups)
+        wide, widened = _maybe_widen_for_filter(tf, predicates)
+        groups, transient = _operation_groups(wide, by, "filter_out")
+        context = _group_context(wide, groups)
         resolved = tuple(
             _resolved_value(context, predicate) for predicate in predicates
         )
-        if tf._backend == "pandas":
-            work = tf._pdf
+        keep_base = wide._select_base
+
+        if wide._backend == "pandas":
+            work = wide._pdf
             marker = None
-            if tf._rowwise:
-                marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
+            if wide._rowwise:
+                marker = _temp_column(_frame_columns(wide), "__tidy3_rowwise")
                 work = work.assign(**{marker: range(len(work))})
                 groups = [marker]
             pdf = _pe().do_filter_out(work, resolved, groups)
             if marker is not None:
                 pdf = pdf.drop(columns=marker)
-            return tf._with_pdf(pdf, groups=None if transient else tf._groups)
+            out = wide._with_pdf(
+                pdf,
+                groups=None if transient else wide._groups,
+                select_base=keep_base,
+            )
+            return _reproject_after_filter(wide, out) if widened else out
         expr = _plx(resolved[0])
         for predicate in resolved[1:]:
             expr = expr & _plx(predicate)
-        if tf._rowwise:
-            marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
-            lf = tf._lf.with_row_index(marker)
+        if wide._rowwise:
+            marker = _temp_column(_frame_columns(wide), "__tidy3_rowwise")
+            lf = wide._lf.with_row_index(marker)
             expr = _pl_expr(expr).over(marker)
         else:
             marker = None
-            lf = tf._lf
+            lf = wide._lf
             expr = _windowed(expr, groups)
         lf = lf.filter((~expr).fill_null(True))
         if marker is not None:
             lf = lf.drop(marker)
-        return tf._with_lf(lf, groups=None if transient else tf._groups)
+        out = wide._with_lf(
+            lf,
+            groups=None if transient else wide._groups,
+            select_base=keep_base,
+        )
+        return _reproject_after_filter(wide, out) if widened else out
 
     return Verb(_apply, "filter_out")
 
@@ -759,6 +938,10 @@ def select(*cols: Any, **renames: Any) -> Verb:
     """Select columns by name or expression.
 
     Like dplyr, grouping columns are always kept (prepended when missing).
+
+    A following ``filter()`` / ``filter_out()`` / ``arrange()`` /
+    ``slice_min()`` / ``slice_max()`` may still reference columns dropped
+    here; tidy3 rewrites that to verb-then-select (row ops before projection).
     """
     if not cols and not renames:
         raise TypeError("select() requires at least one column")
@@ -802,7 +985,14 @@ def select(*cols: Any, **renames: Any) -> Verb:
                     "use mutate()"
                 )
             pdf = tf._pdf[sel].rename(columns=mapping)
-            return tf._with_pdf(pdf, groups=groups)
+            # Snapshot pre-projection rows so a later filter can widen.
+            select_base = {
+                "data": tf._pdf,
+                "sel": list(sel),
+                "mapping": dict(mapping),
+                "expressions": None,
+            }
+            return tf._with_pdf(pdf, groups=groups, select_base=select_base)
         expressions = [
             (
                 pl.col(value).alias(mapping[value])
@@ -813,7 +1003,17 @@ def select(*cols: Any, **renames: Any) -> Verb:
             )
             for value in ordered
         ]
-        return tf._with_lf(tf._lf.select(expressions), groups=groups)
+        select_base = {
+            "data": tf._lf,
+            "sel": list(sel),
+            "mapping": dict(mapping),
+            "expressions": expressions,
+        }
+        return tf._with_lf(
+            tf._lf.select(expressions),
+            groups=groups,
+            select_base=select_base,
+        )
 
     return Verb(_apply, "select")
 
@@ -1006,19 +1206,30 @@ def glimpse(n: int = 10) -> Verb:
 
 
 def arrange(*keys: Any, by_group: bool = False) -> Verb:
+    """Order rows. Keys may reference columns dropped by a prior ``select()``."""
     if not keys:
         raise TypeError("arrange() requires at least one key")
     if not isinstance(by_group, bool):
         raise TypeError("arrange() by_group must be a boolean")
 
     def _apply(tf):
+        needed: set[str] = set()
+        for key in keys:
+            needed |= _expr_column_names(key)
+        if by_group and tf._groups:
+            needed |= set(tf._groups)
+        wide, widened = _maybe_widen_for_select_base(tf, needed)
         effective_keys = (
-            tuple([*(tf._groups or []), *keys]) if by_group else keys
+            tuple([*(wide._groups or []), *keys]) if by_group else keys
         )
-        if tf._backend == "pandas":
-            return tf._with_pdf(
-                _pe().do_arrange(tf._pdf, effective_keys), groups=tf._groups
+        keep_base = wide._select_base
+        if wide._backend == "pandas":
+            out = wide._with_pdf(
+                _pe().do_arrange(wide._pdf, effective_keys),
+                groups=wide._groups,
+                select_base=keep_base,
             )
+            return _finish_select_base_verb(wide, out, widened=widened)
         expressions = []
         descending = []
         for key in effective_keys:
@@ -1029,16 +1240,18 @@ def arrange(*keys: Any, by_group: bool = False) -> Verb:
             else:
                 expressions.append(_plx(key))
                 descending.append(False)
-        expressions = _dplyr_sort_expressions(tf._lf, expressions)
-        return tf._with_lf(
-            tf._lf.sort(
+        expressions = _dplyr_sort_expressions(wide._lf, expressions)
+        out = wide._with_lf(
+            wide._lf.sort(
                 expressions,
                 descending=descending,
                 nulls_last=True,
                 maintain_order=True,
             ),
-            groups=tf._groups,
+            groups=wide._groups,
+            select_base=keep_base,
         )
+        return _finish_select_base_verb(wide, out, widened=widened)
 
     return Verb(_apply, "arrange")
 
@@ -1264,10 +1477,22 @@ def _slice_extreme(
     n, prop = _slice_size_args(n, prop)
 
     def _apply(tf):
-        groups, transient = _operation_groups(tf, by, verb_name)
-        if tf._backend == "pandas":
+        needed = _expr_column_names(order_by)
+        # by= may name columns dropped by a prior select; include them for widen.
+        if by is not None:
+            if isinstance(by, str):
+                needed.add(by)
+            elif isinstance(by, (list, tuple)):
+                for item in by:
+                    needed |= _expr_column_names(item) if not isinstance(item, str) else {item}
+            else:
+                needed |= _expr_column_names(by)
+        wide, widened = _maybe_widen_for_select_base(tf, needed)
+        groups, transient = _operation_groups(wide, by, verb_name)
+        keep_base = wide._select_base
+        if wide._backend == "pandas":
             pdf = _pe().do_slice_extreme(
-                tf._pdf,
+                wide._pdf,
                 order_by,
                 n,
                 prop,
@@ -1276,17 +1501,31 @@ def _slice_extreme(
                 with_ties=with_ties,
                 na_rm=na_rm,
             )
-            return tf._with_pdf(pdf, groups=None if transient else tf._groups)
-        columns = _frame_columns(tf)
+            out = wide._with_pdf(
+                pdf,
+                groups=None if transient else wide._groups,
+                select_base=keep_base,
+            )
+            return _finish_select_base_verb(wide, out, widened=widened)
+        columns = _frame_columns(wide)
         order_name = _temp_column(columns, "__tidy3_slice_order")
         global_name = _temp_column([*columns, order_name], "__tidy3_slice_global")
         group_name = _temp_column(
             [*columns, order_name, global_name], "__tidy3_slice_group"
         )
+        if order_by is Ellipsis:
+            raise TypeError(
+                f"{verb_name}() got Ellipsis (...) as order_by — that is only a "
+                "docs placeholder. Pass a column name or expression, e.g. "
+                f'{verb_name}(order_by="hp", n=1)'
+            )
         value = pl.col(order_by) if isinstance(order_by, str) else _plx(order_by)
         if not isinstance(value, pl.Expr):
-            raise TypeError(f"{verb_name}() order_by must be a column or expression")
-        lf = tf._lf.with_columns(value.alias(order_name))
+            raise TypeError(
+                f"{verb_name}() order_by must be a column or expression, "
+                f"got {type(order_by).__name__}"
+            )
+        lf = wide._lf.with_columns(value.alias(order_name))
         cleanup = [order_name]
         if groups:
             lf = lf.with_row_index(global_name).with_columns(
@@ -1319,9 +1558,12 @@ def _slice_extreme(
                 maintain_order=True,
             )
             lf = lf.filter(_slice_local_index(groups) < target)
-        return tf._with_lf(
-            lf.drop(*cleanup), groups=None if transient else tf._groups
+        out = wide._with_lf(
+            lf.drop(*cleanup),
+            groups=None if transient else wide._groups,
+            select_base=keep_base,
         )
+        return _finish_select_base_verb(wide, out, widened=widened)
 
     return Verb(_apply, verb_name)
 
@@ -1335,6 +1577,10 @@ def slice_min(
     na_rm: bool = False,
     by: Any = None,
 ) -> Verb:
+    """Rows with the smallest ``order_by`` values (ties optional).
+
+    ``order_by`` may reference columns dropped by a prior ``select()``.
+    """
     return _slice_extreme(
         order_by,
         n=n,
@@ -1356,6 +1602,10 @@ def slice_max(
     na_rm: bool = False,
     by: Any = None,
 ) -> Verb:
+    """Rows with the largest ``order_by`` values (ties optional).
+
+    ``order_by`` may reference columns dropped by a prior ``select()``.
+    """
     return _slice_extreme(
         order_by,
         n=n,

@@ -51,8 +51,26 @@ source .venv/bin/activate
 pip install -e ".[dev,jupyter]"
 ```
 
-4. Recommended extensions: **Python**, **Jupyter** (for notebooks). Optional:
-   **Polars** is not required as an extension; it is a library dependency.
+4. Recommended extensions: **Python** (includes **Pylance**) and **Jupyter**.
+   Optional: **Polars** is a library dependency, not a VS Code extension.
+
+### Type checker / red squiggles under `>>` pipes
+
+You do **not** need a special tidy3 VS Code extension. Pylance is enough once
+tidy3 is installed editable from this repo (types ship with `py.typed`).
+
+1. Interpreter = `tidy3/.venv` (Command Palette → **Python: Select Interpreter**).
+2. Workspace settings in `.vscode/settings.json` point analysis at `src/`.
+3. Import the names you use in that cell/file:
+
+```python
+from tidy3 import tidy, select, filter, arrange, slice_max, col, desc
+```
+
+4. Reload the window if squiggles linger: **Developer: Reload Window**.
+
+If a name is still underlined, it is usually “not imported in this cell”, not a
+pipe typing bug. Runtime green + import present ⇒ safe to ignore residual noise.
 
 ### Scripts (`.py`)
 
@@ -247,44 +265,61 @@ tidy(big)
 The method handoff remains available as ``tidy(df).ggplot(aes(...))``.
 The bridge materializes to pandas for plot3; aggregate large data first.
 
-## CRAFT / gpudev / SolveIt (optional remote)
+## CRAFT / gpudev / SolveIt
 
-Use this when data or compute live on a GPU host. Local VS Code setup above
-is enough for everyday work on your laptop.
+Use this when you work in **SolveIt** (dialog notebook) and/or data lives on a
+GPU host via CRAFT `%gpu`. Local VS Code setup above is enough for everyday
+laptop work.
 
-### Load (same as other gpudev addons)
+### SolveIt load (tidy3 + plot3)
 
 ```text
 %local
-%run /path/to/gpudev/CRAFT.py
+%run /path/to/gpudev/CRAFT.py                 # if you need %gpu
 %run /path/to/gpudev/addons/tidy3.py
+%run /path/to/gpudev/addons/plot3.py          # ggplot / %plot3
+```
+
+Standalone SolveIt (no CRAFT):
+
+```text
+%run /path/to/tidy3  …  use: %load_ext tidy3.jupyter after pip install -e
+%run /path/to/plot3/load.py
+```
+
+Or after editable installs: `%load_ext tidy3.jupyter` then `%load_ext plot3`.
+
+### With `%gpu` (remote compute)
+
+```text
+%local
+%run …/CRAFT.py
+%run …/addons/tidy3.py
+%run …/addons/plot3.py
 %gpu
 ```
 
-Or without CRAFT on a normal Jupyter kernel: `%load_ext tidy3.jupyter` after
-`pip install -e ".[jupyter]"`.
-
-Under **`%gpu`**, cells run on the remote kernel — a separate namespace and
-filesystem. The addon handles this automatically: on the first `%gpu` cell it
-**pushes the local tidy3 source to the remote kernel** (`tidy3.craft`, ~10 KB
-over the existing channel), installs polars there if missing, and loads the
-Jupyter extension remotely (API names, `>>` rewriting, `%%tidy3_run`). It
-re-seeds by itself after `%restart_kernel` and after local source edits
-(content stamp). If something goes sideways: `seed_tidy3_remote(force=True)`.
-
-Then use normal tidy3 with **paths on the GPU host**:
+Under **`%gpu`**, cells run on the remote kernel (separate namespace +
+filesystem). Both addons **push their source to the remote** over the CRAFT
+channel (`tidy3.craft` / `plot3.craft`), install polars/pandas if missing, and
+load Jupyter extensions there. Re-seed after kernel surgery with
+`seed_tidy3_remote(force=True)` / `seed_plot3_remote(force=True)`.
 
 ```python
-# after %gpu — file path is on the GPU box
+# after %gpu — paths are on the GPU box
 scan_parquet("/home/gpudev/data/huge.parquet")
 >> filter(col("year") >= 2020)
 >> group_by("region")
 >> summarise(n=n(), avg=mean("value"))
+>> ggplot(aes(x="region", y="avg")) + geom_col()
 ```
 
-### Partial run (any Jupyter)
+`%plot3` is registered as a **host-local** magic (viewer + SolveIt red-eye stay
+on the dialog machine) even while Python cells run remote.
 
-- **Run Selected Text** (if the UI has it): highlight a pipe prefix → run selection  
+### Partial run (any Jupyter / SolveIt)
+
+- **Run Selected Text** (if the UI has it): highlight a pipe prefix → run  
 - Own cell with only the prefix  
 - `%%tidy3_run` with the prefix pasted in  
 
@@ -298,11 +333,12 @@ tidy(cars)
 %tidy3_pipes on|off|status
 ```
 
-### Symlink addon (CRAFT layout)
+### Symlink addons (CRAFT layout)
 
 ```bash
-ln -s ../../tidy3 /path/to/gpudev/addons/tidy3   # if needed
-# optional plot3 addon similarly
+cd /path/to/gpudev/addons
+ln -sfn /path/to/tidy3 tidy3
+ln -sfn /path/to/plot3 plot3
 ```
 
 ## API (v0.2)

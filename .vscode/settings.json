@@ -1,0 +1,8 @@
+{
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.extraPaths": ["${workspaceFolder}/src"],
+  "python.analysis.packageIndexDepths": [
+    { "name": "tidy3", "depth": 5, "includeAllSymbols": true }
+  ],
+  "python.languageServer": "Pylance"
+}
