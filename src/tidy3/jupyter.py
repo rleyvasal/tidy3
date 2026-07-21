@@ -204,22 +204,23 @@ def inject_api(ipython: Any | None = None, *, force: bool = True) -> None:
         except AttributeError:
             continue
         existing = user_ns.get(name, None)
-        claim = (
-            force
-            or name in _FORCE_NS_NAMES
-            or existing is None
-            or _is_tidy3_owned(existing)
-        )
+        # force=True: always claim. force=False: only fill gaps / refresh stale tidy3.
+        if force:
+            claim = True
+        else:
+            claim = existing is None or _is_tidy3_owned(existing)
         if not claim:
             continue
         if (
-            existing is not None
+            force
+            and existing is not None
             and not _is_tidy3_owned(existing)
             and existing is not value
+            and name in _FORCE_NS_NAMES
         ):
             replaced.append(name)
         user_ns[name] = value
-    if "tidy3" not in user_ns or force or _is_tidy3_owned(user_ns.get("tidy3")):
+    if force or "tidy3" not in user_ns or _is_tidy3_owned(user_ns.get("tidy3")):
         user_ns["tidy3"] = t3
     if replaced:
         sample = ", ".join(replaced[:12])
