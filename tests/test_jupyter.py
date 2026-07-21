@@ -20,23 +20,39 @@ def _old_tidy3_function():
 _old_tidy3_function.__module__ = "tidy3.verbs"
 
 
-def test_inject_api_refreshes_tidy3_names_but_preserves_user_values():
-    user_filter = object()
+def test_inject_api_refreshes_tidy3_names_and_reclaims_conflicts():
+    """Stale tidy3 + foreign (datar-like) symbols are replaced by default."""
+    user_mean = object()  # stands in for datar/pipda mean
     old_module = ModuleType("tidy3")
     ipython = SimpleNamespace(
         user_ns={
             "filter": _old_tidy3_function,
-            "mutate": user_filter,
+            "mean": user_mean,
             "tidy3": old_module,
         }
     )
 
-    inject_api(ipython)
+    inject_api(ipython)  # force=True default
 
     assert ipython.user_ns["filter"] is tidy3.filter
-    assert ipython.user_ns["mutate"] is user_filter
+    assert ipython.user_ns["mean"] is tidy3.mean
     assert ipython.user_ns["tidy3"] is tidy3
     assert ipython.user_ns["tidy"] is tidy3.tidy
+
+
+def test_inject_api_force_false_preserves_non_tidy3_user_values():
+    user_mutate = object()
+    ipython = SimpleNamespace(
+        user_ns={
+            "filter": _old_tidy3_function,
+            "mutate": user_mutate,
+        }
+    )
+
+    inject_api(ipython, force=False)
+
+    assert ipython.user_ns["filter"] is tidy3.filter  # stale tidy3 refreshed
+    assert ipython.user_ns["mutate"] is user_mutate  # user value kept
 
 
 def test_inject_api_populates_an_empty_namespace():

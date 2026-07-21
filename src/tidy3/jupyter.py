@@ -127,7 +127,60 @@ def disable_pipe_transform(ipython: Any | None = None) -> None:
     _TRANSFORMER = None
 
 
-def inject_api(ipython: Any | None = None) -> None:
+# Names that other data grammars (datar/pipda, pandas, etc.) often put in
+# user_ns. When loading tidy3 we force-claim these so ``mean("mpg")`` is not
+# datar's numpy mean.
+_FORCE_NS_NAMES = frozenset(
+    {
+        "all",
+        "any",
+        "arrange",
+        "col",
+        "collect",
+        "count",
+        "desc",
+        "distinct",
+        "drop",
+        "filter",
+        "first",
+        "group_by",
+        "head",
+        "last",
+        "max",
+        "mean",
+        "median",
+        "min",
+        "mutate",
+        "n",
+        "pull",
+        "rename",
+        "sample_frac",
+        "sample_n",
+        "select",
+        "slice",
+        "slice_head",
+        "slice_max",
+        "slice_min",
+        "slice_tail",
+        "std",
+        "sum",
+        "summarise",
+        "summarize",
+        "tally",
+        "tidy",
+        "transmute",
+        "ungroup",
+        "var",
+    }
+)
+
+
+def inject_api(ipython: Any | None = None, *, force: bool = True) -> None:
+    """Put tidy3 public names into the IPython user namespace.
+
+    ``force=True`` (default) overwrites conflicting symbols such as datar's
+    ``mean`` / ``sum`` so tidy3 pipes use tidy3 expressions on remote kernels.
+    """
     if ipython is None:
         try:
             from IPython import get_ipython
@@ -142,18 +195,39 @@ def inject_api(ipython: Any | None = None) -> None:
         return
     import tidy3 as t3
 
+    replaced: list[str] = []
     for name in t3.__all__:
         if name.startswith("_"):
             continue
         try:
             value = getattr(t3, name)
         except AttributeError:
-            pass
-        else:
-            if name not in user_ns or _is_tidy3_owned(user_ns[name]):
-                user_ns[name] = value
-    if "tidy3" not in user_ns or _is_tidy3_owned(user_ns["tidy3"]):
+            continue
+        existing = user_ns.get(name, None)
+        claim = (
+            force
+            or name in _FORCE_NS_NAMES
+            or existing is None
+            or _is_tidy3_owned(existing)
+        )
+        if not claim:
+            continue
+        if (
+            existing is not None
+            and not _is_tidy3_owned(existing)
+            and existing is not value
+        ):
+            replaced.append(name)
+        user_ns[name] = value
+    if "tidy3" not in user_ns or force or _is_tidy3_owned(user_ns.get("tidy3")):
         user_ns["tidy3"] = t3
+    if replaced:
+        sample = ", ".join(replaced[:12])
+        more = f" (+{len(replaced) - 12} more)" if len(replaced) > 12 else ""
+        print(
+            f"tidy3: reclaimed namespace from other libs: {sample}{more}",
+            flush=True,
+        )
 
 
 _MAGICS_REGISTERED = False

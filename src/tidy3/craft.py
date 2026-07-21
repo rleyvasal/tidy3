@@ -114,9 +114,24 @@ if _ip is not None:
             _em.reload_extension("tidy3.jupyter")
     else:
         _em.load_extension("tidy3.jupyter")
+    # Always force-inject API: remote kernels often have datar/pipda ``mean``
+    # already in user_ns; without force, inject_api would leave datar's mean.
+    try:
+        from tidy3.jupyter import ensure_ipython_integration as _ensure
+        from tidy3.jupyter import inject_api as _inject
+
+        _ensure(quiet=True)
+        _inject(_ip, force=True)
+    except Exception as _e:
+        print("tidy3 remote: inject_api warning: " + repr(_e), flush=True)
     if %(style)s:
         from tidy3.display import register_polars_formatter as _rpf
         _rpf(_ip)
+    # Hint when competing grammars are present
+    _clash = [m for m in ("datar", "pipda", "datar_numpy") if m in _sys.modules]
+    if _clash:
+        print("tidy3 remote: note — also loaded: " + ", ".join(_clash)
+              + " (tidy3 names forced into user_ns)", flush=True)
 print("tidy3 remote: OK v" + _t3.__version__ + " (" + _stamp + ")")
 '''
 
