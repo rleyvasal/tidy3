@@ -132,6 +132,9 @@ def maybe_rewrite_cell(source: str) -> str | None:
 
     Returns ``None`` when no rewrite is needed (already valid, or not a pipe).
     Safe for IPython input transformers: never rewrites ordinary Python.
+
+    Backticks are normalized first (`` `hp new` `` → ``__tidy3_bt__("hp new")``)
+    so multi-line pipes with spaced column names can still wrap in parentheses.
     """
     if not source or not source.strip():
         return None
@@ -140,12 +143,24 @@ def maybe_rewrite_cell(source: str) -> str | None:
     stripped = text.lstrip()
     if stripped.startswith("%") or stripped.startswith("!") or stripped.startswith("?"):
         return None
+
+    # Backtick preparser (harmless if no backticks)
+    if "`" in text:
+        from tidy3.masking import rewrite_backticks
+
+        text = rewrite_backticks(text)
+
     if ">>" not in text:
+        # Only backticks changed — still return rewrite so transformers apply.
+        if text != source.strip("\n"):
+            return text + ("\n" if source.endswith("\n") else "")
         return None
 
-    # Already valid module code — leave alone
+    # Already valid module code — leave alone (after backtick rewrite check)
     try:
         ast.parse(text)
+        if "`" in source:
+            return text + ("\n" if not text.endswith("\n") else "")
         return None
     except SyntaxError:
         pass
@@ -211,7 +226,13 @@ def partial_run(
     Typically a :class:`~tidy3.frame.TidyFrame` whose display shows a limited
     preview of the intermediate (e.g. filtered rows only).
     """
-    code = normalize_pipe_source(source)
+    # Backticks + pipe parens (same as IPython source transformers).
+    text = source
+    if "`" in text:
+        from tidy3.masking import rewrite_backticks
+
+        text = rewrite_backticks(text)
+    code = normalize_pipe_source(text)
 
     if namespace is None:
         ns: dict[str, Any] = _default_namespace()
@@ -221,5 +242,15 @@ def partial_run(
             base = _default_namespace()
             for k, v in base.items():
                 ns.setdefault(k, v)
+    # Sentinel + col for R-style AST masking when eval'd outside full IPython.
+    try:
+        from tidy3.expr import col
+        from tidy3.masking import BT_NAME, COL_NAME, apply_masking, default_known_names
+
+        ns.setdefault(COL_NAME, col)
+        ns.setdefault(BT_NAME, col)
+        code = apply_masking(code, known=default_known_names(set(ns)))
+    except SyntaxError:
+        pass
 
     return eval(compile(code, "<tidy3.partial_run>", "eval"), ns, ns)

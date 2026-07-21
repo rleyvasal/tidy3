@@ -9,6 +9,17 @@ Text", some SolveIt builds, etc.), the input transformer rewrites multi-line
 If the UI has **no** run-selection command, use ``%%tidy3_run``, a separate
 cell for the prefix, or ``%tidy3_run`` for a one-liner.
 
+R-style bare names / backticks (Jupyter only)
+---------------------------------------------
+A source preparser turns `` `hp new` `` into ``__tidy3_bt__("hp new")``, then
+an AST transformer resolves bare names and sentinels by verb context::
+
+    filter(mpg > 20)              # → filter(col("mpg") > 20)
+    select(mpg, cyl)              # → select("mpg", "cyl")
+    mutate(x = `hp new` / cyl)    # → mutate(x = col("hp new") / col("cyl"))
+
+Plain ``.py`` files keep explicit ``col("x")`` / string selectors.
+
 Large data (CRAFT)
 ------------------
 Load tidy3 like every other addon (``%local`` + ``%run addons/tidy3.py``), then
@@ -21,7 +32,17 @@ from __future__ import annotations
 from types import ModuleType
 from typing import Any, Callable
 
+from tidy3.masking import (
+    BT_NAME,
+    COL_NAME,
+    Tidy3MaskTransformer,
+    is_backtick_transformer,
+    is_mask_transformer,
+    tidy3_backtick_transform,
+)
+
 _TRANSFORMER: Callable[[list[str]], list[str]] | None = None
+_R_STYLE_ON = True
 
 
 def _is_tidy3_owned(value: Any) -> bool:
@@ -45,6 +66,10 @@ def _is_pipe_transformer(value: Any) -> bool:
         getattr(value, "__module__", "") == "tidy3.jupyter"
         and getattr(value, "__name__", "") == "tidy3_input_transformer"
     )
+
+
+def _is_tidy3_source_transformer(value: Any) -> bool:
+    return _is_pipe_transformer(value) or is_backtick_transformer(value)
 
 
 def _lines_to_text(lines: list[str]) -> str:
@@ -77,12 +102,16 @@ def tidy3_input_transformer(lines: list[str]) -> list[str]:
 
 
 def enable_pipe_transform(ipython: Any | None = None) -> bool:
-    """Install the multi-line ``>>`` rewriter.
+    """Install multi-line ``>>`` rewriter (+ backtick preparser when R-style on).
 
-    Inserted at the **front** of ``input_transformers_cleanup`` so it runs
-    *before* CRAFT's mode router. Under ``%gpu`` the router captures the cell
-    as ``pending`` and only the transformed (parenthesized) source is valid
-    Python on the remote kernel.
+    Order on ``input_transformers_cleanup`` (front → back)::
+
+        1. tidy3_backtick_transform   (optional R-style)
+        2. tidy3_input_transformer    (pipe parentheses)
+        3. CRAFT router               (appended later on %gpu)
+
+    Under ``%gpu`` the router captures *pending* after these rewrites so the
+    remote kernel receives valid Python.
     """
     global _TRANSFORMER
     if ipython is None:
@@ -98,13 +127,23 @@ def enable_pipe_transform(ipython: Any | None = None) -> bool:
     transformers = getattr(ipython, "input_transformers_cleanup", None)
     if transformers is None:
         return False
-    transformers[:] = [t for t in transformers if not _is_pipe_transformer(t)]
-    # Front of list: before CRAFT ``_router_transform`` (appended on %gpu).
-    transformers.insert(0, tidy3_input_transformer)
+    transformers[:] = [
+        t for t in transformers if not _is_tidy3_source_transformer(t)
+    ]
+    # Front: backticks then pipes, before CRAFT router.
+    if _R_STYLE_ON:
+        transformers.insert(0, tidy3_backtick_transform)
+        transformers.insert(1, tidy3_input_transformer)
+    else:
+        transformers.insert(0, tidy3_input_transformer)
     post = getattr(ipython, "input_transformers_post", None)
     if isinstance(post, list):
-        post[:] = [t for t in post if not _is_pipe_transformer(t)]
-        post.insert(0, tidy3_input_transformer)
+        post[:] = [t for t in post if not _is_tidy3_source_transformer(t)]
+        if _R_STYLE_ON:
+            post.insert(0, tidy3_backtick_transform)
+            post.insert(1, tidy3_input_transformer)
+        else:
+            post.insert(0, tidy3_input_transformer)
     _TRANSFORMER = tidy3_input_transformer
     return True
 
@@ -123,8 +162,57 @@ def disable_pipe_transform(ipython: Any | None = None) -> None:
     for attr in ("input_transformers_cleanup", "input_transformers_post"):
         transformers = getattr(ipython, attr, None)
         if isinstance(transformers, list):
-            transformers[:] = [t for t in transformers if not _is_pipe_transformer(t)]
+            transformers[:] = [
+                t for t in transformers if not _is_tidy3_source_transformer(t)
+            ]
     _TRANSFORMER = None
+
+
+def enable_r_style(ipython: Any | None = None) -> bool:
+    """Enable bare-name + backtick masking (AST + backtick preparser)."""
+    global _R_STYLE_ON
+    _R_STYLE_ON = True
+    if ipython is None:
+        try:
+            from IPython import get_ipython
+
+            ipython = get_ipython()
+        except Exception:
+            ipython = None
+    if ipython is None:
+        return False
+    from tidy3.expr import col
+
+    ns = getattr(ipython, "user_ns", None)
+    if ns is not None:
+        ns[COL_NAME] = col
+        # Fallback if a sentinel escapes AST handling → treat as column expr.
+        ns[BT_NAME] = col
+    enable_pipe_transform(ipython)
+    transformers = getattr(ipython, "ast_transformers", None)
+    if isinstance(transformers, list):
+        transformers[:] = [t for t in transformers if not is_mask_transformer(t)]
+        transformers.append(Tidy3MaskTransformer())
+    return True
+
+
+def disable_r_style(ipython: Any | None = None) -> None:
+    """Disable bare-name / backtick masking; keep pipe ``>>`` rewriter."""
+    global _R_STYLE_ON
+    _R_STYLE_ON = False
+    if ipython is None:
+        try:
+            from IPython import get_ipython
+
+            ipython = get_ipython()
+        except Exception:
+            ipython = None
+    if ipython is None:
+        return
+    transformers = getattr(ipython, "ast_transformers", None)
+    if isinstance(transformers, list):
+        transformers[:] = [t for t in transformers if not is_mask_transformer(t)]
+    enable_pipe_transform(ipython)
 
 
 # Names that other data grammars (datar/pipda, pandas, etc.) often put in
@@ -244,9 +332,12 @@ def _line_magic_registered(ipython: Any, name: str) -> bool:
 
 
 def _ensure_transform_before_cell(_info=None) -> None:
-    """Re-assert tidy3 transformer at front (CRAFT %gpu re-appends its router)."""
+    """Re-assert tidy3 transformers at front (CRAFT %gpu re-appends its router)."""
     try:
-        enable_pipe_transform()
+        if _R_STYLE_ON:
+            enable_r_style()
+        else:
+            enable_pipe_transform()
     except Exception:
         pass
 
@@ -257,8 +348,8 @@ def load_ipython_extension(ipython: Any) -> None:
 
     from tidy3.partial_run import partial_run
 
-    enable_pipe_transform(ipython)
     inject_api(ipython)
+    enable_r_style(ipython)  # pipes + backticks + AST masking
 
     # Keep tidy3 ahead of CRAFT's router after every %gpu / %local switch.
     try:
@@ -318,6 +409,21 @@ def load_ipython_extension(ipython: Any) -> None:
                     + (f" at cleanup[{pos}]" if pos is not None else "")
                 )
 
+        @line_magic("tidy3_mask")
+        def tidy3_mask(self, line: str = ""):
+            """Toggle R-style bare-name / backtick masking: on|off|status."""
+            arg = (line or "status").strip().lower()
+            if arg in ("on", "1", "true", "enable"):
+                enable_r_style(self.shell)
+                print("tidy3: R-style bare-name/backtick masking ON")
+            elif arg in ("off", "0", "false", "disable"):
+                disable_r_style(self.shell)
+                print("tidy3: R-style bare-name/backtick masking OFF")
+            else:
+                ast_t = getattr(self.shell, "ast_transformers", []) or []
+                on = any(is_mask_transformer(t) for t in ast_t)
+                print(f"tidy3: R-style masking {'ON' if on else 'OFF'}")
+
     ipython.register_magics(Tidy3Magics)
     _MAGICS_REGISTERED = True
 
@@ -347,6 +453,7 @@ def ensure_ipython_integration(*, quiet: bool = True) -> bool:
 
 def unload_ipython_extension(ipython: Any) -> None:
     global _MAGICS_REGISTERED, _PRE_RUN_HOOK
+    disable_r_style(ipython)
     disable_pipe_transform(ipython)
     try:
         if _PRE_RUN_HOOK is not None:

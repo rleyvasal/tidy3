@@ -119,9 +119,11 @@ if _ip is not None:
     try:
         from tidy3.jupyter import ensure_ipython_integration as _ensure
         from tidy3.jupyter import inject_api as _inject
+        from tidy3.jupyter import enable_r_style as _rstyle
 
         _ensure(quiet=True)
         _inject(_ip, force=True)
+        _rstyle(_ip)
     except Exception as _e:
         print("tidy3 remote: inject_api warning: " + repr(_e), flush=True)
     if %(style)s:

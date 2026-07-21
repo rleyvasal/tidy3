@@ -331,8 +331,25 @@ tidy(cars)
 
 ```text
 %tidy3_pipes on|off|status
+%tidy3_mask on|off|status    # R-style bare names / backticks
 ```
 
+### R-style bare names & backticks (Jupyter / SolveIt only)
+
+With the extension loaded (CRAFT addon or `%load_ext tidy3.jupyter`), cells may
+omit many `col("…")` / quotes:
+
+```python
+cars >> filter(mpg > 20) >> mutate(z = if_else(cyl > 4, 1, 0))
+cars_space >> mutate(x = `hp new` / cyl) >> select(`hp new`, x)
+```
+
+- **Expression context** (`filter`, `mutate` RHS, …): bare name → `col("name")`
+- **Selector context** (`select`, `group_by`, …): bare name → `"name"`
+- **Backticks**: `` `any column name` `` for spaces / odd identifiers  
+
+Plain `.py` files are unchanged — keep explicit `col("x")` and string selectors
+there.
 ### Symlink addons (CRAFT layout)
 
 ```bash

@@ -76,13 +76,23 @@ def test_pipe_transform_registration_replaces_stale_module_copy():
         input_transformers_post=[stale_transformer],
     )
 
+    from tidy3.jupyter import _R_STYLE_ON
+    from tidy3.masking import tidy3_backtick_transform
+
+    # Default R-style on: backticks then pipe rewriter at front.
+    import tidy3.jupyter as jmod
+
+    jmod._R_STYLE_ON = True
     assert enable_pipe_transform(ipython)
-    # tidy3 is inserted at the front so it runs before CRAFT's %gpu router.
     assert ipython.input_transformers_cleanup == [
+        tidy3_backtick_transform,
         tidy3_input_transformer,
         unrelated,
     ]
-    assert ipython.input_transformers_post == [tidy3_input_transformer]
+    assert ipython.input_transformers_post == [
+        tidy3_backtick_transform,
+        tidy3_input_transformer,
+    ]
 
     disable_pipe_transform(ipython)
     assert ipython.input_transformers_cleanup == [unrelated]
