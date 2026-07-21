@@ -103,6 +103,53 @@ class TidyFrame:
     def _pdf(self):
         return self._data  # pandas DataFrame when backend == "pandas"
 
+    # ── EDA / inspection (schema-first; row counts materialize lazily) ──
+
+    @property
+    def columns(self) -> list[str]:
+        """Column names as a Python ``list[str]`` (Polars-style).
+
+        Schema-only — does not scan row data.
+        """
+        if self.backend == "pandas":
+            return [str(c) for c in self._pdf.columns]
+        return list(self._lf.collect_schema().names())
+
+    @property
+    def names(self) -> list[str]:
+        """Alias of :attr:`columns` (base R ``names()``)."""
+        return self.columns
+
+    @property
+    def width(self) -> int:
+        """Number of columns (Polars ``width``)."""
+        return len(self.columns)
+
+    @property
+    def height(self) -> int:
+        """Number of rows (materializes a count for lazy frames)."""
+        return len(self)
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """``(n_rows, n_cols)`` like NumPy/pandas/Polars."""
+        return (self.height, self.width)
+
+    @property
+    def dtypes(self) -> dict[str, Any]:
+        """``{column: dtype}`` from the frame schema (no full collect)."""
+        if self.backend == "pandas":
+            return {str(k): v for k, v in self._pdf.dtypes.items()}
+        schema = self._lf.collect_schema()
+        return {name: dtype for name, dtype in schema.items()}
+
+    @property
+    def schema(self) -> Any:
+        """Backend schema object (Polars ``Schema`` or pandas dtypes map)."""
+        if self.backend == "pandas":
+            return self.dtypes
+        return self._lf.collect_schema()
+
     def _with_lf(
         self,
         lf: pl.LazyFrame,

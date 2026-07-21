@@ -1185,15 +1185,19 @@ def glimpse(n: int = 10) -> Verb:
 
     def _apply(tf):
         preview = tf.preview(n)
+        try:
+            n_rows = len(tf)
+        except Exception:
+            n_rows = None
         if tf._backend == "pandas":
-            print(f"Rows: {len(tf._pdf)}")
-            print(f"Columns: {len(tf._pdf.columns)}")
+            print(f"Rows: {n_rows if n_rows is not None else len(tf._pdf)}")
+            print(f"Columns: {tf.width}")
             for column, dtype in tf._pdf.dtypes.items():
                 values = ", ".join(repr(value) for value in preview[column].tolist())
                 print(f"$ {column} <{dtype}> {values}")
         else:
             schema = tf._lf.collect_schema()
-            print("Rows: ? (lazy)")
+            print(f"Rows: {n_rows if n_rows is not None else '?'}")
             print(f"Columns: {len(schema)}")
             for column, dtype in schema.items():
                 values = ", ".join(
@@ -1203,7 +1207,6 @@ def glimpse(n: int = 10) -> Verb:
         return tf
 
     return Verb(_apply, "glimpse")
-
 
 def arrange(*keys: Any, by_group: bool = False) -> Verb:
     """Order rows. Keys may reference columns dropped by a prior ``select()``."""
