@@ -1063,7 +1063,17 @@ def drop(*cols: Any) -> Verb:
 
 
 def rename(*specs: Any, **kwargs: str) -> Verb:
-    """Rename columns: ``rename(new=old)`` or ``rename(`new name` = old)``."""
+    """Rename individual columns (dplyr ``rename``).
+
+    Syntax is always **new = old** (tidyverse)::
+
+        rename(power=hp)
+        rename(power="hp")
+        rename(`horse power` = hp)          # Jupyter R-style
+        rename(**{"horse power": "hp"})     # plain Python
+
+    For bulk / functional renames see :func:`rename_with` and :func:`set_names`.
+    """
 
     def _apply(tf):
         from tidy3.masking import NamedAssign
@@ -1154,7 +1164,22 @@ def relocate(
 
 
 def rename_with(fn: Callable[[str], str], *cols: Any) -> Verb:
-    """Rename selected columns with ``fn``; all columns when none are named."""
+    """Rename columns with a function (dplyr ``rename_with``).
+
+    Parameters
+    ----------
+    fn:
+        ``str -> str`` applied to each selected name (e.g. ``str.upper``,
+        ``lambda s: s.replace(".", "_")``).
+    *cols:
+        Optional tidyselect; defaults to **all** columns.
+
+    Examples
+    --------
+    >>> cars >> rename_with(str.upper)
+    >>> cars >> rename_with(str.lower, starts_with("x"))
+    >>> cars >> rename_with(lambda s: s.replace(" ", "_"))
+    """
     if not callable(fn):
         raise TypeError("rename_with() fn must be callable")
 
@@ -1185,6 +1210,71 @@ def rename_with(fn: Callable[[str], str], *cols: Any) -> Verb:
         )
 
     return Verb(_apply, "rename_with")
+
+
+def set_names(*names: Any) -> Verb:
+    """Replace **all** column names in order (rlang ``set_names`` / pandas).
+
+    This is the bulk form for end-of-pipeline renames before ML handoff::
+
+        features >> set_names(["x0", "x1", "x2"])
+        features >> set_names("x0", "x1", "x2")
+        features >> set_names([f"f{i}" for i in range(ncol(features))])
+
+    A single callable renames every column (same as ``rename_with(fn)``)::
+
+        features >> set_names(str.upper)
+
+    Length must match the number of columns. For dropping names entirely into
+    a matrix, use ``to_numpy()`` / ``to_numpy(columns=...)`` — arrays have no
+    column names.
+
+    See also :func:`rename` (individual ``new=old``) and :func:`rename_with`.
+    """
+    # Normalize arguments
+    if len(names) == 1 and callable(names[0]) and not isinstance(names[0], type):
+        return rename_with(names[0])
+
+    if len(names) == 1 and isinstance(names[0], (list, tuple)):
+        new_names = [str(x) for x in names[0]]
+    else:
+        new_names = [str(x) for x in names]
+
+    if not new_names:
+        raise TypeError(
+            "set_names() requires new names, e.g. set_names('a', 'b') "
+            "or set_names(['a', 'b'])"
+        )
+    if any(not n for n in new_names):
+        raise ValueError("set_names() names must be non-empty strings")
+
+    def _apply(tf):
+        columns = _frame_columns(tf)
+        if len(new_names) != len(columns):
+            raise ValueError(
+                f"set_names() got {len(new_names)} name(s) but frame has "
+                f"{len(columns)} column(s)"
+            )
+        if len(set(new_names)) != len(new_names):
+            raise ValueError("set_names() produced duplicate column names")
+        mapping = dict(zip(columns, new_names))
+        groups = [mapping.get(g, g) for g in tf._groups] if tf._groups else None
+        category_levels = {
+            mapping.get(name, name): levels
+            for name, levels in tf._category_levels.items()
+        }
+        if tf._backend == "pandas":
+            pdf = tf._pdf.copy()
+            pdf.columns = new_names
+            return tf._with_pdf(pdf, groups=groups, category_levels=category_levels)
+        # Polars: rename via mapping old→new
+        return tf._with_lf(
+            tf._lf.rename(mapping),
+            groups=groups,
+            category_levels=category_levels,
+        )
+
+    return Verb(_apply, "set_names")
 
 
 def _column_position(columns: list[str], value: str | int, verb: str) -> str:

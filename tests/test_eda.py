@@ -149,6 +149,30 @@ def test_summary_numeric_mean():
     assert abs(float(mean_row["x"][0]) - 2.5) < 1e-9
 
 
+def test_set_names_bulk_and_rename_with():
+    from tidy3 import rename, rename_with, set_names
+
+    cars = _cars()
+    # bulk like pandas columns = [...]
+    out = (cars >> set_names(["a", "b", "c"])).collect()
+    assert out.columns == ["a", "b", "c"]
+    out2 = (cars >> set_names("x0", "x1", "x2")).collect()
+    assert out2.columns == ["x0", "x1", "x2"]
+    # functional (all columns)
+    out3 = (cars >> rename_with(str.upper)).collect()
+    assert out3.columns == ["CYL", "MPG", "HP"]
+    out4 = (cars >> set_names(str.lower)).collect()
+    assert out4.columns == ["cyl", "mpg", "hp"]
+    # individual dplyr-style
+    out5 = (cars >> rename(power="hp")).collect()
+    assert "power" in out5.columns and "hp" not in out5.columns
+    # wrong length
+    import pytest
+
+    with pytest.raises(ValueError, match="2 name"):
+        cars >> set_names("only", "two")
+
+
 def test_pipe_colnames_and_describe_like_tidyverse():
     """cars >> colnames() / cars >> describe() mirror R %>% f()."""
     from tidy3 import colnames, describe, summary

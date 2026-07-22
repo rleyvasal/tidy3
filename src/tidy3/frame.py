@@ -316,6 +316,11 @@ class TidyFrame:
 
         return self >> rename_with_verb(fn, *cols)
 
+    def set_names(self, *names: Any) -> TidyFrame:
+        from tidy3.verbs import set_names as set_names_verb
+
+        return self >> set_names_verb(*names)
+
     def relocate(
         self,
         *cols: Any,
