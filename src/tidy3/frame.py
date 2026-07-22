@@ -321,6 +321,13 @@ class TidyFrame:
 
         return self >> set_names_verb(*names)
 
+    def clean_names(
+        self, *, case: str = "snake", unique: bool = True
+    ) -> TidyFrame:
+        from tidy3.verbs import clean_names as clean_names_verb
+
+        return self >> clean_names_verb(case=case, unique=unique)
+
     def relocate(
         self,
         *cols: Any,

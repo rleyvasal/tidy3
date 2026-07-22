@@ -173,6 +173,31 @@ def test_set_names_bulk_and_rename_with():
         cars >> set_names("only", "two")
 
 
+def test_clean_names_janitor_style():
+    from tidy3 import clean_names, make_clean_names
+
+    messy = tidy(
+        {
+            "First Name": ["Alice", "Bob"],
+            "Age (%)": [25, 30],
+            "Phone-Number!": ["123", "456"],
+        }
+    )
+    assert make_clean_names(messy.columns) == [
+        "first_name",
+        "age_percent",
+        "phone_number",
+    ]
+    out = (messy >> clean_names()).collect()
+    assert out.columns == ["first_name", "age_percent", "phone_number"]
+    assert out["first_name"].to_list() == ["Alice", "Bob"]
+
+    # camel / uniqueness
+    assert make_clean_names(["A", "a"], case="snake") == ["a", "a_2"]
+    assert make_clean_names(["hello world"], case="lower_camel") == ["helloWorld"]
+    assert make_clean_names(["hello world"], case="upper_camel") == ["HelloWorld"]
+    assert make_clean_names(["2fast"], case="snake") == ["x_2fast"]
+
 def test_pipe_colnames_and_describe_like_tidyverse():
     """cars >> colnames() / cars >> describe() mirror R %>% f()."""
     from tidy3 import colnames, describe, summary

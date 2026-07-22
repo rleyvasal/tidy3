@@ -1212,6 +1212,167 @@ def rename_with(fn: Callable[[str], str], *cols: Any) -> Verb:
     return Verb(_apply, "rename_with")
 
 
+def make_clean_names(
+    names: list[str] | tuple[str, ...],
+    *,
+    case: str = "snake",
+    unique: bool = True,
+) -> list[str]:
+    """Sanitize column names like R **janitor::make_clean_names**.
+
+    Parameters
+    ----------
+    names:
+        Raw column names.
+    case:
+        ``"snake"`` (default), ``"lower_camel"``, ``"upper_camel"``,
+        ``"screaming_snake"``, ``"lower"``, ``"upper"``, ``"title"``,
+        or ``"none"`` (punctuation cleanup only).
+    unique:
+        If True (default), append ``_2``, ``_3``, … when names collide.
+
+    Examples
+    --------
+    >>> make_clean_names(["First Name", "Age (%)", "Phone-Number!"])
+    ['first_name', 'age_percent', 'phone_number']
+    """
+    import re
+    import unicodedata
+
+    allowed = {
+        "snake",
+        "lower_camel",
+        "upper_camel",
+        "screaming_snake",
+        "lower",
+        "upper",
+        "title",
+        "none",
+    }
+    if case not in allowed:
+        raise ValueError(f"make_clean_names() case must be one of {sorted(allowed)}")
+
+    # Word-ish replacements before stripping punctuation (janitor-adjacent).
+    _WORD_MAP = (
+        (r"%", " percent "),
+        (r"#", " number "),
+        (r"&", " and "),
+        (r"@", " at "),
+        (r"\+", " plus "),
+        (r"=", " equals "),
+        (r"\$", " dollar "),
+    )
+
+    def _one(raw: str) -> str:
+        s = str(raw)
+        # Normalize unicode accents → ASCII when possible
+        s = unicodedata.normalize("NFKD", s)
+        s = s.encode("ascii", "ignore").decode("ascii")
+        for pat, rep in _WORD_MAP:
+            s = re.sub(pat, rep, s)
+        # Split camelCase / PascalCase boundaries
+        s = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", s)
+        s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", s)
+        # Non-alphanumeric → space
+        s = re.sub(r"[^0-9A-Za-z]+", " ", s)
+        parts = [p for p in s.split() if p]
+        if not parts:
+            parts = ["x"]
+        # Leading digit → prefix
+        if parts[0] and parts[0][0].isdigit():
+            parts = ["x", *parts]
+
+        if case == "none":
+            # keep original token casing after cleanup joins
+            out = "_".join(parts)
+            return out or "x"
+
+        lower_parts = [p.lower() for p in parts]
+        if case == "snake":
+            return "_".join(lower_parts)
+        if case == "screaming_snake":
+            return "_".join(p.upper() for p in parts)
+        if case == "lower":
+            return "".join(lower_parts)
+        if case == "upper":
+            return "".join(p.upper() for p in parts)
+        if case == "title":
+            return " ".join(p.capitalize() for p in parts)
+        if case == "lower_camel":
+            return lower_parts[0] + "".join(p.capitalize() for p in lower_parts[1:])
+        if case == "upper_camel":
+            return "".join(p.capitalize() for p in lower_parts)
+        return "_".join(lower_parts)
+
+    cleaned = [_one(n) for n in names]
+    if not unique:
+        return cleaned
+
+    # Ensure uniqueness (janitor-style _2, _3, …)
+    seen: dict[str, int] = {}
+    result: list[str] = []
+    for name in cleaned:
+        if name not in seen:
+            seen[name] = 1
+            result.append(name)
+        else:
+            seen[name] += 1
+            candidate = f"{name}_{seen[name]}"
+            while candidate in seen:
+                seen[name] += 1
+                candidate = f"{name}_{seen[name]}"
+            seen[candidate] = 1
+            result.append(candidate)
+    return result
+
+
+def clean_names(*, case: str = "snake", unique: bool = True) -> Verb:
+    """Clean all column names (R **janitor::clean_names**).
+
+    Typical messy → snake_case::
+
+        df >> clean_names()
+        # "First Name" → first_name
+        # "Age (%)"    → age_percent
+        # "Phone-Number!" → phone_number
+
+    Parameters
+    ----------
+    case:
+        ``"snake"`` (default), ``"lower_camel"``, ``"upper_camel"``,
+        ``"screaming_snake"``, ``"lower"``, ``"upper"``, ``"title"``,
+        ``"none"``.
+    unique:
+        Deduplicate colliding names with ``_2``, ``_3``, … (default True).
+
+    See also :func:`make_clean_names` (list in → list out), :func:`rename_with`,
+    :func:`set_names`.
+    """
+
+    def _apply(tf):
+        columns = _frame_columns(tf)
+        new_names = make_clean_names(columns, case=case, unique=unique)
+        if new_names == columns:
+            return tf
+        mapping = dict(zip(columns, new_names))
+        groups = [mapping.get(g, g) for g in tf._groups] if tf._groups else None
+        category_levels = {
+            mapping.get(name, name): levels
+            for name, levels in tf._category_levels.items()
+        }
+        if tf._backend == "pandas":
+            pdf = tf._pdf.copy()
+            pdf.columns = new_names
+            return tf._with_pdf(pdf, groups=groups, category_levels=category_levels)
+        return tf._with_lf(
+            tf._lf.rename(mapping),
+            groups=groups,
+            category_levels=category_levels,
+        )
+
+    return Verb(_apply, "clean_names")
+
+
 def set_names(*names: Any) -> Verb:
     """Replace **all** column names in order (rlang ``set_names`` / pandas).
 
