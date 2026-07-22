@@ -119,3 +119,36 @@ def test_transformer_is_idempotent_on_explicit_col():
     out = _norm('filter(col("mpg") > 20)')
     # col("mpg") stays a call to col / __tidy3_col__ not double-wrapped badly
     assert out.count("mpg") >= 1
+
+
+def test_mutate_backtick_new_column_name():
+    """R: mutate(`new hp` = hp * 1.1) → **{'new hp': col('hp') * 1.1}."""
+    from tidy3.masking import rewrite_backtick_keyword_assigns, rewrite_backticks
+
+    raw = "mutate(`new hp` = hp * 1.1)"
+    mid = rewrite_backtick_keyword_assigns(raw)
+    assert "**" in mid and "new hp" in mid
+    assert "=" not in mid.split("**", 1)[1].split(":", 1)[0]  # name is in dict key
+    out = _norm(raw)
+    assert "new hp" in out
+    assert f'{COL_NAME}("hp")' in out or f"{COL_NAME}('hp')" in out
+
+
+def test_mutate_backtick_new_column_end_to_end():
+    from tidy3 import mutate, tidy
+    from tidy3.expr import col
+    from tidy3.masking import BT_NAME, COL_NAME, apply_masking
+
+    cars = tidy({"hp": [100, 200], "cyl": [4, 8]})
+    src = apply_masking("(cars >> mutate(`new hp` = hp * 1.1))")
+    ns = {
+        "cars": cars,
+        "mutate": mutate,
+        "col": col,
+        COL_NAME: col,
+        BT_NAME: col,
+    }
+    out = eval(compile(src, "<t>", "eval"), ns).collect()
+    assert "new hp" in out.columns
+    vals = out["new hp"].to_list()
+    assert abs(vals[0] - 110.0) < 1e-9 and abs(vals[1] - 220.0) < 1e-9

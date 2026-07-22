@@ -56,8 +56,96 @@ _PASSTHROUGH_KW = frozenset(
 _BT_RE = re.compile(r"`([^`\n]+)`")
 
 
+def rewrite_backtick_keyword_assigns(source: str) -> str:
+    """Rewrite R-style `` `new col` = expr `` to valid Python ``**{"new col": (expr)}``.
+
+    Python cannot use a call (or spaced name) as a keyword argument::
+
+        mutate(`new hp` = hp)           # after naive backtick rewrite → SyntaxError
+        mutate(**{"new hp": (hp)})      # valid; AST masking then rewrites *hp*
+
+    Uses ``=`` only (not ``==`` / ``!=`` / ``<=`` / ``>=``).
+    """
+    if "`" not in source or "=" not in source:
+        return source
+    out: list[str] = []
+    i = 0
+    n = len(source)
+    while i < n:
+        ch = source[i]
+        if ch != "`":
+            out.append(ch)
+            i += 1
+            continue
+        j = source.find("`", i + 1)
+        if j < 0:
+            out.append(source[i:])
+            break
+        name = source[i + 1 : j]
+        k = j + 1
+        while k < n and source[k] in " \t":
+            k += 1
+        # True assignment '=', not '==', '!=', '<=', '>=', ':='
+        is_assign = (
+            k < n
+            and source[k] == "="
+            and not (k + 1 < n and source[k + 1] in "=~")
+            and not (k > 0 and source[k - 1] in "!<>")
+        )
+        # also reject if char before spaces-and-backtick chain is part of != 
+        if is_assign:
+            # scan back over whitespace from j's side already done; check char before `
+            p = i - 1
+            while p >= 0 and source[p] in " \t":
+                p -= 1
+            if p >= 0 and source[p] in "!<>":
+                is_assign = False
+        if not is_assign:
+            out.append(source[i : j + 1])
+            i = j + 1
+            continue
+        k += 1  # skip '='
+        while k < n and source[k] in " \t":
+            k += 1
+        expr_start = k
+        depth = 0
+        in_str: str | None = None
+        while k < n:
+            c = source[k]
+            if in_str is not None:
+                if c == "\\" and k + 1 < n:
+                    k += 2
+                    continue
+                if c == in_str:
+                    in_str = None
+                k += 1
+                continue
+            if c in ("'", '"'):
+                in_str = c
+                k += 1
+                continue
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif c == "," and depth == 0:
+                break
+            k += 1
+        expr = source[expr_start:k].rstrip()
+        out.append(f"**{{{name!r}: ({expr})}}")
+        i = k
+    return "".join(out)
+
+
 def rewrite_backticks(source: str) -> str:
-    """Replace `` `col name` `` with ``__tidy3_bt__("col name")``."""
+    """Preparse backticks for Python.
+
+    1. `` `new col` = expr `` → ``**{"new col": (expr)}`` (keyword assign)
+    2. remaining `` `col` `` → ``__tidy3_bt__("col")`` (expression / selector)
+    """
+    source = rewrite_backtick_keyword_assigns(source)
     return _BT_RE.sub(lambda m: f"{BT_NAME}({m.group(1)!r})", source)
 
 
@@ -172,6 +260,15 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
     def _mask(self, node: ast.AST, mode: Mode) -> ast.AST:
         return MaskNames(mode, self._known()).visit(node)
 
+    def _mask_starstar(self, node: ast.AST) -> ast.AST:
+        """Mask values inside ``**{...}`` dicts (keys stay string constants)."""
+        if isinstance(node, ast.Dict):
+            values = [
+                self._mask(v, "expr") if v is not None else v for v in node.values
+            ]
+            return ast.Dict(keys=node.keys, values=values)
+        return self._mask(node, "expr")
+
     def visit_Call(self, node: ast.Call) -> ast.AST:
         # Nested non-verb calls are handled inside MaskNames when we mask.
         if not isinstance(node.func, ast.Name):
@@ -197,9 +294,12 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
         if verb in _ASSIGN_VERBS:
             new_kw: list[ast.keyword] = []
             for kw in node.keywords:
-                if kw.arg in _SELECTOR_KW:
+                if kw.arg is None:
+                    # **{"new hp": expr} from backtick keyword rewrite
+                    value = self._mask_starstar(kw.value)
+                elif kw.arg in _SELECTOR_KW:
                     value = self._mask(kw.value, "selector")
-                elif kw.arg in _PASSTHROUGH_KW or kw.arg is None:
+                elif kw.arg in _PASSTHROUGH_KW:
                     value = kw.value
                 else:
                     value = self._mask(kw.value, "expr")
