@@ -344,7 +344,7 @@ summary(cars)     # count, null_count, n_unique, mean, std, min, 25%, 50%, 75%, 
 describe(cars)    # alias of summary (pandas-style name)
 ```
 
-### R-style bare names & backticks (Jupyter / SolveIt only)
+### R-style bare names & backticks
 
 With the extension loaded (CRAFT addon or `%load_ext tidy3.jupyter`), cells may
 omit many `col("…")` / quotes:
@@ -352,14 +352,58 @@ omit many `col("…")` / quotes:
 ```python
 cars >> filter(mpg > 20) >> mutate(z = if_else(cyl > 4, 1, 0))
 cars_space >> mutate(x = `hp new` / cyl) >> select(`hp new`, x)
+ggplot(df, aes(x=wt, y=mpg)) + geom_point()          # with plot3
+ggplot(df, aes(x=`First Name`, y=mpg)) + geom_point()
 ```
 
 - **Expression context** (`filter`, `mutate` RHS, …): bare name → `col("name")`
 - **Selector context** (`select`, `group_by`, …): bare name → `"name"`
-- **Backticks**: `` `any column name` `` for spaces / odd identifiers  
+- **Backticks**: `` `any column name` `` for spaces / odd identifiers
+- **plot3** `aes` / `facet_wrap` use the same style in Jupyter
 
-Plain `.py` files are unchanged — keep explicit `col("x")` and string selectors
-there.
+#### Export notebook → plain Python script (`nb_export`)
+
+R-style is the **authoring** form. For automation / CI, export rewrites it to
+stock CPython (nbdev-style build artifact):
+
+```python
+from tidy3 import nb_export
+
+nb_export("analysis.ipynb", "analysis_pipeline.py")
+# only cells marked #| export (nbdev-style):
+nb_export("analysis.ipynb", "lib.py", only_export=True)
+```
+
+```bash
+python -m tidy3 export analysis.ipynb -o analysis_pipeline.py
+python -m tidy3 export analysis.ipynb -o lib.py --only-export
+```
+
+Cell directives:
+
+| Directive | Meaning |
+|-----------|---------|
+| `#\| export` | include when `--only-export` / `only_export=True` |
+| `#\| skip` | never export (debug / interactive cells) |
+
+What export does:
+
+1. Collects code cells (skips markdown)
+2. Applies the same bare-name / backtick / multi-line `>>` transforms as Jupyter
+3. Applies plot3 `aes` masking when plot3 is installed
+4. Turns internal sentinels into public API (`col("mpg")`, not `__tidy3_col__`)
+5. Comments pure notebook magics (`%run`, …); best-effort rewrite of `%plot3`
+
+The notebook stays the source of truth; re-export instead of hand-editing the
+`.py`. Explicit `col("x")` / `aes(x="x")` still work everywhere as a compatible
+subset.
+
+Optional: run an unexported R-style script with the same transforms:
+
+```bash
+python -m tidy3 run job.py
+```
+
 ### Symlink addons (CRAFT layout)
 
 ```bash
@@ -372,6 +416,7 @@ ln -sfn /path/to/plot3 plot3
 
 | Area | Symbols |
 |------|---------|
+| Export | `nb_export`, `transform_source`, `python -m tidy3 export` / `run` |
 | Frame | `tidy`, `scan_parquet`, `scan_csv`, `scan_ipc`, `TidyFrame` |
 | Output | `collect`, `to_numpy`, `TidyFrame.write_parquet`, `TidyFrame.write_csv`, `TidyFrame.write_ipc`, `TidyFrame.write_excel` |
 | Rows | `filter`, `filter_out`, `arrange`, `distinct`, `slice`, `slice_head`, `slice_tail`, `slice_min`, `slice_max`, `slice_sample`, `head`, `sample_n`, `sample_frac` |

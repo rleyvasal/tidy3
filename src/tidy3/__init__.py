@@ -58,6 +58,13 @@ from tidy3.join_spec import (
     overlaps,
     within,
 )
+from tidy3.export import (
+    ExportResult,
+    collect_known_names,
+    nb_export,
+    transform_cell,
+    transform_source,
+)
 from tidy3.partial_run import (
     looks_like_tidy_pipe,
     maybe_rewrite_cell,
@@ -238,6 +245,11 @@ __all__ = [
     "eq",
     "everything",
     "expand",
+    "ExportResult",
+    "collect_known_names",
+    "nb_export",
+    "transform_cell",
+    "transform_source",
     "filter",
     "filter_out",
     "fill",
