@@ -14,13 +14,24 @@ Column names
 
   Odd identifiers are wrapped in backticks (built with ``chr(96)`` so this
   module stays safe under the Jupyter backtick preparser).
+
+Tidyverse-style piping
+----------------------
+Like ``cars %>% colnames()`` / ``cars %>% summary()`` in R, these accept the
+frame via ``>>`` when called with no data::
+
+    cars >> colnames()
+    cars >> summary()
+    cars >> describe()
+
+Also valid: ``colnames(cars)``, ``cars.colnames()`` (where methods exist).
 """
 
 from __future__ import annotations
 
 import keyword
 import re
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 __all__ = [
     "names",
@@ -39,6 +50,8 @@ __all__ = [
 _BT = chr(96)
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+_MISSING = object()
+
 
 def _as_tidy(data: Any):
     from tidy3.frame import TidyFrame, tidy
@@ -46,6 +59,16 @@ def _as_tidy(data: Any):
     if isinstance(data, TidyFrame):
         return data
     return tidy(data)
+
+
+def _pipeable(name: str, apply: Callable[[Any], Any]):
+    """Return a Verb that runs *apply* on the left-hand TidyFrame."""
+    from tidy3.verbs import Verb
+
+    def _fn(tf):
+        return apply(tf)
+
+    return Verb(_fn, name)
 
 
 def _column_names(data: Any) -> list[str]:
@@ -73,12 +96,16 @@ def _column_names(data: Any) -> list[str]:
     return list(_as_tidy(data).columns)
 
 
-def names(data: Any) -> list[str]:
+def names(data: Any = _MISSING):
     """Column names as a plain Python list (base R ``names()``).
 
     Use this (or ``cars.columns``) when you need to *program* with the names.
     For paste-into-``select`` display, use :func:`colnames`.
+
+    Pipeable: ``cars >> names()`` (tidyverse ``cars %>% names()``).
     """
+    if data is _MISSING:
+        return _pipeable("names", lambda tf: _column_names(tf))
     return _column_names(data)
 
 
@@ -139,7 +166,7 @@ class ColnamesResult(list):
         return f"<pre>{escape(str(self))}</pre>"
 
 
-def colnames(data: Any) -> ColnamesResult:
+def colnames(data: Any = _MISSING):
     """Column names for **display / paste into** ``select(...)``.
 
     Returns a :class:`ColnamesResult` (list subclass). Printing it yields::
@@ -150,28 +177,48 @@ def colnames(data: Any) -> ColnamesResult:
         wt,
 
     For a plain list (programming), use ``names(cars)`` or ``cars.columns``.
+
+    Pipeable like tidyverse::
+
+        cars >> colnames()
+        colnames(cars)
     """
+    if data is _MISSING:
+        return _pipeable(
+            "colnames", lambda tf: ColnamesResult(_column_names(tf))
+        )
     return ColnamesResult(_column_names(data))
 
 
-def nrow(data: Any) -> int:
+def nrow(data: Any = _MISSING):
     """Number of rows (base R ``nrow()``). Materializes a count for lazy data."""
+    if data is _MISSING:
+        return _pipeable("nrow", lambda tf: int(len(tf)))
     return int(len(_as_tidy(data)))
 
 
-def ncol(data: Any) -> int:
+def ncol(data: Any = _MISSING):
     """Number of columns (base R ``ncol()``). Schema-only for lazy data."""
+    if data is _MISSING:
+        return _pipeable("ncol", lambda tf: int(len(_column_names(tf))))
     return int(len(_column_names(data)))
 
 
-def dim(data: Any) -> tuple[int, int]:
+def dim(data: Any = _MISSING):
     """``(nrow, ncol)`` like base R ``dim()``."""
+    if data is _MISSING:
+        return _pipeable(
+            "dim",
+            lambda tf: (int(len(tf)), int(len(tf.columns))),
+        )
     tf = _as_tidy(data)
     return (int(len(tf)), int(len(tf.columns)))
 
 
-def dtypes(data: Any) -> dict[str, Any]:
+def dtypes(data: Any = _MISSING):
     """Mapping of column name → dtype (Polars or pandas dtype objects)."""
+    if data is _MISSING:
+        return _pipeable("dtypes", lambda tf: dict(tf.dtypes))
     return dict(_as_tidy(data).dtypes)
 
 
@@ -214,8 +261,26 @@ def _summary_polars(df: Any, *, percentiles: tuple[float, ...]) -> Any:
     return pl.concat([head, extra, tail], how="diagonal_relaxed")
 
 
-def summary(
+def _summary_impl(
     data: Any,
+    *,
+    percentiles: tuple[float, ...] | list[float] | None = None,
+) -> Any:
+    from tidy3.frame import tidy
+
+    tf = _as_tidy(data)
+    pct = tuple(percentiles) if percentiles is not None else _DEFAULT_PERCENTILES
+    pdf = tf.collect(as_="polars")
+    if pdf.width == 0:
+        import polars as pl
+
+        return tidy(pl.DataFrame({"statistic": []}))
+    table = _summary_polars(pdf, percentiles=pct)
+    return tidy(table)
+
+
+def summary(
+    data: Any = _MISSING,
     *,
     percentiles: tuple[float, ...] | list[float] | None = None,
 ) -> Any:
@@ -226,38 +291,37 @@ def summary(
 
     Statistics (complete EDA set)
     -----------------------------
-    * ``count`` — non-null count  
-    * ``null_count`` — number of missing values  
-    * ``n_unique`` — distinct values (including null as a level in Polars)  
-    * ``mean``, ``std`` — location / scale (numeric; null for non-numeric)  
-    * ``min``, ``25%``, ``50%`` (median), ``75%``, ``max``  
-      (percentiles configurable)
+    * ``count`` — non-null count
+    * ``null_count`` — number of missing values
+    * ``n_unique`` — distinct values
+    * ``mean``, ``std`` — location / scale (numeric; null for non-numeric)
+    * ``min``, ``25%``, ``50%`` (median), ``75%``, ``max``
 
     Examples
     --------
     >>> summary(cars)
-    >>> describe(cars)          # alias (pandas/Python familiar)
+    >>> cars >> summary()       # tidyverse-style pipe
     >>> cars.summary()
-    >>> cars >> summary()       # via method; free function is preferred
+    >>> describe(cars)          # pandas-style alias
+    >>> cars >> describe()
     """
-    from tidy3.frame import tidy
-
-    tf = _as_tidy(data)
-    pct = tuple(percentiles) if percentiles is not None else _DEFAULT_PERCENTILES
-    # Materialize to Polars for one consistent engine (pandas backend too).
-    pdf = tf.collect(as_="polars")
-    if pdf.width == 0:
-        import polars as pl
-
-        return tidy(pl.DataFrame({"statistic": []}))
-    table = _summary_polars(pdf, percentiles=pct)
-    return tidy(table)
+    if data is _MISSING:
+        return _pipeable(
+            "summary",
+            lambda tf: _summary_impl(tf, percentiles=percentiles),
+        )
+    return _summary_impl(data, percentiles=percentiles)
 
 
 def describe(
-    data: Any,
+    data: Any = _MISSING,
     *,
     percentiles: tuple[float, ...] | list[float] | None = None,
 ) -> Any:
-    """Alias of :func:`summary` (pandas / Polars naming)."""
-    return summary(data, percentiles=percentiles)
+    """Alias of :func:`summary` (pandas / Polars naming). Pipeable: ``cars >> describe()``."""
+    if data is _MISSING:
+        return _pipeable(
+            "describe",
+            lambda tf: _summary_impl(tf, percentiles=percentiles),
+        )
+    return _summary_impl(data, percentiles=percentiles)

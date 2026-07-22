@@ -168,6 +168,16 @@ class TidyFrame:
         """Alias of :meth:`summary` (pandas/Python naming)."""
         return self.summary(percentiles=percentiles)
 
+    def colnames(self):
+        """Paste-ready column selectors; see :func:`tidy3.eda.colnames`."""
+        from tidy3.eda import colnames as colnames_fn
+
+        return colnames_fn(self)
+
+    def names_list(self) -> list[str]:
+        """Plain column-name list (same as :attr:`columns` / :func:`names`)."""
+        return list(self.columns)
+
     def _with_lf(
         self,
         lf: pl.LazyFrame,

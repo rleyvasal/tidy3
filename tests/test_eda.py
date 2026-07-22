@@ -147,3 +147,25 @@ def test_summary_numeric_mean():
     s = summary(tf).collect()
     mean_row = s.filter(s["statistic"] == "mean")
     assert abs(float(mean_row["x"][0]) - 2.5) < 1e-9
+
+
+def test_pipe_colnames_and_describe_like_tidyverse():
+    """cars >> colnames() / cars >> describe() mirror R %>% f()."""
+    from tidy3 import colnames, describe, summary
+
+    cars = _cars()
+    cn = cars >> colnames()
+    assert list(cn) == ["cyl", "mpg", "hp"]
+    assert repr(cn) == "cyl,\nmpg,\nhp,\n"
+
+    s = (cars >> summary()).collect()
+    assert "statistic" in s.columns
+    assert "mean" in s["statistic"].to_list()
+    assert "std" in s["statistic"].to_list()
+
+    d = (cars >> describe()).collect()
+    assert d.shape == s.shape
+
+    # Bare function (no call) also works: cars >> colnames  → colnames(cars)
+    cn2 = cars >> colnames
+    assert list(cn2) == list(cn)
