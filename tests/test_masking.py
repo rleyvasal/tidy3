@@ -122,13 +122,12 @@ def test_transformer_is_idempotent_on_explicit_col():
 
 
 def test_mutate_backtick_new_column_name():
-    """R: mutate(`new hp` = hp * 1.1) → **{'new hp': col('hp') * 1.1}."""
-    from tidy3.masking import rewrite_backtick_keyword_assigns, rewrite_backticks
+    """R: mutate(`new hp` = hp * 1.1) → __tidy3_assign__('new hp', col('hp') * 1.1)."""
+    from tidy3.masking import ASSIGN_NAME, rewrite_backtick_keyword_assigns
 
     raw = "mutate(`new hp` = hp * 1.1)"
     mid = rewrite_backtick_keyword_assigns(raw)
-    assert "**" in mid and "new hp" in mid
-    assert "=" not in mid.split("**", 1)[1].split(":", 1)[0]  # name is in dict key
+    assert ASSIGN_NAME in mid and "new hp" in mid
     out = _norm(raw)
     assert "new hp" in out
     assert f'{COL_NAME}("hp")' in out or f"{COL_NAME}('hp')" in out
@@ -137,7 +136,7 @@ def test_mutate_backtick_new_column_name():
 def test_mutate_backtick_new_column_end_to_end():
     from tidy3 import mutate, tidy
     from tidy3.expr import col
-    from tidy3.masking import BT_NAME, COL_NAME, apply_masking
+    from tidy3.masking import ASSIGN_NAME, BT_NAME, COL_NAME, apply_masking, make_named_assign
 
     cars = tidy({"hp": [100, 200], "cyl": [4, 8]})
     src = apply_masking("(cars >> mutate(`new hp` = hp * 1.1))")
@@ -147,6 +146,7 @@ def test_mutate_backtick_new_column_end_to_end():
         "col": col,
         COL_NAME: col,
         BT_NAME: col,
+        ASSIGN_NAME: make_named_assign,
     }
     out = eval(compile(src, "<t>", "eval"), ns).collect()
     assert "new hp" in out.columns

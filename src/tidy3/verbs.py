@@ -136,10 +136,23 @@ def _expanded_assignments(
     assignments: dict[str, Any],
     verb_name: str,
 ) -> dict[str, Any]:
+    from tidy3.masking import NamedAssign
+
     expanded: dict[str, Any] = {}
     for spec in specs:
+        if isinstance(spec, NamedAssign):
+            # From R-style mutate(`new col` = expr) → __tidy3_assign__(...)
+            if spec.name in expanded or spec.name in assignments:
+                raise ValueError(
+                    f"{verb_name}() defines column {spec.name!r} more than once"
+                )
+            expanded[spec.name] = _resolved_value(tf, spec.value)
+            continue
         if not isinstance(spec, AcrossSpec):
-            raise TypeError(f"{verb_name}() positional arguments must come from across()")
+            raise TypeError(
+                f"{verb_name}() positional arguments must come from across() "
+                f"or a named assignment (got {type(spec).__name__})"
+            )
         for name, value in spec.expand(tf).items():
             if name in expanded or name in assignments:
                 raise ValueError(f"{verb_name}() defines column {name!r} more than once")
@@ -947,9 +960,25 @@ def select(*cols: Any, **renames: Any) -> Verb:
         raise TypeError("select() requires at least one column")
 
     def _apply(tf):
+        from tidy3.masking import NamedAssign
+
         ordered: list[Any] = []
         seen_sources: set[str] = set()
+        mapping: dict[str, str] = {}
         for spec in cols:
+            if isinstance(spec, NamedAssign):
+                # select(`new name` = old) from R-style rewrite
+                resolved = resolve_selection(tf, [spec.value])
+                if len(resolved) != 1:
+                    raise ValueError(
+                        f"select(): rename {spec.name!r} must select one column"
+                    )
+                old = resolved[0]
+                mapping[old] = spec.name
+                if old not in seen_sources:
+                    ordered.append(old)
+                    seen_sources.add(old)
+                continue
             if isinstance(spec, (Expr, pl.Expr)):
                 ordered.append(spec)
                 continue
@@ -957,7 +986,6 @@ def select(*cols: Any, **renames: Any) -> Verb:
                 if source not in seen_sources:
                     ordered.append(source)
                     seen_sources.add(source)
-        mapping: dict[str, str] = {}
         for new, spec in renames.items():
             resolved = resolve_selection(tf, [spec])
             if len(resolved) != 1:
@@ -1034,13 +1062,33 @@ def drop(*cols: Any) -> Verb:
     return Verb(_apply, "drop")
 
 
-def rename(**kwargs: str) -> Verb:
-    """Rename columns: ``rename(new=old)`` (dplyr style)."""
-    # dplyr: rename(new_name = old_name) → mapping new←old
-    # polars/pandas: {old: new}
-    mapping = {old: new for new, old in kwargs.items()}
+def rename(*specs: Any, **kwargs: str) -> Verb:
+    """Rename columns: ``rename(new=old)`` or ``rename(`new name` = old)``."""
 
     def _apply(tf):
+        from tidy3.masking import NamedAssign
+
+        # dplyr: rename(new_name = old_name) → polars/pandas {old: new}
+        mapping: dict[str, str] = {}
+        for spec in specs:
+            if not isinstance(spec, NamedAssign):
+                raise TypeError(
+                    "rename() positional args must be named assignments "
+                    "(`new` = old)"
+                )
+            old = spec.value
+            if not isinstance(old, str):
+                resolved = resolve_selection(tf, [old])
+                if len(resolved) != 1:
+                    raise ValueError(
+                        f"rename(): {spec.name!r} must map from one column"
+                    )
+                old = resolved[0]
+            mapping[old] = spec.name
+        for new, old in kwargs.items():
+            mapping[str(old)] = new
+        if not mapping:
+            return tf
         groups = [mapping.get(g, g) for g in tf._groups] if tf._groups else None
         category_levels = {
             mapping.get(name, name): levels
@@ -1272,19 +1320,29 @@ def distinct(
         raise TypeError("distinct() maintain_order must be a boolean")
 
     def _apply(tf):
-        work = tf >> mutate(**computed) if computed else tf
+        from tidy3.masking import NamedAssign
+
+        # Fold NamedAssign positionals into computed kwargs
+        computed_map = dict(computed)
+        plain_cols: list[Any] = []
+        for spec in cols:
+            if isinstance(spec, NamedAssign):
+                computed_map[spec.name] = spec.value
+            else:
+                plain_cols.append(spec)
+        work = tf >> mutate(**computed_map) if computed_map else tf
         columns = _frame_columns(work)
-        if cols:
-            selected = resolve_selection(work, cols)
-        elif computed:
+        if plain_cols:
+            selected = resolve_selection(work, plain_cols)
+        elif computed_map:
             selected = []
         else:
             selected = columns
-        selected = [*selected, *computed]
+        selected = [*selected, *computed_map]
         keys = list(dict.fromkeys([*(work._groups or []), *selected]))
         if work._backend == "pandas":
             output = work._pdf.drop_duplicates(subset=keys).reset_index(drop=True)
-            if (cols or computed) and not keep_all:
+            if (plain_cols or computed_map) and not keep_all:
                 output = output.loc[:, keys]
             return work._with_pdf(output, groups=work._groups)
         lf = work._lf.unique(
@@ -1292,7 +1350,7 @@ def distinct(
             keep="first",
             maintain_order=maintain_order,
         )
-        if (cols or computed) and not keep_all:
+        if (plain_cols or computed_map) and not keep_all:
             lf = lf.select(keys)
         return work._with_lf(
             lf,
@@ -1649,24 +1707,33 @@ def group_by(
         raise TypeError("group_by() drop must be a boolean or None")
 
     def _apply(tf):
+        from tidy3.masking import NamedAssign
+
         context = _group_context(tf, None)
+        computed_map = dict(computed)
+        plain_cols: list[Any] = []
+        for spec in cols:
+            if isinstance(spec, NamedAssign):
+                computed_map[spec.name] = spec.value
+            else:
+                plain_cols.append(spec)
         assignments = {
             name: _resolved_value(context, value)
-            for name, value in computed.items()
+            for name, value in computed_map.items()
         }
         if tf._backend == "pandas":
             pdf = tf._pdf
             for stage in _assignment_stages(assignments):
                 pdf = _pe().do_mutate(pdf, stage, None)
             selected = resolve_selection(
-                tf._with_pdf(pdf, groups=None, rowwise=False), cols
+                tf._with_pdf(pdf, groups=None, rowwise=False), plain_cols
             )
             groups = list(
                 dict.fromkeys(
                     [
                         *((tf._groups or []) if add else []),
                         *selected,
-                        *computed,
+                        *computed_map,
                     ]
                 )
             )
@@ -1686,14 +1753,14 @@ def group_by(
                 **{name: _pl_expr(value) for name, value in stage.items()}
             )
         selected = resolve_selection(
-            tf._with_lf(lf, groups=None, rowwise=False), cols
+            tf._with_lf(lf, groups=None, rowwise=False), plain_cols
         )
         groups = list(
             dict.fromkeys(
                 [
                     *((tf._groups or []) if add else []),
                     *selected,
-                    *computed,
+                    *computed_map,
                 ]
             )
         )

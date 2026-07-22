@@ -33,11 +33,13 @@ from types import ModuleType
 from typing import Any, Callable
 
 from tidy3.masking import (
+    ASSIGN_NAME,
     BT_NAME,
     COL_NAME,
     Tidy3MaskTransformer,
     is_backtick_transformer,
     is_mask_transformer,
+    make_named_assign,
     tidy3_backtick_transform,
 )
 
@@ -188,6 +190,8 @@ def enable_r_style(ipython: Any | None = None) -> bool:
         ns[COL_NAME] = col
         # Fallback if a sentinel escapes AST handling → treat as column expr.
         ns[BT_NAME] = col
+        # Runtime carrier for `new col` = expr → NamedAssign
+        ns[ASSIGN_NAME] = make_named_assign
     enable_pipe_transform(ipython)
     transformers = getattr(ipython, "ast_transformers", None)
     if isinstance(transformers, list):
