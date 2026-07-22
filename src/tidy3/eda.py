@@ -31,6 +31,8 @@ __all__ = [
     "dtypes",
     "format_colnames",
     "ColnamesResult",
+    "summary",
+    "describe",
 ]
 
 # Backtick character without a literal ` in this file (Jupyter R-style safety).
@@ -171,3 +173,91 @@ def dim(data: Any) -> tuple[int, int]:
 def dtypes(data: Any) -> dict[str, Any]:
     """Mapping of column name → dtype (Polars or pandas dtype objects)."""
     return dict(_as_tidy(data).dtypes)
+
+
+# ── summary / describe ───────────────────────────────────────────────────────
+
+# Default percentile labels match Polars/pandas describe.
+_DEFAULT_PERCENTILES = (0.25, 0.5, 0.75)
+
+
+def _summary_polars(df: Any, *, percentiles: tuple[float, ...]) -> Any:
+    """Build a complete describe table (Polars DataFrame)."""
+    import polars as pl
+
+    # Core stats: count, nulls, mean, std, min, quantiles, max
+    desc = df.describe(percentiles=list(percentiles))
+    # Add n_unique (useful for categorical / discrete EDA; null for all-null cols).
+    n_unique_row = {"statistic": "n_unique"}
+    for name in df.columns:
+        try:
+            n_unique_row[name] = df.get_column(name).n_unique()
+        except Exception:
+            n_unique_row[name] = None
+    # Insert n_unique after null_count when present, else append.
+    stats = desc.get_column("statistic").to_list()
+    if "null_count" in stats:
+        idx = stats.index("null_count") + 1
+    elif "count" in stats:
+        idx = stats.index("count") + 1
+    else:
+        idx = 1
+    extra = pl.DataFrame(n_unique_row)
+    # Align dtypes: cast extra numeric cols to match desc where possible
+    for col in desc.columns:
+        if col == "statistic":
+            continue
+        if col in extra.columns and desc.schema[col].is_numeric():
+            extra = extra.with_columns(pl.col(col).cast(pl.Float64, strict=False))
+    head = desc.slice(0, idx)
+    tail = desc.slice(idx)
+    return pl.concat([head, extra, tail], how="diagonal_relaxed")
+
+
+def summary(
+    data: Any,
+    *,
+    percentiles: tuple[float, ...] | list[float] | None = None,
+) -> Any:
+    """Column-wise summary statistics (tidyverse-oriented name).
+
+    Returns a :class:`~tidy3.frame.TidyFrame` whose first column is
+    ``statistic`` and remaining columns are the data columns.
+
+    Statistics (complete EDA set)
+    -----------------------------
+    * ``count`` — non-null count  
+    * ``null_count`` — number of missing values  
+    * ``n_unique`` — distinct values (including null as a level in Polars)  
+    * ``mean``, ``std`` — location / scale (numeric; null for non-numeric)  
+    * ``min``, ``25%``, ``50%`` (median), ``75%``, ``max``  
+      (percentiles configurable)
+
+    Examples
+    --------
+    >>> summary(cars)
+    >>> describe(cars)          # alias (pandas/Python familiar)
+    >>> cars.summary()
+    >>> cars >> summary()       # via method; free function is preferred
+    """
+    from tidy3.frame import tidy
+
+    tf = _as_tidy(data)
+    pct = tuple(percentiles) if percentiles is not None else _DEFAULT_PERCENTILES
+    # Materialize to Polars for one consistent engine (pandas backend too).
+    pdf = tf.collect(as_="polars")
+    if pdf.width == 0:
+        import polars as pl
+
+        return tidy(pl.DataFrame({"statistic": []}))
+    table = _summary_polars(pdf, percentiles=pct)
+    return tidy(table)
+
+
+def describe(
+    data: Any,
+    *,
+    percentiles: tuple[float, ...] | list[float] | None = None,
+) -> Any:
+    """Alias of :func:`summary` (pandas / Polars naming)."""
+    return summary(data, percentiles=percentiles)

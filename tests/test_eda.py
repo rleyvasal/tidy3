@@ -93,3 +93,57 @@ def test_columns_schema_only_does_not_need_full_collect():
 
     tf = tidy({"x": [1, 2, 3], "y": [4, 5, 6]}) >> filter(col("x") > 0)
     assert "x" in tf.columns and "y" in tf.columns
+
+
+def test_summary_has_complete_stats():
+    from tidy3 import describe, summary
+
+    cars = tidy(
+        {
+            "mpg": [21.0, 21.0, 22.8, None, 18.7],
+            "cyl": [6, 6, 4, 6, 8],
+            "gear": ["auto", "auto", "manual", "auto", "manual"],
+        }
+    )
+    s = summary(cars).collect()
+    stats = s["statistic"].to_list()
+    for required in (
+        "count",
+        "null_count",
+        "n_unique",
+        "mean",
+        "std",
+        "min",
+        "25%",
+        "50%",
+        "75%",
+        "max",
+    ):
+        assert required in stats, f"missing {required} in {stats}"
+
+    # count / nulls for mpg
+    count_row = s.filter(s["statistic"] == "count")
+    null_row = s.filter(s["statistic"] == "null_count")
+    assert count_row["mpg"][0] == 4
+    assert null_row["mpg"][0] == 1
+
+    # std present and positive for mpg
+    std_row = s.filter(s["statistic"] == "std")
+    assert std_row["mpg"][0] is not None and float(std_row["mpg"][0]) > 0
+
+    # describe is an alias
+    d = describe(cars).collect()
+    assert d["statistic"].to_list() == stats
+
+    # methods
+    assert cars.summary().collect().shape == s.shape
+    assert cars.describe().collect().shape == s.shape
+
+
+def test_summary_numeric_mean():
+    from tidy3 import summary
+
+    tf = tidy({"x": [1.0, 2.0, 3.0, 4.0]})
+    s = summary(tf).collect()
+    mean_row = s.filter(s["statistic"] == "mean")
+    assert abs(float(mean_row["x"][0]) - 2.5) < 1e-9

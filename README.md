@@ -334,6 +334,16 @@ tidy(cars)
 %tidy3_mask on|off|status    # R-style bare names / backticks
 ```
 
+### EDA inspection
+
+```python
+names(cars)       # list[str]
+colnames(cars)    # paste-ready selectors for select(...)
+cars.columns      # same list as names
+summary(cars)     # count, null_count, n_unique, mean, std, min, 25%, 50%, 75%, max
+describe(cars)    # alias of summary (pandas-style name)
+```
+
 ### R-style bare names & backticks (Jupyter / SolveIt only)
 
 With the extension loaded (CRAFT addon or `%load_ext tidy3.jupyter`), cells may

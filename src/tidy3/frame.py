@@ -150,6 +150,24 @@ class TidyFrame:
             return self.dtypes
         return self._lf.collect_schema()
 
+    def summary(
+        self,
+        *,
+        percentiles: tuple[float, ...] | list[float] | None = None,
+    ) -> TidyFrame:
+        """Column-wise summary statistics; see :func:`tidy3.eda.summary`."""
+        from tidy3.eda import summary as summary_fn
+
+        return summary_fn(self, percentiles=percentiles)
+
+    def describe(
+        self,
+        *,
+        percentiles: tuple[float, ...] | list[float] | None = None,
+    ) -> TidyFrame:
+        """Alias of :meth:`summary` (pandas/Python naming)."""
+        return self.summary(percentiles=percentiles)
+
     def _with_lf(
         self,
         lf: pl.LazyFrame,

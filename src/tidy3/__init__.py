@@ -41,7 +41,7 @@ from tidy3.expr import (
     var,
 )
 from tidy3.expr import sum as sum  # noqa: A001
-from tidy3.eda import colnames, dim, dtypes, names, ncol, nrow
+from tidy3.eda import colnames, describe, dim, dtypes, names, ncol, nrow, summary
 from tidy3.frame import TidyFrame, options, tidy
 from tidy3.io import scan_csv, scan_ipc, scan_parquet
 from tidy3.join_spec import (
@@ -214,6 +214,7 @@ __all__ = [
     "complete",
     "col_range",
     "closest",
+    "describe",
     "dim",
     "dtypes",
     "contains",
@@ -339,6 +340,7 @@ __all__ = [
     "sum",
     "summarise",
     "summarize",
+    "summary",
     "tally",
     "tidy",
     "to_numpy",
