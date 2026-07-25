@@ -72,11 +72,17 @@ class Selector:
         return Selector(resolve, f"({self.label} - {right.label})")
 
     def __invert__(self) -> Selector:
+        """Selection complement (dplyr ``!`` / tidyselect ``!``)."""
+
         def resolve(columns, schema, groups):
             unwanted = set(self.resolve(columns, schema, groups))
             return [name for name in columns if name not in unwanted]
 
-        return Selector(resolve, f"~{self.label}")
+        return Selector(resolve, f"!{self.label}")
+
+    def __neg__(self) -> Selector:
+        """Exclude columns (dplyr ``-starts_with(...)`` / ``-col``)."""
+        return self.__invert__()
 
     def __repr__(self) -> str:
         return f"<tidy3.Selector {self.label}>"
@@ -218,7 +224,13 @@ def num_range(prefix: str, values: Iterable[int], *, width: int | None = None) -
 
 
 def col_range(first: str, last: str) -> Selector:
-    """Select the inclusive schema range between two named columns."""
+    """Select the inclusive schema range between two named columns.
+
+    dplyr-ish column ranges (``mpg:hp`` in R)::
+
+        select(col_range("mpg", "hp"))
+        select(cols_between("mpg", "hp"))  # alias
+    """
 
     def resolve(columns, schema, groups):
         missing = [name for name in (first, last) if name not in columns]
@@ -230,6 +242,13 @@ def col_range(first: str, last: str) -> Selector:
         return [columns[index] for index in range(start, stop + step, step)]
 
     return Selector(resolve, f"col_range({first!r}, {last!r})")
+
+
+def cols_between(first: str, last: str) -> Selector:
+    """Alias of :func:`col_range` (inclusive column-name range for ``select``)."""
+    if not isinstance(first, str) or not isinstance(last, str):
+        raise TypeError("cols_between() expects two column name strings")
+    return col_range(first, last)
 
 
 def all_of(names: Iterable[str]) -> Selector:
@@ -287,10 +306,27 @@ def group_cols() -> Selector:
     )
 
 
+def _polars_dtype(dtype: Any) -> Any | None:
+    """Return a Polars dtype when *dtype* is one (class or instance)."""
+    try:
+        if isinstance(dtype, pl.DataType):
+            return dtype
+        # Polars sometimes exposes dtype classes (e.g. pl.Int64)
+        if isinstance(dtype, type) and issubclass(dtype, pl.DataType):
+            return dtype()
+    except TypeError:
+        pass
+    return None
+
+
 def is_numeric(dtype: Any) -> bool:
+    """True for int/float numeric columns (not boolean)."""
     try:
         numeric = getattr(dtype, "is_numeric", None)
         if callable(numeric):
+            # Polars: ints/floats are numeric; booleans are not in recent Polars
+            if is_boolean(dtype):
+                return False
             return bool(numeric())
     except (TypeError, AttributeError):
         pass
@@ -302,8 +338,44 @@ def is_numeric(dtype: Any) -> bool:
         return False
 
 
+def is_integer(dtype: Any) -> bool:
+    """True for integer columns (signed/unsigned)."""
+    pdt = _polars_dtype(dtype)
+    if pdt is not None:
+        try:
+            return bool(pdt.is_integer())
+        except (TypeError, AttributeError):
+            pass
+    try:
+        from pandas.api.types import is_integer_dtype
+
+        return bool(is_integer_dtype(dtype))
+    except TypeError:
+        return False
+
+
+def is_float(dtype: Any) -> bool:
+    """True for floating-point columns."""
+    pdt = _polars_dtype(dtype)
+    if pdt is not None:
+        try:
+            return bool(pdt.is_float())
+        except (TypeError, AttributeError):
+            pass
+    try:
+        from pandas.api.types import is_float_dtype
+
+        return bool(is_float_dtype(dtype))
+    except TypeError:
+        return False
+
+
 def is_string(dtype: Any) -> bool:
-    if dtype == pl.String:
+    """True for text / string columns."""
+    if dtype == pl.String or dtype is pl.String:
+        return True
+    pdt = _polars_dtype(dtype)
+    if pdt is not None and type(pdt) is pl.String:
         return True
     try:
         from pandas.api.types import is_string_dtype
@@ -313,8 +385,17 @@ def is_string(dtype: Any) -> bool:
         return False
 
 
+def is_character(dtype: Any) -> bool:
+    """Alias of :func:`is_string` (R ``is.character``)."""
+    return is_string(dtype)
+
+
 def is_boolean(dtype: Any) -> bool:
-    if dtype == pl.Boolean:
+    """True for boolean columns."""
+    if dtype == pl.Boolean or dtype is pl.Boolean:
+        return True
+    pdt = _polars_dtype(dtype)
+    if pdt is not None and type(pdt) is pl.Boolean:
         return True
     try:
         from pandas.api.types import is_bool_dtype
@@ -324,10 +405,35 @@ def is_boolean(dtype: Any) -> bool:
         return False
 
 
+def is_bool(dtype: Any) -> bool:
+    """Alias of :func:`is_boolean`."""
+    return is_boolean(dtype)
+
+
+def is_datetime(dtype: Any) -> bool:
+    """True for datetime / date columns (not pure time-delta)."""
+    pdt = _polars_dtype(dtype)
+    if pdt is not None:
+        name = type(pdt).__name__
+        return name in {"Datetime", "Date"}
+    try:
+        from pandas.api.types import is_datetime64_any_dtype
+
+        if is_datetime64_any_dtype(dtype):
+            return True
+    except TypeError:
+        pass
+    return False
+
+
 def is_temporal(dtype: Any) -> bool:
+    """True for datetime, date, time, or duration columns."""
     try:
         if isinstance(dtype, pl.DataType):
             return bool(dtype.is_temporal())
+        pdt = _polars_dtype(dtype)
+        if pdt is not None:
+            return bool(pdt.is_temporal())
     except (TypeError, AttributeError):
         pass
     try:
@@ -338,6 +444,23 @@ def is_temporal(dtype: Any) -> bool:
 
         return bool(is_datetime64_any_dtype(dtype) or is_timedelta64_dtype(dtype))
     except TypeError:
+        return False
+
+
+def is_categorical(dtype: Any) -> bool:
+    """True for categorical / factor-like columns."""
+    pdt = _polars_dtype(dtype)
+    if pdt is not None:
+        name = type(pdt).__name__
+        if name in {"Categorical", "Enum"}:
+            return True
+    if dtype is pl.Categorical or dtype == pl.Categorical:
+        return True
+    try:
+        import pandas as pd
+
+        return isinstance(dtype, pd.CategoricalDtype) or str(dtype) == "category"
+    except Exception:
         return False
 
 
@@ -672,13 +795,20 @@ __all__ = [
     "any_of",
     "c_across",
     "col_range",
+    "cols_between",
     "contains",
     "ends_with",
     "everything",
     "group_cols",
     "if_all",
     "if_any",
+    "is_bool",
     "is_boolean",
+    "is_categorical",
+    "is_character",
+    "is_datetime",
+    "is_float",
+    "is_integer",
     "is_numeric",
     "is_string",
     "is_temporal",

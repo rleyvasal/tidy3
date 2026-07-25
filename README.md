@@ -428,7 +428,7 @@ ln -sfn /path/to/plot3 plot3
 | Join specs | `join_by`, `eq`, `ge`, `gt`, `le`, `lt`, `closest`, `between`, `within`, `overlaps` |
 | Bind/set | `bind_rows`, `bind_cols`, `union`, `union_all`, `intersect`, `setdiff`, `symdiff`, `setequal` |
 | Row mutation | `rows_insert`, `rows_append`, `rows_update`, `rows_patch`, `rows_upsert`, `rows_delete` |
-| Selectors | `everything`, `col_range`, `last_col`, `group_cols`, `starts_with`, `ends_with`, `contains`, `matches`, `num_range`, `all_of`, `any_of`, `where` |
+| Selectors | `everything`, `col_range`/`cols_between`, `last_col`, `group_cols`, `starts_with`, `ends_with`, `contains`, `matches`, `num_range`, `all_of`, `any_of`, `where`; set ops `\|` `&` `-` `~`/`!`/`-helper`; predicates `is_numeric`, `is_integer`, `is_float`, `is_string`/`is_character`, `is_bool`/`is_boolean`, `is_datetime`, `is_categorical`, `is_temporal` |
 | Column-wise | `across`, `if_any`, `if_all`, `pick`, `c_across` |
 | Materialize | `collect`, `pull`, `glimpse`, `peek` |
 | Expr | `col`, `n`, `mean`, `sum`, `min`, `max`, `median`, `std`/`sd`, `var`, `any`, `all`, `first`, `last`, `nth`, `near`, `na_if`, `between`, `consecutive_id`, `case_match`, `recode`, ranking/window helpers, `n_distinct`, `coalesce`, `if_else`, `case_when` |
@@ -483,6 +483,9 @@ or `rename_with`. Combine them with `|` (union), `&` (intersection), `-`
 ```python
 tidy(df)
 >> select("id", starts_with("measure_"), last_col())
+>> select(!starts_with("tmp_"))            # Jupyter: ! → ~ ; or use ~starts_with
+>> select(where(is_numeric) & !starts_with("id"))
+>> select(cols_between("mpg", "hp"))       # inclusive column range
 
 tidy(df)
 >> select(everything() - ends_with("_raw"))

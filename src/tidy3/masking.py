@@ -242,12 +242,61 @@ def rewrite_backtick_keyword_assigns(source: str) -> str:
     return "".join(out)
 
 
-def rewrite_backticks(source: str) -> str:
-    """Preparse backticks for Python.
+def rewrite_bang_not(source: str) -> str:
+    """Rewrite R-style ``!`` (logical / selection not) to Python ``~``.
 
-    1. `` `new col` = expr `` → ``__tidy3_assign__("new col", (expr))``
-    2. remaining `` `col` `` → ``__tidy3_bt__("col")``
+    Leaves ``!=`` alone. Safe for both::
+
+        select(!starts_with("new"))   → select(~starts_with("new"))
+        filter(!(mpg > 20))           → filter(~(mpg > 20))
+
+    :class:`~tidy3.expr.Expr` and :class:`~tidy3.tidyselect.Selector` both
+    implement ``__invert__``.
     """
+    if "!" not in source:
+        return source
+    out: list[str] = []
+    i = 0
+    n = len(source)
+    in_str: str | None = None
+    while i < n:
+        c = source[i]
+        if in_str is not None:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(source[i + 1])
+                i += 2
+                continue
+            if c == in_str:
+                in_str = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            in_str = c
+            out.append(c)
+            i += 1
+            continue
+        if c == "!":
+            if i + 1 < n and source[i + 1] == "=":
+                out.append("!=")
+                i += 2
+                continue
+            out.append("~")
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def rewrite_backticks(source: str) -> str:
+    """Preparse R-style tokens for Python.
+
+    1. ``!`` → ``~`` (selection / logical not; not ``!=``)
+    2. `` `new col` = expr `` → ``__tidy3_assign__("new col", (expr))``
+    3. remaining `` `col` `` → ``__tidy3_bt__("col")``
+    """
+    source = rewrite_bang_not(source)
     source = rewrite_backtick_keyword_assigns(source)
     return _BT_RE.sub(lambda m: f"{BT_NAME}({m.group(1)!r})", source)
 
@@ -282,11 +331,11 @@ def _is_assign_call(node: ast.AST) -> bool:
 
 
 def tidy3_backtick_transform(lines: list[str]) -> list[str]:
-    """IPython input transformer: backtick preparser."""
+    """IPython input transformer: R-style preparser (``!``, backticks)."""
     if not lines:
         return lines
     src = "".join(lines)
-    if "`" not in src:
+    if "`" not in src and "!" not in src:
         return lines
     out = rewrite_backticks(src)
     if out == src:
@@ -330,18 +379,42 @@ class MaskNames(ast.NodeTransformer):
             new = _col_call(name)
         return ast.copy_location(new, old)
 
+    def _all_of_one(self, name: str) -> ast.Call:
+        return ast.Call(
+            func=ast.Name(id="all_of", ctx=ast.Load()),
+            args=[ast.List(elts=[ast.Constant(value=name)], ctx=ast.Load())],
+            keywords=[],
+        )
+
     def visit_Name(self, node: ast.Name) -> ast.AST:
         if isinstance(node.ctx, ast.Load) and node.id not in self.known:
             return self._replacement(node.id, node)
+        return node
+
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> ast.AST:
+        # Selector exclusion: -mpg / ~starts_with("x") / !… (after preparser)
+        if self.mode == "selector" and isinstance(
+            node.op, (ast.USub, ast.Invert, ast.Not)
+        ):
+            operand = self.visit(node.operand)
+            if isinstance(operand, ast.Constant) and isinstance(operand.value, str):
+                # -"mpg" is invalid; -mpg → all_of(["mpg"]) then invert
+                operand = self._all_of_one(operand.value)
+            return ast.copy_location(
+                ast.UnaryOp(op=ast.Invert(), operand=operand),
+                node,
+            )
+        node.operand = self.visit(node.operand)
         return node
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
         if _is_bt_call(node):
             return self._replacement(str(node.args[0].value), node)
 
-        # Keep function names (mean, if_else, n, …); rewrite receivers/args.
+        # Keep function names (mean, if_else, n, starts_with, …); rewrite args.
         if not isinstance(node.func, ast.Name):
             node.func = self.visit(node.func)
+        # Do not treat helper names as columns; leave Name funcs alone.
         node.args = [self.visit(arg) for arg in node.args]
         node.keywords = [
             ast.keyword(arg=kw.arg, value=self.visit(kw.value))
