@@ -280,14 +280,25 @@ laptop work.
 %run /path/to/gpudev/addons/plot3.py          # ggplot / %plot3
 ```
 
-Standalone SolveIt (no CRAFT):
+Standalone SolveIt (no CRAFT) — preferred one-liner:
 
 ```text
-%run /path/to/tidy3  …  use: %load_ext tidy3.jupyter after pip install -e
-%run /path/to/plot3/load.py
+%run /app/data/gpudevd/tidy3/tidy3.py
+# or
+%run /path/to/tidy3/tidy3.py
+%run /path/to/tidy3/load.py          # same loader
 ```
 
-Or after editable installs: `%load_ext tidy3.jupyter` then `%load_ext plot3`.
+That puts `src/` on the path, injects the API, and turns on multi-line `>>`
+plus R-style bare names / backticks / `!` — same local experience as the
+CRAFT addon, without `CRAFT.py` or `%gpu`.
+
+After a normal editable install you can also use:
+
+```text
+%load_ext tidy3.jupyter
+%load_ext plot3
+```
 
 ### With `%gpu` (remote compute)
 
