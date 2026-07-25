@@ -280,7 +280,7 @@ laptop work.
 %run /path/to/gpudev/addons/plot3.py          # ggplot / %plot3
 ```
 
-Standalone SolveIt (no CRAFT) — preferred one-liner:
+**One command** — works local *and* under `%gpu` (CRAFT is auto-detected):
 
 ```text
 %run /app/data/gpudevd/tidy3/tidy3.py
@@ -290,8 +290,18 @@ Standalone SolveIt (no CRAFT) — preferred one-liner:
 ```
 
 That puts `src/` on the path, injects the API, and turns on multi-line `>>`
-plus R-style bare names / backticks / `!` — same local experience as the
-CRAFT addon, without `CRAFT.py` or `%gpu`.
+plus R-style bare names / backticks / `!`. If CRAFT is already loaded (or
+becomes connected on `%gpu`), the same cell also registers remote seeding —
+no second command.
+
+```text
+%local
+%run /app/data/gpudevd/tidy3/tidy3.py
+%run /app/data/gpudevd/plot3/plot3.py
+# only when you need the GPU:
+%run /path/to/gpudev/CRAFT.py
+%gpu
+```
 
 After a normal editable install you can also use:
 

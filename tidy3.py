@@ -1,21 +1,25 @@
-"""Standalone SolveIt / Jupyter loader — no CRAFT required.
+"""Standalone SolveIt / Jupyter loader — one command for local and CRAFT/GPU.
 
-Usage (same spirit as the gpudev addon, without %gpu / CRAFT)::
+Usage::
 
     %run /app/data/gpudevd/tidy3/tidy3.py
     %run /path/to/tidy3/tidy3.py
+    %run /path/to/tidy3/load.py          # same loader
 
-What this does:
+What this does (always):
 
 1. Puts ``src/`` on ``sys.path`` (editable checkout, no pip install needed)
 2. Fresh-imports tidy3 so a ``git pull`` takes effect
 3. Injects the public API into the IPython user namespace
 4. Enables multi-line ``>>`` pipes + R-style bare names / backticks / ``!``
 
-Prefer a normal install when you can::
+What this does **only when CRAFT is present** (auto-detected):
 
-    pip install -e /path/to/tidy3
-    %load_ext tidy3.jupyter
+5. Registers remote seed hooks so ``%gpu`` cells get tidy3 without a second command
+6. Exposes ``seed_tidy3_remote(force=True)`` for kernel restarts
+
+You do **not** need different commands for local vs GPU. Load once; CRAFT is
+optional and is detected from the environment.
 """
 
 from __future__ import annotations
@@ -77,7 +81,109 @@ for _name in ("tidy", "TidyFrame", "col", "filter", "select", "mutate", "arrange
     if hasattr(tidy3, _name):
         _PUBLIC[_name] = getattr(tidy3, _name)
 
+# ── CRAFT / GPU detection (optional) ─────────────────────────────────────────
+
+_SEED_STATE = {"stamp": None, "kc_id": None, "ok": False}
+
+
+def _craft_status(ip=None) -> str:
+    """Return ``connected`` | ``present`` | ``absent``."""
+    if ip is None:
+        try:
+            ip = get_ipython() if get_ipython else None
+        except Exception:
+            ip = None
+    ns = (getattr(ip, "user_ns", None) or {}) if ip is not None else {}
+    rr = ns.get("remote_run_")
+    mgr = ns.get("_exec_mgr")
+    if callable(rr) and mgr is not None:
+        return "connected"
+    if "remote_run_" in ns or "register_local_magic" in ns:
+        return "present"
+    try:
+        import gpudev_craft  # noqa: F401
+
+        return "present"
+    except Exception:
+        pass
+    for key in ("_craft_cfg", "CRAFT", "remote_run", "gpu_mode"):
+        if key in ns:
+            return "present"
+    return "absent"
+
+
+def seed_remote(
+    *, force: bool = False, quiet: bool = False, style_polars: bool = True
+) -> bool:
+    """Ship tidy3 to the CRAFT remote kernel (no-op without CRAFT)."""
+    try:
+        from tidy3 import craft
+    except ImportError:
+        if not quiet:
+            print(
+                "tidy3: remote seed unavailable (no craft module in this build)",
+                flush=True,
+            )
+        return False
+
+    ip = get_ipython() if get_ipython else None
+    if ip is None:
+        return False
+    ns = ip.user_ns or {}
+    rr = ns.get("remote_run_")
+    mgr = ns.get("_exec_mgr")
+    if not callable(rr) or mgr is None:
+        if not quiet:
+            print(
+                "tidy3: CRAFT not connected yet — local only "
+                "(will seed automatically on first %gpu cell)",
+                flush=True,
+            )
+        return False
+
+    payload, stamp = craft.build_payload()
+    kc_id = id(getattr(mgr, "remote_kc", None))
+    if (
+        not force
+        and _SEED_STATE["stamp"] == stamp
+        and _SEED_STATE["kc_id"] == kc_id
+    ):
+        return _SEED_STATE["ok"]
+
+    ok, msg = craft.seed(
+        rr, payload=payload, stamp=stamp, style_polars=style_polars
+    )
+    _SEED_STATE.update(stamp=stamp, kc_id=kc_id, ok=ok)
+    if ok:
+        if not quiet:
+            print(f"tidy3: {msg}", flush=True)
+    else:
+        print(
+            "tidy3: remote seed FAILED — %gpu cells won't know tidy3.\n"
+            + msg
+            + "\nRetry with seed_tidy3_remote(force=True)",
+            flush=True,
+        )
+    return ok
+
+
+def _maybe_seed_on_cell(_info=None):
+    try:
+        import gpudev_craft.core as _core
+
+        router = getattr(_core, "ROUTER", None)
+        py_be = getattr(_core, "PY_BACKEND", None)
+        if router is None or py_be is None or router.backend is not py_be:
+            return
+    except Exception:
+        return
+    seed_remote(quiet=True)
+
+
 ip = get_ipython() if get_ipython else None
+_craft = _craft_status(ip)
+print(f"tidy3: environment = {_craft} (local setup always runs)", flush=True)
+
 if ip is None:
     print(
         "tidy3: WARNING — get_ipython() is None; run this with %run inside "
@@ -90,6 +196,7 @@ elif getattr(ip, "user_ns", None) is None:
 else:
     # Force-overwrite (datar/pipda often already own mean/sum/filter).
     ip.user_ns.update(_PUBLIC)
+    ip.user_ns["seed_tidy3_remote"] = seed_remote
     print(
         f"tidy3: injected {len(_PUBLIC)} names into user_ns",
         flush=True,
@@ -106,7 +213,6 @@ else:
             _loaded.discard("tidy3.jupyter")
             _em.load_extension("tidy3.jupyter")
 
-        # Force full R-style + pipes even if an older extension left them off.
         if hasattr(_tj, "inject_api"):
             _tj.inject_api(ip, force=True)
         if hasattr(_tj, "enable_r_style"):
@@ -153,8 +259,28 @@ else:
             flush=True,
         )
 
+    if _craft != "absent":
+        try:
+            prev = ip.user_ns.get("_tidy3_seed_cb")
+            if prev is not None:
+                try:
+                    ip.events.unregister("pre_run_cell", prev)
+                except Exception:
+                    pass
+            ip.events.register("pre_run_cell", _maybe_seed_on_cell)
+            ip.user_ns["_tidy3_seed_cb"] = _maybe_seed_on_cell
+        except Exception:
+            pass
+        seed_remote(quiet=False)
+    else:
+        print(
+            "tidy3: no CRAFT detected — local only "
+            "(fine for VS Code / SolveIt without %gpu)",
+            flush=True,
+        )
+
 print(
-    f"tidy3 {tidy3.__version__} ready (no CRAFT) "
+    f"tidy3 {tidy3.__version__} ready "
     f"from {Path(tidy3.__file__).resolve().parent}",
     flush=True,
 )
@@ -162,6 +288,8 @@ print(
     "  multi-line >> auto-rewritten when pipe transformer is ON\n"
     "  bare names / backticks / !  (R-style masking)\n"
     "  %tidy3_pipes on|off|status    %tidy3_mask on|off|status\n"
+    "  GPU: same %run; seeds remote when CRAFT is connected "
+    "(seed_tidy3_remote(force=True) after kernel restart)\n"
     "  fallback: ( tidy(df) >> filter(...) >> ... )",
     flush=True,
 )
