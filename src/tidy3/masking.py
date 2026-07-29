@@ -256,6 +256,26 @@ _TIDY3_BANG_VERBS = (
 )
 
 
+def _out_at_line_start(out: list[str]) -> bool:
+    """True if *out* is empty or only whitespace since the last newline."""
+    i = len(out) - 1
+    while i >= 0 and out[i] in " \t":
+        i -= 1
+    return i < 0 or out[i] == "\n"
+
+
+def is_jupyter_shell_cell(source: str) -> bool:
+    """True when the cell is a Jupyter/IPython shell escape (``!cmd`` / ``!!cmd``).
+
+    Used to keep notebook terminal cells out of tidy3 / CRAFT package rewrites.
+    """
+    s = source.lstrip(" \t")
+    # Allow a leading blank line then shell (common notebook habit).
+    while s.startswith("\n"):
+        s = s[1:].lstrip(" \t")
+    return s.startswith("!")
+
+
 def rewrite_bang_not(source: str) -> str:
     """Rewrite R-style ``!`` to Python ``~`` **only inside tidy3 verb calls**.
 
@@ -270,15 +290,26 @@ def rewrite_bang_not(source: str) -> str:
     commands stay literal::
 
         !pip install polars           → !pip install polars  (unchanged)
+        !whoami                       → !whoami              (unchanged)
         x = !ls                       → x = !ls              (unchanged)
 
-    Always leaves ``!=`` and string contents alone.
+    Hard rules (never rewrite):
+
+    - line-leading ``!`` / ``!!`` (Jupyter shell escapes)
+    - pure shell cells
+    - ``!=`` and string / comment contents
 
     :class:`~tidy3.expr.Expr` and :class:`~tidy3.tidyselect.Selector` both
     implement ``__invert__`` (used by ``~`` / rewritten ``!``).
     """
     if "!" not in source:
         return source
+    # Whole-cell shell (``!whoami``, ``!pip …``) — do not touch anything.
+    if is_jupyter_shell_cell(source) and source.count("\n") <= 1:
+        # Single-line shell cell (optional trailing newline only).
+        body = source.strip("\n")
+        if "\n" not in body.lstrip(" \t"):
+            return source
     out: list[str] = []
     i = 0
     n = len(source)
@@ -361,6 +392,11 @@ def rewrite_bang_not(source: str) -> str:
                 out.append("!=")
                 i += 2
                 continue
+            # Jupyter shell: ``!cmd`` / ``!!cmd`` at the start of a line.
+            if _out_at_line_start(out):
+                out.append("!")
+                i += 1
+                continue
             # Only tidy3-context negation; never touch shell / other Python.
             if any(tidy_stack):
                 out.append("~")
@@ -424,11 +460,22 @@ def tidy3_backtick_transform(lines: list[str]) -> list[str]:
     """IPython input transformer: R-style preparser (tidy3 ``!``, backticks).
 
     ``!`` is rewritten to ``~`` only inside tidy3 verb calls so Jupyter shell
-    cells (``!pip install …``) stay literal. Prefer ``~`` in user code.
+    cells (``!pip install …``, ``!whoami``) stay literal. Prefer ``~`` in user
+    code.
     """
     if not lines:
         return lines
     src = "".join(lines)
+    # Never rewrite pure shell cells — even if a stale/global bang rewriter
+    # would have turned ``!whoami`` into ``~whoami``.
+    if is_jupyter_shell_cell(src):
+        # Multi-line: only skip when every non-empty line is shell or comment.
+        non_empty = [ln for ln in src.splitlines() if ln.strip()]
+        if non_empty and all(
+            ln.lstrip().startswith("!") or ln.lstrip().startswith("#")
+            for ln in non_empty
+        ):
+            return lines
     if "`" not in src and "!" not in src:
         return lines
     out = rewrite_backticks(src)

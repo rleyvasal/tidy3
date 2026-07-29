@@ -113,10 +113,20 @@ def tidy3_craft_transform(source: str) -> str:
 
     Registered with CRAFT via :func:`_craft_register_transform` so the core
     router never hard-codes tidy3. Prefer ``~`` for negation; ``!`` is only
-    rewritten inside tidy3 verb calls (never shell ``!pip``).
+    rewritten inside tidy3 verb calls (never shell ``!pip`` / ``!whoami``).
     """
     if not source:
         return source
+    from tidy3.masking import is_jupyter_shell_cell
+
+    # Shell cells must reach the remote as ``!cmd``, not ``~cmd``.
+    if is_jupyter_shell_cell(source):
+        non_empty = [ln for ln in source.splitlines() if ln.strip()]
+        if non_empty and all(
+            ln.lstrip().startswith("!") or ln.lstrip().startswith("#")
+            for ln in non_empty
+        ):
+            return source
     text = source
     # Match IPython path: bang/backticks only while R-style masking is on.
     if _R_STYLE_ON and ("`" in text or "!" in text):

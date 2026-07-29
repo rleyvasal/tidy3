@@ -92,6 +92,8 @@ def test_bang_preparser_leaves_shell_and_non_tidy3():
     """Notebook shell / non-tidy3 ``!`` must stay literal (no global rewrite)."""
     assert rewrite_bang_not("!pip install polars") == "!pip install polars"
     assert rewrite_bang_not("!pip install -U tidy3\n") == "!pip install -U tidy3\n"
+    assert rewrite_bang_not("!whoami") == "!whoami"
+    assert rewrite_bang_not("!whoami\n") == "!whoami\n"
     assert rewrite_bang_not("!!ls -la") == "!!ls -la"
     assert rewrite_bang_not("x = !ls") == "x = !ls"
     assert rewrite_bang_not("  !cd /tmp && pwd") == "  !cd /tmp && pwd"
@@ -116,6 +118,7 @@ def test_backtick_transform_preserves_shell_pip():
 
     lines = ["!pip install polars\n"]
     assert tidy3_backtick_transform(lines) == lines
+    assert tidy3_backtick_transform(["!whoami\n"]) == ["!whoami\n"]
     lines2 = ['select(!starts_with("new"))\n']
     out2 = "".join(tidy3_backtick_transform(lines2))
     assert "~starts_with" in out2
