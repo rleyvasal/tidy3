@@ -18,6 +18,10 @@ an AST transformer resolves bare names and sentinels by verb context::
     select(mpg, cyl)              # → select("mpg", "cyl")
     mutate(x = `hp new` / cyl)    # → mutate(x = col("hp new") / col("cyl"))
 
+Negation: prefer ``~`` (Python-native). Optional ``!`` sugar is rewritten to
+``~`` only inside tidy3 verb calls (``select(!starts_with(...))``); notebook
+shell cells (``!pip install …``) are never rewritten.
+
 Plain ``.py`` files keep explicit ``col("x")`` / string selectors.
 
 Large data (CRAFT)
@@ -45,6 +49,7 @@ from tidy3.masking import (
 
 _TRANSFORMER: Callable[[list[str]], list[str]] | None = None
 _R_STYLE_ON = True
+_CRAFT_TRANSFORM_NAME = "tidy3"
 
 
 def _is_tidy3_owned(value: Any) -> bool:
@@ -103,6 +108,75 @@ def tidy3_input_transformer(lines: list[str]) -> list[str]:
     return _text_to_lines(rewritten)
 
 
+def tidy3_craft_transform(source: str) -> str:
+    """CRAFT package transform: tidy3 source sugar for remote-routed cells.
+
+    Registered with CRAFT via :func:`_craft_register_transform` so the core
+    router never hard-codes tidy3. Prefer ``~`` for negation; ``!`` is only
+    rewritten inside tidy3 verb calls (never shell ``!pip``).
+    """
+    if not source:
+        return source
+    text = source
+    # Match IPython path: bang/backticks only while R-style masking is on.
+    if _R_STYLE_ON and ("`" in text or "!" in text):
+        from tidy3.masking import rewrite_backticks
+
+        text = rewrite_backticks(text)
+    from tidy3.partial_run import maybe_rewrite_cell
+
+    rewritten = maybe_rewrite_cell(text)
+    return rewritten if rewritten is not None else text
+
+
+def _craft_register_transform(*, active: bool | None = None) -> None:
+    """Register/refresh tidy3 on CRAFT's transform registry when present."""
+    if active is None:
+        active = _R_STYLE_ON
+    try:
+        from IPython import get_ipython
+
+        ip = get_ipython()
+    except Exception:
+        return
+    if ip is None:
+        return
+    ns = getattr(ip, "user_ns", None) or {}
+    reg = ns.get("register_transform")
+    if not callable(reg):
+        # CRAFT core not loaded — IPython transformers alone are enough.
+        return
+    try:
+        reg(_CRAFT_TRANSFORM_NAME, tidy3_craft_transform, active=bool(active))
+    except Exception:
+        pass
+
+
+def _craft_unregister_transform() -> None:
+    try:
+        from IPython import get_ipython
+
+        ip = get_ipython()
+    except Exception:
+        return
+    if ip is None:
+        return
+    ns = getattr(ip, "user_ns", None) or {}
+    unreg = ns.get("unregister_transform")
+    if callable(unreg):
+        try:
+            unreg(_CRAFT_TRANSFORM_NAME)
+        except Exception:
+            pass
+    else:
+        set_active = ns.get("set_transform_active")
+        if callable(set_active):
+            try:
+                set_active(_CRAFT_TRANSFORM_NAME, False)
+            except Exception:
+                pass
+
+
 def enable_pipe_transform(ipython: Any | None = None) -> bool:
     """Install multi-line ``>>`` rewriter (+ backtick preparser when R-style on).
 
@@ -147,6 +221,8 @@ def enable_pipe_transform(ipython: Any | None = None) -> bool:
         else:
             post.insert(0, tidy3_input_transformer)
     _TRANSFORMER = tidy3_input_transformer
+    # CRAFT path: same package owns the transform; core does not hard-code tidy3.
+    _craft_register_transform(active=True)
     return True
 
 
@@ -168,6 +244,7 @@ def disable_pipe_transform(ipython: Any | None = None) -> None:
                 t for t in transformers if not _is_tidy3_source_transformer(t)
             ]
     _TRANSFORMER = None
+    _craft_unregister_transform()
 
 
 def enable_r_style(ipython: Any | None = None) -> bool:
@@ -197,6 +274,7 @@ def enable_r_style(ipython: Any | None = None) -> bool:
     if isinstance(transformers, list):
         transformers[:] = [t for t in transformers if not is_mask_transformer(t)]
         transformers.append(Tidy3MaskTransformer())
+    _craft_register_transform(active=True)
     return True
 
 
@@ -217,6 +295,10 @@ def disable_r_style(ipython: Any | None = None) -> None:
     if isinstance(transformers, list):
         transformers[:] = [t for t in transformers if not is_mask_transformer(t)]
     enable_pipe_transform(ipython)
+    # Pipes may stay registered with CRAFT; R-style bang/backtick is off in
+    # the IPython preparser. Keep CRAFT transform active for pipe rewrite only
+    # while pipes are on — tidy3_craft_transform still no-ops on plain Python.
+    _craft_register_transform(active=True)
 
 
 # Names that other data grammars (datar/pipda, pandas, etc.) often put in
@@ -459,6 +541,7 @@ def unload_ipython_extension(ipython: Any) -> None:
     global _MAGICS_REGISTERED, _PRE_RUN_HOOK
     disable_r_style(ipython)
     disable_pipe_transform(ipython)
+    _craft_unregister_transform()
     try:
         if _PRE_RUN_HOOK is not None:
             ipython.events.unregister("pre_run_cell", _PRE_RUN_HOOK)

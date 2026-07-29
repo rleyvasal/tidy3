@@ -242,16 +242,40 @@ def rewrite_backtick_keyword_assigns(source: str) -> str:
     return "".join(out)
 
 
-def rewrite_bang_not(source: str) -> str:
-    """Rewrite R-style ``!`` (logical / selection not) to Python ``~``.
+# Verbs whose call *arguments* may use R-style ``!`` as tidy3 negation.
+# Outside these calls, ``!`` is left alone (Jupyter ``!pip``, shell, etc.).
+_TIDY3_BANG_VERBS = (
+    _EXPR_ARG_VERBS
+    | _ASSIGN_VERBS
+    | _SELECTOR_ARG_VERBS
+    | _GROUP_VERBS
+    | _COUNT_VERBS
+    | _RENAME_VERBS
+    | _SLICE_ORDER_VERBS
+    | _SLICE_BY_VERBS
+)
 
-    Leaves ``!=`` alone. Safe for both::
+
+def rewrite_bang_not(source: str) -> str:
+    """Rewrite R-style ``!`` to Python ``~`` **only inside tidy3 verb calls**.
+
+    Prefer ``~`` in user code — it is always valid Python and needs no rewrite.
+    ``!`` is optional sugar for R-like ergonomics *inside* tidy3 selectors /
+    expressions only::
 
         select(!starts_with("new"))   → select(~starts_with("new"))
         filter(!(mpg > 20))           → filter(~(mpg > 20))
 
+    Outside tidy3 contexts, ``!`` is left untouched so notebook shell
+    commands stay literal::
+
+        !pip install polars           → !pip install polars  (unchanged)
+        x = !ls                       → x = !ls              (unchanged)
+
+    Always leaves ``!=`` and string contents alone.
+
     :class:`~tidy3.expr.Expr` and :class:`~tidy3.tidyselect.Selector` both
-    implement ``__invert__``.
+    implement ``__invert__`` (used by ``~`` / rewritten ``!``).
     """
     if "!" not in source:
         return source
@@ -259,6 +283,17 @@ def rewrite_bang_not(source: str) -> str:
     i = 0
     n = len(source)
     in_str: str | None = None
+    # True for each paren depth opened by a tidy3 verb call.
+    tidy_stack: list[bool] = []
+    last_ident: str | None = None
+    ident_chars: list[str] = []
+
+    def _flush_ident() -> None:
+        nonlocal last_ident, ident_chars
+        if ident_chars:
+            last_ident = "".join(ident_chars)
+            ident_chars = []
+
     while i < n:
         c = source[i]
         if in_str is not None:
@@ -272,29 +307,84 @@ def rewrite_bang_not(source: str) -> str:
             i += 1
             continue
         if c in ("'", '"'):
+            _flush_ident()
+            last_ident = None
             in_str = c
             out.append(c)
             i += 1
             continue
+        if c == "#":
+            # Line comment — copy through newline; never rewrite bangs here.
+            _flush_ident()
+            last_ident = None
+            while i < n:
+                out.append(source[i])
+                if source[i] == "\n":
+                    i += 1
+                    break
+                i += 1
+            continue
+        if c == ".":
+            # Attribute: ``obj.select(`` still counts (last_ident becomes select).
+            _flush_ident()
+            # Keep last_ident only for the attribute name that follows.
+            last_ident = None
+            out.append(c)
+            i += 1
+            continue
+        if c.isalpha() or c == "_" or (ident_chars and c.isdigit()):
+            # Identifier start (letter/_) or continuation (alnum/_)
+            ident_chars.append(c)
+            out.append(c)
+            i += 1
+            continue
+        if c == "(":
+            _flush_ident()
+            is_tidy = last_ident in _TIDY3_BANG_VERBS if last_ident else False
+            tidy_stack.append(is_tidy)
+            last_ident = None
+            out.append(c)
+            i += 1
+            continue
+        if c == ")":
+            _flush_ident()
+            last_ident = None
+            if tidy_stack:
+                tidy_stack.pop()
+            out.append(c)
+            i += 1
+            continue
         if c == "!":
+            _flush_ident()
+            last_ident = None
             if i + 1 < n and source[i + 1] == "=":
                 out.append("!=")
                 i += 2
                 continue
-            out.append("~")
+            # Only tidy3-context negation; never touch shell / other Python.
+            if any(tidy_stack):
+                out.append("~")
+            else:
+                out.append("!")
             i += 1
             continue
+        # Other punctuation / whitespace ends an identifier.
+        _flush_ident()
+        if c not in " \t\n":
+            last_ident = None
         out.append(c)
         i += 1
     return "".join(out)
 
 
 def rewrite_backticks(source: str) -> str:
-    """Preparse R-style tokens for Python.
+    """Preparse R-style tokens for Python (tidy3 contexts only for ``!``).
 
-    1. ``!`` → ``~`` (selection / logical not; not ``!=``)
+    1. ``!`` → ``~`` inside tidy3 verb args only (not shell ``!pip``, not ``!=``)
     2. `` `new col` = expr `` → ``__tidy3_assign__("new col", (expr))``
     3. remaining `` `col` `` → ``__tidy3_bt__("col")``
+
+    Prefer writing ``~`` for negation — it needs no preparser.
     """
     source = rewrite_bang_not(source)
     source = rewrite_backtick_keyword_assigns(source)
@@ -331,7 +421,11 @@ def _is_assign_call(node: ast.AST) -> bool:
 
 
 def tidy3_backtick_transform(lines: list[str]) -> list[str]:
-    """IPython input transformer: R-style preparser (``!``, backticks)."""
+    """IPython input transformer: R-style preparser (tidy3 ``!``, backticks).
+
+    ``!`` is rewritten to ``~`` only inside tidy3 verb calls so Jupyter shell
+    cells (``!pip install …``) stay literal. Prefer ``~`` in user code.
+    """
     if not lines:
         return lines
     src = "".join(lines)

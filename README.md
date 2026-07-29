@@ -290,9 +290,10 @@ laptop work.
 ```
 
 That puts `src/` on the path, injects the API, and turns on multi-line `>>`
-plus R-style bare names / backticks / `!`. If CRAFT is already loaded (or
-becomes connected on `%gpu`), the same cell also registers remote seeding —
-no second command.
+plus R-style bare names / backticks / `~` (optional `!` sugar only inside
+tidy3 verb calls — shell cells like `!pip install` are never rewritten). If
+CRAFT is already loaded (or becomes connected on `%gpu`), the same cell also
+registers remote seeding — no second command.
 
 ```text
 %local
@@ -373,9 +374,13 @@ omit many `col("…")` / quotes:
 ```python
 cars >> filter(mpg > 20) >> mutate(z = if_else(cyl > 4, 1, 0))
 cars_space >> mutate(x = `hp new` / cyl) >> select(`hp new`, x)
+cars >> select(~starts_with("tmp_"))   # prefer ~ for negation
+cars >> select(!starts_with("tmp_"))   # optional Jupyter sugar → ~ (tidy3 only)
 ggplot(df, aes(x=wt, y=mpg)) + geom_point()          # with plot3
 ggplot(df, aes(x=`First Name`, y=mpg)) + geom_point()
 ```
+
+`!pip install …` and other notebook shell commands are **not** rewritten.
 
 - **Expression context** (`filter`, `mutate` RHS, …): bare name → `col("name")`
 - **Selector context** (`select`, `group_by`, …): bare name → `"name"`
@@ -499,13 +504,13 @@ polars-specific raises a clear error pointing back to `backend="polars"`.
 
 Selectors work anywhere columns are selected by `select`, `drop`, `relocate`,
 or `rename_with`. Combine them with `|` (union), `&` (intersection), `-`
-(difference), or `~` (complement):
+(difference), or `~` (complement / negation):
 
 ```python
 tidy(df)
 >> select("id", starts_with("measure_"), last_col())
->> select(!starts_with("tmp_"))            # Jupyter: ! → ~ ; or use ~starts_with
->> select(where(is_numeric) & !starts_with("id"))
+>> select(~starts_with("tmp_"))            # preferred: Python-native invert
+>> select(where(is_numeric) & ~starts_with("id"))
 >> select(cols_between("mpg", "hp"))       # inclusive column range
 
 tidy(df)
@@ -514,6 +519,14 @@ tidy(df)
 tidy(df)
 >> relocate(where(is_numeric), after="label")
 ```
+
+**Negation: prefer `~`.** It is always valid Python (`Expr` / `Selector`
+implement `__invert__`) and works in scripts, notebooks, and exports with no
+preparser.
+
+In Jupyter/SolveIt only, `!` is optional R-like sugar **inside tidy3 verb
+calls** (e.g. `select(!starts_with("tmp_"))` → `~`). Outside tidy3 contexts
+`!` is left alone so shell cells stay literal (`!pip install …`).
 
 `where` receives column dtypes; portable predicates include `is_numeric`,
 `is_string`, `is_boolean`, and `is_temporal`. `all_of(names)` is strict about

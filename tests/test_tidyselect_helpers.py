@@ -77,6 +77,49 @@ def test_bang_preparser():
     )
     assert rewrite_bang_not("filter(mpg != 20)") == "filter(mpg != 20)"
     assert rewrite_bang_not('x = "a!b"') == 'x = "a!b"'
+    # Nested inside tidy3 verb still rewrites
+    assert rewrite_bang_not(
+        'select(where(is_numeric) & !starts_with("id"))'
+    ) == 'select(where(is_numeric) & ~starts_with("id"))'
+    assert rewrite_bang_not("filter(!(mpg > 20))") == "filter(~(mpg > 20))"
+    # Attribute form: df.select / verbs.select
+    assert rewrite_bang_not('df.select(!starts_with("x"))') == (
+        'df.select(~starts_with("x"))'
+    )
+
+
+def test_bang_preparser_leaves_shell_and_non_tidy3():
+    """Notebook shell / non-tidy3 ``!`` must stay literal (no global rewrite)."""
+    assert rewrite_bang_not("!pip install polars") == "!pip install polars"
+    assert rewrite_bang_not("!pip install -U tidy3\n") == "!pip install -U tidy3\n"
+    assert rewrite_bang_not("!!ls -la") == "!!ls -la"
+    assert rewrite_bang_not("x = !ls") == "x = !ls"
+    assert rewrite_bang_not("  !cd /tmp && pwd") == "  !cd /tmp && pwd"
+    # Non-tidy3 call — not our sugar
+    assert rewrite_bang_not("print(!foo)") == "print(!foo)"
+    assert rewrite_bang_not("my_func(!starts_with('x'))") == (
+        "my_func(!starts_with('x'))"
+    )
+    # Comment with bang outside tidy3
+    assert rewrite_bang_not("# use !pip to install\nx = 1") == (
+        "# use !pip to install\nx = 1"
+    )
+    # Mixed cell: shell line + tidy3 line
+    mixed = '!pip install polars\nselect(!starts_with("tmp_"))\n'
+    assert rewrite_bang_not(mixed) == (
+        '!pip install polars\nselect(~starts_with("tmp_"))\n'
+    )
+
+
+def test_backtick_transform_preserves_shell_pip():
+    from tidy3.masking import tidy3_backtick_transform
+
+    lines = ["!pip install polars\n"]
+    assert tidy3_backtick_transform(lines) == lines
+    lines2 = ['select(!starts_with("new"))\n']
+    out2 = "".join(tidy3_backtick_transform(lines2))
+    assert "~starts_with" in out2
+    assert "!" not in out2 or "!=" in out2
 
 
 def test_masking_select_bang_starts_with():

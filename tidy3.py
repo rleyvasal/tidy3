@@ -11,7 +11,8 @@ What this does (always):
 1. Puts ``src/`` on ``sys.path`` (editable checkout, no pip install needed)
 2. Fresh-imports tidy3 so a ``git pull`` takes effect
 3. Injects the public API into the IPython user namespace
-4. Enables multi-line ``>>`` pipes + R-style bare names / backticks / ``!``
+4. Enables multi-line ``>>`` pipes + R-style bare names / backticks / ``~``
+   (optional ``!`` sugar only inside tidy3 verb calls — never shell ``!pip``)
 
 What this does **only when CRAFT is present** (auto-detected):
 
@@ -286,7 +287,7 @@ print(
 )
 print(
     "  multi-line >> auto-rewritten when pipe transformer is ON\n"
-    "  bare names / backticks / !  (R-style masking)\n"
+    "  bare names / backticks / ~  (R-style masking; ! sugar only in tidy3 verbs)\n"
     "  %tidy3_pipes on|off|status    %tidy3_mask on|off|status\n"
     "  GPU: same %run; seeds remote when CRAFT is connected "
     "(seed_tidy3_remote(force=True) after kernel restart)\n"
