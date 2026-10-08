@@ -226,7 +226,11 @@ result <- switch(
         recoded=recode(code, `1`="one", `2`="two", .default="other", .missing="missing")
       ),
       longer=tibble(text=c("a|b", "c")) |> separate_longer_delim(text, delim="|"),
-      wider=tibble(text=c("a|b", "c")) |> separate_wider_delim(text, names=c("left", "right"), delim="|")
+      wider=tibble(text=c("a|b", "c")) |> separate_wider_delim(text, names=c("left", "right"), delim="|", too_few="align_start"),
+      merged=tibble(id=1:3, text=c("a|b|c", "d", NA), z=1:3) |>
+        separate_wider_delim(text, names=c("left", "right"), delim="|", too_few="align_end", too_many="merge"),
+      dropped=tibble(id=1:3, text=c("a|b|c", "d", NA), z=1:3) |>
+        separate_wider_delim(text, names=c("left", "right"), delim="|", too_few="align_start", too_many="drop")
     )
   },
   stop(sprintf("unknown oracle case: %s", case_name))

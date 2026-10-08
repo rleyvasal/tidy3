@@ -10,27 +10,33 @@ dplyr-style **lazy** data manipulation for Python, powered by [Polars](https://p
 CRAFT/`%gpu` is an optional remote path. The default product surface is a normal
 Python environment on your machine.
 
-## Install (local)
+## Install
 
 ```bash
-cd /path/to/tidy3
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+pip install "tidy3[jupyter]"
 ```
 
 Optional extras:
 
+| Extra | Adds |
+|---|---|
+| `jupyter` | IPython extension for multi-line `>>` pipes |
+| `plot3` | [plot3](https://github.com/rleyvasal/plot3) for `>> ggplot(...)` |
+| `excel` | `write_excel` |
+
+The latest unreleased code installs straight from GitHub:
+
 ```bash
-pip install -e ".[jupyter]"        # IPython extension for multi-line >> pipes
-pip install -e ".[excel]"          # write_excel
-# plot3 is a separate package — clone it and pip install -e that repo if you plot
+pip install "tidy3[jupyter] @ git+https://github.com/rleyvasal/tidy3"
 ```
 
-Verify:
+To work on tidy3 itself:
 
 ```bash
-python -c "import tidy3; print(tidy3.__version__)"
+git clone https://github.com/rleyvasal/tidy3 && cd tidy3
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -e ".[dev,jupyter]"
 python -m pytest -q
 ```
 
@@ -246,10 +252,10 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 
 ## plot3 (optional)
 
-plot3 is a **separate** project. Install it in the same venv if you use it:
+plot3 is a **separate** package. Install it with tidy3's `plot3` extra:
 
 ```bash
-pip install -e /path/to/plot3
+pip install "tidy3[plot3]"
 ```
 
 ```python
@@ -438,7 +444,7 @@ ln -sfn /path/to/tidy3 tidy3
 ln -sfn /path/to/plot3 plot3
 ```
 
-## API (v0.2)
+## API
 
 | Area | Symbols |
 |------|---------|
@@ -1012,7 +1018,7 @@ python -m pytest -q
 
 CI (GitHub Actions):
 
-- **Tests** — `pytest` on Python 3.10–3.12 for every push/PR; optional **R
+- **Tests** — `pytest` on Python 3.10–3.14 for every push/PR; optional **R
   semantic oracle** job installs dplyr/tidyr/jsonlite and runs the differential
   suite
 - **Performance budget** — `python -m tidy3.bench_suite` geometric ratios vs raw
@@ -1026,8 +1032,7 @@ On a machine without R, oracle tests skip automatically. To run them locally:
 pytest -q tests/test_r_oracle_parity.py
 ```
 
-Uncommitted work on `expand-dplyr-parity` is staged in logical commits via
-`docs/commit-plan-expand-dplyr-parity.md`.
+Releases go to PyPI from a version tag; see [docs/releasing.md](docs/releasing.md).
 
 ## Notes
 

@@ -372,11 +372,11 @@ def is_float(dtype: Any) -> bool:
 
 def is_string(dtype: Any) -> bool:
     """True for text / string columns."""
-    if dtype == pl.String or dtype is pl.String:
-        return True
+    # Never compare with ``==`` here: NumPy's object dtype (pandas 2 text
+    # columns) compares equal to every Polars dtype class.
     pdt = _polars_dtype(dtype)
-    if pdt is not None and type(pdt) is pl.String:
-        return True
+    if pdt is not None:
+        return type(pdt) is pl.String
     try:
         from pandas.api.types import is_string_dtype
 
@@ -392,11 +392,9 @@ def is_character(dtype: Any) -> bool:
 
 def is_boolean(dtype: Any) -> bool:
     """True for boolean columns."""
-    if dtype == pl.Boolean or dtype is pl.Boolean:
-        return True
     pdt = _polars_dtype(dtype)
-    if pdt is not None and type(pdt) is pl.Boolean:
-        return True
+    if pdt is not None:
+        return type(pdt) is pl.Boolean
     try:
         from pandas.api.types import is_bool_dtype
 
@@ -454,8 +452,6 @@ def is_categorical(dtype: Any) -> bool:
         name = type(pdt).__name__
         if name in {"Categorical", "Enum"}:
             return True
-    if dtype is pl.Categorical or dtype == pl.Categorical:
-        return True
     try:
         import pandas as pd
 

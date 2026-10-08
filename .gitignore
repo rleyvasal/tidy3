@@ -9,3 +9,7 @@ build/
 .mypy_cache/
 .ruff_cache/
 .DS_Store
+
+# Output written by the examples
+examples/output/
+examples/.plot3_preview/

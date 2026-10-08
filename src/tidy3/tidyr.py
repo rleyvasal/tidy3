@@ -161,14 +161,16 @@ def fill(
                     )[selected].transform(method)
                 return getattr(frame[selected], method)()
 
+            # Replace whole columns: writing through .loc into a shallow
+            # copy changes the caller's frame on pandas 2 (no copy-on-write).
             if direction in {"down", "downup"}:
-                pdf.loc[:, selected] = apply_direction(pdf, "ffill")
+                pdf[selected] = apply_direction(pdf, "ffill")
             if direction in {"up", "updown"}:
-                pdf.loc[:, selected] = apply_direction(pdf, "bfill")
+                pdf[selected] = apply_direction(pdf, "bfill")
             if direction == "downup":
-                pdf.loc[:, selected] = apply_direction(pdf, "bfill")
+                pdf[selected] = apply_direction(pdf, "bfill")
             elif direction == "updown":
-                pdf.loc[:, selected] = apply_direction(pdf, "ffill")
+                pdf[selected] = apply_direction(pdf, "ffill")
             return tf._with_pdf(
                 pdf, groups=None if transient else tf._groups
             )
@@ -473,8 +475,15 @@ def pivot_longer(
             variable_name=variable,
             value_name=values_to,
         )
+        # Sort explicitly: unpivot()'s row order changed in Polars 2.
         if cols_vary == "fastest":
             lf = lf.sort(row, maintain_order=True)
+        else:
+            position = pl.col(variable).replace_strict(
+                {name: index for index, name in enumerate(pivoted)},
+                return_dtype=pl.UInt32,
+            )
+            lf = lf.sort(position, row, maintain_order=True)
         name_expression = pl.col(variable)
         if names_prefix:
             name_expression = name_expression.str.replace(
@@ -1400,16 +1409,22 @@ def separate_wider_delim(
     names: list[str] | tuple[str, ...],
     delim: str,
     *,
-    too_few: str = "align_start",
+    too_few: str = "error",
     too_many: str = "error",
 ) -> Verb:
-    """Split one delimited column into named columns."""
+    """Split one delimited column into named columns, like tidyr.
+
+    ``too_few`` is ``error`` (default), ``align_start``, or ``align_end``;
+    ``too_many`` is ``error`` (default), ``drop``, or ``merge`` (the extra
+    pieces stay joined in the last column). Missing values stay missing.
+    """
     if not names:
         raise TypeError("separate_wider_delim() requires output names")
     if too_few not in {"align_start", "align_end", "error"}:
         raise ValueError("too_few must be align_start, align_end, or error")
-    if too_many not in {"error", "merge"}:
-        raise ValueError("too_many must be error or merge")
+    if too_many not in {"error", "drop", "merge"}:
+        raise ValueError("too_many must be error, drop, or merge")
+    width = len(names)
 
     def _apply(tf):
         import pandas as pd
@@ -1420,19 +1435,48 @@ def separate_wider_delim(
             raise ValueError("separate_wider_delim() requires one column")
         source = selected[0]
         pdf = tf.collect(as_="pandas").copy()
-        pieces = pdf[source].map(
-            lambda value: str(value).split(delim) if value is not None else []
-        )
-        if too_many == "error" and pieces.map(len).gt(len(names)).any():
-            raise ValueError("too_many values in separate_wider_delim()")
+        present = pdf[source].notna()
+        pieces = [
+            str(value).split(delim) if keep else None
+            for value, keep in zip(pdf[source], present)
+        ]
+        counts = [len(values) for values in pieces if values is not None]
+        too_short = sum(count < width for count in counts)
+        too_long = sum(count > width for count in counts)
+        if too_few == "error" and too_short:
+            raise ValueError(
+                f"separate_wider_delim() expected {width} pieces in each value "
+                f"of {source!r}; {too_short} value(s) had fewer. "
+                'Use too_few="align_start" or "align_end" to fill with missing.'
+            )
+        if too_many == "error" and too_long:
+            raise ValueError(
+                f"separate_wider_delim() expected {width} pieces in each value "
+                f"of {source!r}; {too_long} value(s) had more. "
+                'Use too_many="drop" or "merge".'
+            )
+
         def align(values):
-            values = values[: len(names)] if too_many == "merge" else values
-            if len(values) < len(names):
-                pad = [None] * (len(names) - len(values))
-                values = pad + values if too_few == "align_end" else values + pad
-            return values
-        expanded = pd.DataFrame(pieces.map(align).tolist(), columns=list(names), index=pdf.index)
-        pdf = pd.concat([pdf.drop(columns=source), expanded], axis=1)
+            if values is None:
+                return [None] * width
+            if len(values) > width:
+                if too_many == "merge":
+                    return [*values[: width - 1], delim.join(values[width - 1 :])]
+                return values[:width]
+            pad = [None] * (width - len(values))
+            return pad + values if too_few == "align_end" else values + pad
+
+        expanded = pd.DataFrame(
+            [align(values) for values in pieces],
+            columns=list(names),
+            index=pdf.index,
+            dtype=object,
+        )
+        # The new columns take the place of the split one, as in tidyr.
+        at = pdf.columns.get_loc(source)
+        pdf = pd.concat(
+            [pdf.iloc[:, :at], expanded, pdf.iloc[:, at + 1 :]], axis=1
+        )
         return tidy(pdf, backend=tf._backend)
 
     return Verb(_apply, "separate_wider_delim")

@@ -2,21 +2,14 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import polars as pl
 import pytest
-
-PLOT3_ROOT = Path.home() / "plot3"
-if PLOT3_ROOT.is_dir() and str(PLOT3_ROOT) not in sys.path:
-    sys.path.insert(0, str(PLOT3_ROOT))
 
 pytest.importorskip("plot3")
 
 from plot3 import aes, geom_point, ggplot  # noqa: E402
 
-from tidy3 import col, filter, select, tidy  # noqa: E402
+from tidy3 import TidyFrame, col, filter, select, tidy  # noqa: E402
 from tidy3.partial_run import maybe_rewrite_cell  # noqa: E402
 
 
@@ -44,7 +37,9 @@ def test_pipeable_ggplot_binds_tidyframe_after_layers():
     g = tidy(df) >> template
 
     assert template.data is None
-    assert g.data["x"].tolist() == [0.0, 1.0]
+    # plot3 keeps the TidyFrame as is rather than converting it to pandas.
+    assert isinstance(g.data, TidyFrame)
+    assert g.data.to_pandas()["x"].tolist() == [0.0, 1.0]
     assert len(g.layers) == 1
     assert len(g.html()) > 100
 
@@ -56,7 +51,7 @@ def test_pipeable_ggplot_operator_precedence_and_direct_frames():
     from_polars = pl.from_pandas(pdf) >> ggplot(aes(x="x", y="y")) + geom_point()
 
     assert from_pandas.data.equals(pdf)
-    assert from_polars.data.equals(pdf)
+    assert from_polars.data.equals(pl.from_pandas(pdf))
 
 
 def test_unbound_ggplot_has_clear_error():

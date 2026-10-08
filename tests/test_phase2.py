@@ -358,10 +358,15 @@ def test_tidyr_struct_and_delimited_helpers(backend):
     )
     longer = data >> separate_longer_delim("code", "|")
     assert longer.collect(as_="pandas")["code"].tolist() == ["a", "b", "c"]
-    wider = data >> separate_wider_delim("code", ["left", "right"], "|")
+    wider = data >> separate_wider_delim(
+        "code", ["left", "right"], "|", too_few="align_start"
+    )
     wider_out = wider.collect(as_="pandas")
+    assert list(wider_out.columns[:4]) == ["id", "left", "right", "x"]
     assert wider_out["right"].iloc[0] == "b"
     assert pd.isna(wider_out["right"].iloc[1])
+    with pytest.raises(ValueError, match="too_few"):
+        data >> separate_wider_delim("code", ["left", "right"], "|")
     extracted = data >> hoist("obj", score="score")
     assert extracted.collect(as_="pandas")["score"].tolist() == [3, 4]
     packed = data >> pack("xy", "x", "y")

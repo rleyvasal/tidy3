@@ -197,7 +197,7 @@ from tidy3.verbs import (
     with_groups,
 )
 
-__version__ = "0.2.0"
+from tidy3.__version__ import __version__
 
 __all__ = [
     "TidyFrame",

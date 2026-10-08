@@ -92,6 +92,16 @@ def test_fill_uses_persistent_groups_and_preserves_grouping(backend):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("direction", ["down", "up", "downup", "updown"])
+def test_fill_leaves_the_input_frame_unchanged(backend, direction):
+    frame = tidy(pd.DataFrame({"x": [None, 2.0, None]}), backend=backend)
+
+    frame >> fill("x", direction=direction)
+
+    assert pd.isna(as_pandas(frame)["x"]).tolist() == [True, False, True]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_pivot_longer_default_order_prefix_and_drop_na(backend):
     frame = tidy(
         {

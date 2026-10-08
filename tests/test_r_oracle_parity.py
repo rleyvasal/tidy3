@@ -105,7 +105,14 @@ def _r_command() -> list[str] | None:
     if manifest and pixi:
         return [pixi, "run", "--manifest-path", manifest, "Rscript"]
     rscript = shutil.which("Rscript")
-    return [rscript] if rscript else None
+    if rscript is None:
+        return None
+    # R alone is not enough: skip unless the packages the cases use load.
+    probe = subprocess.run(
+        [rscript, "-e", "library(dplyr); library(tidyr); library(jsonlite)"],
+        capture_output=True,
+    )
+    return [rscript] if probe.returncode == 0 else None
 
 
 R_COMMAND = _r_command()
@@ -686,9 +693,22 @@ def _new_helpers(backend: str):
         "text", "|"
     )
     wider = tidy({"text": ["a|b", "c"]}, backend=backend) >> separate_wider_delim(
-        "text", ["left", "right"], "|"
+        "text", ["left", "right"], "|", too_few="align_start"
     )
-    return {"labels": labels, "longer": longer, "wider": wider}
+    edges = tidy({"id": [1, 2, 3], "text": ["a|b|c", "d", None], "z": [1, 2, 3]}, backend=backend)
+    merged = edges >> separate_wider_delim(
+        "text", ["left", "right"], "|", too_few="align_end", too_many="merge"
+    )
+    dropped = edges >> separate_wider_delim(
+        "text", ["left", "right"], "|", too_few="align_start", too_many="drop"
+    )
+    return {
+        "labels": labels,
+        "longer": longer,
+        "wider": wider,
+        "merged": merged,
+        "dropped": dropped,
+    }
 
 
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
@@ -813,7 +833,9 @@ def test_every_public_frame_verb_has_a_parity_classification():
         "separate_longer_delim",
         "separate_wider_delim",
     }
-    assert public == differential | expected_gap_verbs | INVARIANT_ONLY
+    # Column-name helpers from janitor and rlang, not dplyr or tidyr.
+    not_dplyr = {"clean_names", "make_clean_names", "set_names"}
+    assert public == differential | expected_gap_verbs | INVARIANT_ONLY | not_dplyr
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

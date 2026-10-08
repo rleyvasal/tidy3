@@ -1217,8 +1217,7 @@ class TidyFrame:
             from plot3 import ggplot
         except ImportError as e:
             raise ImportError(
-                "plot3 is not installed. Clone https://github.com/rleyvasal/plot3 "
-                "or ensure plot3 is on PYTHONPATH."
+                "plot3 is not installed: pip install plot3"
             ) from e
         return ggplot(self.to_pandas(), mapping, **kwargs)
 

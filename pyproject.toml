@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tidy3"
-version = "0.2.0"
+dynamic = ["version"]
 description = "dplyr-style lazy data manipulation on Polars, with R-like partial pipeline run"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "rleyvasal" }]
+license-files = ["LICENSE"]
+authors = [{ name = "Rigoberto Leyva Salmeron" }]
 keywords = ["dplyr", "polars", "dataframe", "tidyverse", "lazy"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -25,13 +26,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "plot3>=0.4.0"]
 jupyter = ["ipython>=8.0"]
-plot3 = []  # plot3 is optional external; bridge imports if present
+plot3 = ["plot3>=0.4.0"]
 excel = ["xlsxwriter>=3.0"]
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/tidy3"
+Changelog = "https://github.com/rleyvasal/tidy3/blob/main/CHANGELOG.md"
+
+[tool.setuptools.dynamic]
+version = { attr = "tidy3.__version__.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
