@@ -869,6 +869,29 @@ def _ordering(backend: str):
     }
 
 
+def _grids(backend: str):
+    import tidy3 as t3
+
+    df = tidy({"a": [2, 1, 2], "b": ["v", "u", "v"]}, backend=backend)
+    counts = tidy({"x": ["a", "b", "c"], "n": [1.0, 0.0, 2.0]}, backend=backend)
+    obs = tidy(
+        {"country": ["A", "A", "B"], "year": [1952, 1962, 1957], "pop": [1.0, 2.0, 3.0]},
+        backend=backend,
+    )
+    return {
+        "expand_grid": t3.expand_grid(x=[3.0, 1.0, 3.0], y=["b", "a"]),
+        "expand_grid_frame": t3.expand_grid(df, z=[1, 2]),
+        "crossing": t3.crossing(x=[3.0, 1.0, 3.0, None], y=["b", "a"]),
+        "crossing_frame": t3.crossing(df, z=[2, 1]),
+        "uncounted": counts >> t3.uncount("n"),
+        "uncounted_id": counts >> t3.uncount("n", id="copy"),
+        "uncounted_kept": counts >> t3.uncount("n", remove=False),
+        "sequence": pd.DataFrame({"value": t3.full_seq([1.0, 2.0, 4.0, 5.0, 10.0], 1)}),
+        "completed": obs >> complete("country", year=t3.full_seq("year", 5)),
+        "expanded": obs >> expand("country", year=t3.full_seq("year", 5)),
+    }
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "filter_missing": _filter_missing,
     "filter_out_missing": _filter_out_missing,
@@ -919,6 +942,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "dplyr_12_helpers": _dplyr_12_helpers,
     "group_info": _group_info,
     "ordering": _ordering,
+    "grids": _grids,
 }
 
 
@@ -954,6 +978,7 @@ CASE_VERBS = {
     "dplyr_12_helpers": {"mutate", "filter"},
     "group_info": {"group_split", "group_modify", "group_nest"},
     "ordering": {"mutate"},
+    "grids": {"expand_grid", "crossing", "uncount", "full_seq", "complete", "expand"},
 }
 
 

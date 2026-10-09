@@ -24,6 +24,10 @@ under **Changed**.
 - `order_by()` and `with_order()`: compute a window expression as if the
   rows were sorted (`order_by("year", col("value").cum_sum())`), with results
   in the original row order; missing keys sort last and ties keep their order.
+- tidyr's `expand_grid()`, `crossing()`, `uncount()`, and `full_seq()`.
+  `expand()` and `complete()` take named values, as in
+  `complete("country", year=full_seq("year", 5))`; the values keep the
+  column's type (R would turn a whole-number column into decimals).
 
 ### Changed
 

@@ -127,6 +127,10 @@ from tidy3.tidyselect import (
     where,
 )
 from tidy3.tidyr import (
+    crossing,
+    expand_grid,
+    full_seq,
+    uncount,
     complete,
     drop_na,
     expand,
@@ -298,6 +302,10 @@ __all__ = [
     "group_split",
     "group_cols",
     "group_vars",
+    "crossing",
+    "expand_grid",
+    "full_seq",
+    "uncount",
     "group_data",
     "group_indices",
     "group_keys",

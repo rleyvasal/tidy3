@@ -319,6 +319,24 @@ result <- switch(
       ) |> ungroup()
     )
   },
+  grids = {
+    df <- tibble(a=c(2L, 1L, 2L), b=c("v", "u", "v"))
+    counts <- tibble(x=c("a", "b", "c"), n=c(1, 0, 2))
+    obs <- tibble(country=c("A", "A", "B"), year=c(1952L, 1962L, 1957L), pop=c(1, 2, 3))
+    list(
+      expand_grid=expand_grid(x=c(3, 1, 3), y=c("b", "a")),
+      expand_grid_frame=expand_grid(df, z=1:2),
+      crossing=crossing(x=c(3, 1, 3, NA), y=c("b", "a")),
+      crossing_frame=crossing(df, z=c(2L, 1L)),
+      uncounted=uncount(counts, n),
+      uncounted_id=uncount(counts, n, .id="copy"),
+      uncounted_kept=uncount(counts, n, .remove=FALSE),
+      sequence=tibble(value=full_seq(c(1, 2, 4, 5, 10), 1)),
+      # tidy3 keeps year's whole-number type; R's full_seq() would make it double.
+      completed=obs |> complete(country, year=as.integer(full_seq(year, 5))),
+      expanded=obs |> expand(country, year=as.integer(full_seq(year, 5)))
+    )
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 

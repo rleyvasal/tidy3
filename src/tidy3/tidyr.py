@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 import warnings
 from dataclasses import dataclass
@@ -23,6 +24,87 @@ def nesting(*cols: Any) -> Nesting:
     if not cols:
         raise TypeError("nesting() requires at least one column")
     return Nesting(tuple(cols))
+
+
+@dataclass(frozen=True)
+class FullSeq:
+    """``full_seq("year", 1)``: filled in against a frame's column."""
+
+    column: str
+    period: float
+    tol: float
+
+
+def full_seq(x: Any, period: float, tol: float = 1e-6) -> Any:
+    """Every value from ``min(x)`` to ``max(x)`` in steps of ``period``.
+
+    Give a column name inside ``expand()``/``complete()``
+    (``complete("country", year=full_seq("year", 1))``), or values for a
+    plain list (``full_seq([1, 2, 5], 1)`` is ``[1, 2, 3, 4, 5]``). Raises
+    if ``x`` has missing values or is not on a regular grid, like tidyr.
+    """
+    if not period or period <= 0:
+        raise ValueError("full_seq() period must be a positive number")
+    if isinstance(x, str):
+        return FullSeq(x, float(period), float(tol))
+    return _full_seq_values(list(x), period, tol)
+
+
+def _full_seq_values(values: list[Any], period: float, tol: float) -> list[Any]:
+    import math
+
+    if any(v is None or (isinstance(v, float) and math.isnan(v)) for v in values):
+        raise ValueError("full_seq() x must not contain missing values")
+    if not values:
+        return []
+    numbers = [float(v) for v in values]
+    low, high = min(numbers), max(numbers)
+    for value in numbers:
+        offset = (value - low) % period
+        if offset > tol and period - offset > tol:
+            raise ValueError("full_seq() x is not a regular sequence")
+    count = int(round((high - low) / period))
+    # Decimal numbers, like R's full_seq(); expand()/complete() then cast to
+    # the column's own type, so a whole-number year column stays whole.
+    return [low + index * period for index in range(count + 1)]
+
+
+def _value_list(tf: Any, name: str, spec: Any) -> list[Any]:
+    """Unique sorted values for a named ``expand()``/``complete()`` input."""
+    if isinstance(spec, FullSeq):
+        column = tf.collect(as_="pandas")[spec.column]
+        return _full_seq_values(column.dropna().tolist(), spec.period, spec.tol)
+    values = list(spec.tolist() if hasattr(spec, "tolist") else spec)
+    return _unique_sorted(values)
+
+
+def _is_missing(value: Any) -> bool:
+    return value is None or (isinstance(value, float) and value != value)
+
+
+def _unique_sorted(values: list[Any]) -> list[Any]:
+    """tidyr's crossing order: distinct values sorted, missing last."""
+    present = sorted({v for v in values if not _is_missing(v)})
+    return [*present, None] if any(_is_missing(v) for v in values) else present
+
+
+def _named_values_frame(tf: Any, name: str, values: list[Any], backend: str) -> Any:
+    """One-column frame of *values*, cast to the column's type when present."""
+    if backend == "pandas":
+        import pandas as pd
+
+        frame = pd.DataFrame({name: values})
+        if name in tf._pdf.columns:
+            try:
+                frame[name] = frame[name].astype(tf._pdf[name].dtype)
+            except (TypeError, ValueError):
+                pass
+        return frame
+    frame = pl.DataFrame({name: values}, strict=False).lazy()
+    schema = tf._lf.collect_schema()
+    if name in schema:
+        frame = frame.with_columns(pl.col(name).cast(schema[name], strict=False))
+    return frame
 
 
 def _columns(tf: Any) -> list[str]:
@@ -216,15 +298,21 @@ def _expansion_units(tf: Any, specs: tuple[Any, ...]) -> list[list[str]]:
     return units
 
 
-def expand(*cols: Any) -> Verb:
-    """Generate observed-value combinations, within groups when grouped."""
-    if not cols:
+def expand(*cols: Any, **values: Any) -> Verb:
+    """Generate observed-value combinations, within groups when grouped.
+
+    Named inputs give the values to use instead of the observed ones, as in
+    tidyr: ``expand("country", year=full_seq("year", 1))``.
+    """
+    if not cols and not values:
         raise TypeError("expand() requires at least one column")
+    named_specs = dict(values)
 
     def _apply(tf):
         units = _expansion_units(tf, cols)
         groups = list(tf._groups or [])
-        selected = [name for unit in units for name in unit]
+        named = {name: _value_list(tf, name, spec) for name, spec in named_specs.items()}
+        selected = [name for unit in units for name in unit] + list(named)
         overlap = [name for name in selected if name in groups]
         if overlap:
             raise ValueError(
@@ -247,8 +335,11 @@ def expand(*cols: Any) -> Verb:
                         result = values
                     else:
                         result = result.merge(values, how="cross")
-                if result is None:
-                    result = pdf.iloc[:0, :0]
+            for name, listed in named.items():
+                frame = _named_values_frame(tf, name, listed, "pandas")
+                result = frame if result is None else result.merge(frame, how="cross")
+            if result is None:
+                result = pdf.iloc[:0, :0]
             ordered = [*groups, *selected]
             result = result.loc[:, ordered].sort_values(
                 ordered, kind="stable", na_position="last"
@@ -273,8 +364,11 @@ def expand(*cols: Any) -> Verb:
                     if result is None
                     else result.join(values, how="cross")
                 )
-            if result is None:
-                result = tf._lf.select([]).head(0)
+        for name, listed in named.items():
+            frame = _named_values_frame(tf, name, listed, "polars")
+            result = frame if result is None else result.join(frame, how="cross")
+        if result is None:
+            result = tf._lf.select([]).head(0)
         ordered = [*groups, *selected]
         return tf._with_lf(
             result.select(ordered).sort(ordered),
@@ -285,22 +379,168 @@ def expand(*cols: Any) -> Verb:
     return Verb(_apply, "expand")
 
 
+def _grid_units(args: tuple[Any, ...], kwargs: dict[str, Any], *, crossing: bool) -> tuple[list[Any], str]:
+    """pandas frames for each expand_grid()/crossing() input, and the backend."""
+    import pandas as pd
+
+    from tidy3.frame import TidyFrame
+
+    backend = "polars"
+    units = []
+    for arg in args:
+        if isinstance(arg, TidyFrame):
+            backend = arg._backend if not units else backend
+            frame = arg.collect(as_="pandas")
+        elif isinstance(arg, pl.DataFrame):
+            frame = arg.to_pandas()
+        else:
+            frame = pd.DataFrame(arg)
+        if crossing:
+            frame = frame.drop_duplicates().sort_values(
+                list(frame.columns), kind="stable", na_position="last"
+            )
+        units.append(frame.reset_index(drop=True))
+    for name, values in kwargs.items():
+        listed = list(values.tolist() if hasattr(values, "tolist") else values)
+        if crossing:
+            listed = _unique_sorted(listed)
+        units.append(pd.DataFrame({name: listed}))
+    return units, backend
+
+
+def _cross(units: list[Any], backend: str) -> Any:
+    import pandas as pd
+
+    from tidy3.frame import tidy
+
+    if not units:
+        return tidy(pd.DataFrame(), backend=backend)
+    result = units[0]
+    for unit in units[1:]:
+        result = result.merge(unit, how="cross")
+    return tidy(result.reset_index(drop=True), backend=backend)
+
+
+def expand_grid(*frames: Any, **values: Any) -> Any:
+    """Every combination of the inputs, as given (tidyr ``expand_grid()``).
+
+    Tables keep their rows together; named inputs are value lists. Nothing
+    is de-duplicated or sorted, and the first input varies slowest::
+
+        expand_grid(x=[1, 2], y=["a", "b"])
+        expand_grid(stores, week=range(1, 53))
+    """
+    units, backend = _grid_units(frames, values, crossing=False)
+    return _cross(units, backend)
+
+
+def crossing(*frames: Any, **values: Any) -> Any:
+    """Like :func:`expand_grid`, on each input's distinct values, sorted.
+
+    Missing values sort last, as in tidyr ``crossing()``.
+    """
+    units, backend = _grid_units(frames, values, crossing=True)
+    return _cross(units, backend)
+
+
+def uncount(weights: Any, *, remove: bool = True, id: str | None = None) -> Verb:
+    """Repeat each row ``weights`` times (tidyr ``uncount()``).
+
+    ``weights`` is a column name or a number. The weights column is dropped
+    unless ``remove=False``; ``id="copy"`` adds each copy's 1-based number.
+    """
+
+    def _apply(tf):
+        columns = _columns(tf)
+        name = weights if isinstance(weights, str) else None
+        if name is not None and name not in columns:
+            raise KeyError(f"uncount() weights column not found: {name!r}")
+        if tf._backend == "pandas":
+            pdf = tf._pdf
+            counts = pdf[name] if name else _constant_series(len(pdf), weights)
+            _check_weights(counts.isna().any(), (counts < 0).any(), (counts % 1 != 0).any())
+            counts = counts.astype("int64")
+            out = pdf.loc[pdf.index.repeat(counts)]
+            if id is not None:
+                out = out.assign(**{id: out.groupby(level=0).cumcount() + 1})
+            out = out.reset_index(drop=True)
+            if remove and name is not None:
+                out = out.drop(columns=name)
+            ordered = list(out.columns)
+            return tf._with_pdf(out, groups=_result_groups(tf, ordered))
+        count = pl.col(name) if name else pl.lit(weights)
+        missing, negative, fractional = (
+            tf._lf.select(
+                count.is_null().any().alias("missing"),
+                (count < 0).any().alias("negative"),
+                (count.cast(pl.Float64) % 1 != 0).any().alias("fractional"),
+            )
+            .collect()
+            .row(0)
+        )
+        _check_weights(missing, negative, fractional)
+        copy = _temp_name(columns, "__tidy3_copy")
+        # Drop zero weights first: explode() never sees an empty list, whose
+        # handling differs between Polars 1 and 2.
+        lf = (
+            tf._lf.filter(count > 0)
+            .with_columns(pl.int_ranges(0, count.cast(pl.Int64)).alias(copy))
+            .explode(copy, **_EXPLODE_OPTIONS)
+        )
+        if id is not None:
+            lf = lf.with_columns((pl.col(copy) + 1).alias(id))
+        drop = [copy] + ([name] if remove and name is not None else [])
+        lf = lf.drop(drop)
+        ordered = lf.collect_schema().names()
+        return tf._with_lf(lf, groups=_result_groups(tf, ordered))
+
+    return Verb(_apply, "uncount")
+
+
+# Polars 1.4x warns unless empty_as_null is explicit; older 1.x lacks it.
+_EXPLODE_OPTIONS = (
+    {"empty_as_null": True}
+    if "empty_as_null" in inspect.signature(pl.LazyFrame.explode).parameters
+    else {}
+)
+
+
+def _constant_series(length: int, value: Any) -> Any:
+    import pandas as pd
+
+    return pd.Series([value] * length)
+
+
+def _check_weights(missing: bool, negative: bool, fractional: bool) -> None:
+    if missing:
+        raise ValueError("uncount() weights must not be missing")
+    if negative:
+        raise ValueError("uncount() weights must be zero or more")
+    if fractional:
+        raise ValueError("uncount() weights must be whole numbers")
+
+
 def complete(
     *cols: Any,
     fill: dict[str, Any] | None = None,
     explicit: bool = True,
+    **values: Any,
 ) -> Verb:
-    """Make implicit missing combinations explicit, optionally filling them."""
-    if not cols:
+    """Make implicit missing combinations explicit, optionally filling them.
+
+    Named inputs give the values to complete over, as in tidyr:
+    ``complete("country", year=full_seq("year", 1))``.
+    """
+    if not cols and not values:
         raise TypeError("complete() requires at least one column")
     if fill is not None and not isinstance(fill, dict):
         raise TypeError("complete() fill must be a mapping or None")
 
     def _apply(tf):
-        expanded = expand(*cols)._fn(tf)
+        expanded = expand(*cols, **values)._fn(tf)
         groups = list(tf._groups or [])
         units = _expansion_units(tf, cols)
-        keys = [*groups, *(name for unit in units for name in unit)]
+        keys = [*groups, *(name for unit in units for name in unit), *values]
         marker = _temp_name(_columns(tf), "__tidy3_complete")
         replacements = fill or {}
         if tf._backend == "pandas":
@@ -1615,6 +1855,10 @@ def unpack(column: str) -> Verb:
 
 
 __all__ = [
+    "crossing",
+    "expand_grid",
+    "full_seq",
+    "uncount",
     "complete",
     "drop_na",
     "expand",

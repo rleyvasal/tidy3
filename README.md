@@ -514,7 +514,7 @@ ln -sfn /path/to/plot3 plot3
 | Rows | `filter`, `filter_out`, `arrange`, `distinct`, `slice`, `slice_head`, `slice_tail`, `slice_min`, `slice_max`, `slice_sample`, `head`, `sample_n`, `sample_frac` |
 | Columns | `mutate`, `transmute`, `select`, `drop`, `rename`, `rename_with`, `relocate`, `pull`, `glimpse` |
 | Groups | `group_by`, `rowwise`, `ungroup`, `with_groups`, `group_split`, `group_map`, `group_modify`, `group_walk`, `group_nest`, `nest_by`, `group_data`, `group_keys`, `group_rows`, `group_size`, `group_indices`, `group_vars`, `groups`, `n_groups`, `group_trim`, `summarise`, `reframe`, `count`, `tally`, `add_count`, `add_tally` |
-| Missing data | `drop_na`, `replace_na`, `fill`, `complete`, `expand`, `nesting` |
+| Missing data | `drop_na`, `replace_na`, `fill`, `complete`, `expand`, `nesting`, `crossing`, `expand_grid`, `full_seq`, `uncount` |
 | Reshape | `pivot_longer`, `pivot_wider`, `separate`, `separate_longer_delim`, `separate_wider_delim`, `unite`, `nest`, `unnest`, `unnest_longer`, `unnest_wider`, `hoist`, `pack`, `unpack` |
 | Joins | `left_join`, `right_join`, `inner_join`, `full_join`, `semi_join`, `anti_join`, `cross_join`, `nest_join` |
 | Join specs | `join_by`, `eq`, `ge`, `gt`, `le`, `lt`, `closest`, `between`, `within`, `overlaps` |
@@ -690,6 +690,23 @@ tidy(observations) >> complete(
 nested = tidy(events) >> nest("records", cols=["time", "value"])
 restored = nested >> unnest("records")
 ```
+
+Build grids and repeat rows like tidyr:
+
+```python
+expand_grid(store=["A", "B"], week=[1, 2, 3])          # every combination, as given
+crossing(store=["B", "A", "B"], week=[2, 1])           # distinct values, sorted
+tidy({"item": ["pen", "cup"], "n": [2, 1]}) >> uncount("n", id="copy")
+
+# Fill in missing years: full_seq() spans min to max in steps of 5
+tidy({"country": ["A", "A", "B"], "year": [1952, 1962, 1957], "pop": [1.0, 2.0, 3.0]}) >> complete(
+    "country", year=full_seq("year", 5)
+)
+```
+
+`expand()` and `complete()` take named values like this too. The values keep
+the column's type, so a whole-number `year` stays whole (R's `full_seq()`
+would make it a decimal).
 
 `fill(..., by=...)` provides temporary grouping, while an existing
 `group_by()` is respected automatically. Most Polars operations add only lazy
