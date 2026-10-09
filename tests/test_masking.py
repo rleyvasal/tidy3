@@ -208,3 +208,12 @@ def test_order_by_and_with_order_take_bare_columns():
     assert f"with_order({c}('year'), lag, {c}('value'))" in _norm(
         "mutate(previous = with_order(year, lag, value))"
     )
+
+
+def test_new_tidyr_verbs_take_bare_columns():
+    assert "chop('x', 'y')" in _norm("chop(x, y)")
+    assert "unchop('x', keep_empty=True)" in _norm("unchop(x, keep_empty=True)")
+    assert "uncount('n')" in _norm("uncount(n)")
+    assert "separate_wider_position('code', [('year', 4)])" in _norm(
+        "separate_wider_position(code, [('year', 4)])"
+    )

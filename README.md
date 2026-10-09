@@ -515,7 +515,7 @@ ln -sfn /path/to/plot3 plot3
 | Columns | `mutate`, `transmute`, `select`, `drop`, `rename`, `rename_with`, `relocate`, `pull`, `glimpse` |
 | Groups | `group_by`, `rowwise`, `ungroup`, `with_groups`, `group_split`, `group_map`, `group_modify`, `group_walk`, `group_nest`, `nest_by`, `group_data`, `group_keys`, `group_rows`, `group_size`, `group_indices`, `group_vars`, `groups`, `n_groups`, `group_trim`, `summarise`, `reframe`, `count`, `tally`, `add_count`, `add_tally` |
 | Missing data | `drop_na`, `replace_na`, `fill`, `complete`, `expand`, `nesting`, `crossing`, `expand_grid`, `full_seq`, `uncount` |
-| Reshape | `pivot_longer`, `pivot_wider`, `separate`, `separate_longer_delim`, `separate_wider_delim`, `unite`, `nest`, `unnest`, `unnest_longer`, `unnest_wider`, `hoist`, `pack`, `unpack` |
+| Reshape | `pivot_longer`, `pivot_wider`, `separate`, `separate_longer_delim`, `separate_wider_delim`, `separate_wider_regex`, `separate_wider_position`, `separate_longer_position`, `unite`, `nest`, `unnest`, `unnest_longer`, `unnest_wider`, `unnest_auto`, `chop`, `unchop`, `hoist`, `pack`, `unpack` |
 | Joins | `left_join`, `right_join`, `inner_join`, `full_join`, `semi_join`, `anti_join`, `cross_join`, `nest_join` |
 | Join specs | `join_by`, `eq`, `ge`, `gt`, `le`, `lt`, `closest`, `between`, `within`, `overlaps` |
 | Bind/set | `bind_rows`, `bind_cols`, `union`, `union_all`, `intersect`, `setdiff`, `symdiff`, `setequal` |
@@ -703,6 +703,23 @@ tidy({"country": ["A", "A", "B"], "year": [1952, 1962, 1957], "pop": [1.0, 2.0, 
     "country", year=full_seq("year", 5)
 )
 ```
+
+Split text by pattern or position, and move between lists and rows:
+
+```python
+codes = tidy({"id": [1, 2], "code": ["ab-12", "cd-3"], "date": ["20240115", "20231201"]})
+codes >> separate_wider_regex("code", [("letters", "[a-z]+"), "-", ("number", "[0-9]+")])
+codes >> separate_wider_position("date", [("year", 4), ("month", 2), ("day", 2)])
+codes >> separate_longer_position("code", 2)            # "ab", "-1", "2", ...
+
+chopped = tidy({"g": ["a", "a", "b"], "x": [1, 2, 3]}) >> chop("x")
+chopped >> unchop("x")                                   # back to one row per value
+```
+
+In `separate_wider_regex()`, a bare string is matched but not kept; in
+`separate_wider_position()`, a bare number is a width that is skipped.
+`unnest_auto()` picks `unnest_wider()` for named elements and
+`unnest_longer()` otherwise.
 
 `expand()` and `complete()` take named values like this too. The values keep
 the column's type, so a whole-number `year` stays whole (R's `full_seq()`

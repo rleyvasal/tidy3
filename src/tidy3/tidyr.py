@@ -1792,6 +1792,307 @@ def separate_wider_delim(
     return Verb(_apply, "separate_wider_delim")
 
 
+def _replace_column(pdf: Any, source: str, expanded: Any, remove: bool) -> Any:
+    """Put *expanded* where *source* was (and keep *source* after it if asked)."""
+    import pandas as pd
+
+    at = pdf.columns.get_loc(source)
+    middle = [expanded] if remove else [expanded, pdf[[source]]]
+    return pd.concat([pdf.iloc[:, :at], *middle, pdf.iloc[:, at + 1 :]], axis=1)
+
+
+def _one_column(tf: Any, column: Any, verb: str) -> str:
+    selected = resolve_selection(tf, [column])
+    if len(selected) != 1:
+        raise ValueError(f"{verb}() requires one column")
+    return selected[0]
+
+
+def _output_name(source: str, name: str, names_sep: str | None) -> str:
+    return f"{source}{names_sep}{name}" if names_sep is not None else name
+
+
+def separate_wider_regex(
+    column: Any,
+    patterns: Any,
+    *,
+    names_sep: str | None = None,
+    too_few: str = "error",
+    cols_remove: bool = True,
+) -> Verb:
+    """Split a column into columns with regular expressions (tidyr).
+
+    ``patterns`` is a list of ``(name, regex)`` pairs and bare regexes that
+    are matched but not kept, or a dict of named pieces::
+
+        separate_wider_regex("code", [("letters", "[a-z]+"), "-", ("number", "[0-9]+")])
+
+    Each value must match the whole pattern; ``too_few="align_start"``
+    fills the pieces that match from the start and leaves the rest missing.
+    """
+    import re
+
+    pieces = list(patterns.items()) if isinstance(patterns, dict) else [
+        piece if isinstance(piece, tuple) else (None, piece) for piece in patterns
+    ]
+    if not pieces:
+        raise TypeError("separate_wider_regex() needs at least one pattern")
+    if too_few not in {"error", "align_start"}:
+        raise ValueError("too_few must be error or align_start")
+    names = [name for name, _ in pieces if name is not None]
+
+    def compiled(count: int):
+        body = "".join(
+            f"({pattern})" if name is not None else f"(?:{pattern})"
+            for name, pattern in pieces[:count]
+        )
+        return re.compile(body)
+
+    full = compiled(len(pieces))
+    partial = [compiled(count) for count in range(len(pieces) - 1, 0, -1)]
+
+    def split(value: Any) -> list[Any] | None:
+        if value is None or (isinstance(value, float) and value != value):
+            return [None] * len(names)
+        found = full.fullmatch(str(value))
+        if found:
+            return list(found.groups())
+        if too_few == "error":
+            return None
+        for pattern in partial:
+            found = pattern.fullmatch(str(value))
+            if found:
+                groups = list(found.groups())
+                return groups + [None] * (len(names) - len(groups))
+        return [None] * len(names)
+
+    def _apply(tf):
+        import pandas as pd
+        from tidy3.frame import tidy
+
+        source = _one_column(tf, column, "separate_wider_regex")
+        pdf = tf.collect(as_="pandas").reset_index(drop=True)
+        rows = [split(value) for value in pdf[source]]
+        failed = sum(row is None for row in rows)
+        if failed:
+            raise ValueError(
+                f"separate_wider_regex(): each value of {source!r} must match the "
+                f"whole pattern; {failed} value(s) did not. "
+                'Use too_few="align_start" to keep partial matches.'
+            )
+        expanded = pd.DataFrame(
+            rows,
+            columns=[_output_name(source, name, names_sep) for name in names],
+            index=pdf.index,
+            dtype=object,
+        )
+        return tidy(_replace_column(pdf, source, expanded, cols_remove), backend=tf._backend)
+
+    return Verb(_apply, "separate_wider_regex")
+
+
+def separate_wider_position(
+    column: Any,
+    widths: Any,
+    *,
+    names_sep: str | None = None,
+    too_few: str = "error",
+    too_many: str = "error",
+    cols_remove: bool = True,
+) -> Verb:
+    """Split a column into columns of fixed widths (tidyr).
+
+    ``widths`` is a list of ``(name, width)`` pairs and bare widths that are
+    skipped, or a dict::
+
+        separate_wider_position("date", [("year", 4), ("month", 2), ("day", 2)])
+
+    Values shorter than the total width raise unless
+    ``too_few="align_start"``; longer ones raise unless ``too_many="drop"``.
+    """
+    pieces = list(widths.items()) if isinstance(widths, dict) else [
+        piece if isinstance(piece, tuple) else (None, piece) for piece in widths
+    ]
+    if not pieces or any(int(width) <= 0 for _, width in pieces):
+        raise ValueError("separate_wider_position() widths must be positive")
+    if too_few not in {"error", "align_start"}:
+        raise ValueError("too_few must be error or align_start")
+    if too_many not in {"error", "drop"}:
+        raise ValueError("too_many must be error or drop")
+    total = sum(int(width) for _, width in pieces)
+    names = [name for name, _ in pieces if name is not None]
+
+    def _apply(tf):
+        import pandas as pd
+        from tidy3.frame import tidy
+
+        source = _one_column(tf, column, "separate_wider_position")
+        pdf = tf.collect(as_="pandas").reset_index(drop=True)
+        rows, short, long = [], 0, 0
+        for value in pdf[source]:
+            if value is None or (isinstance(value, float) and value != value):
+                rows.append([None] * len(names))
+                continue
+            text = str(value)
+            short += len(text) < total
+            long += len(text) > total
+            row, start = [], 0
+            for name, width in pieces:
+                part = text[start : start + int(width)]
+                start += int(width)
+                if name is not None:
+                    row.append(part if part else None)
+            rows.append(row)
+        if short and too_few == "error":
+            raise ValueError(
+                f"separate_wider_position(): expected {total} characters in each "
+                f'value of {source!r}; {short} value(s) were shorter. Use too_few="align_start".'
+            )
+        if long and too_many == "error":
+            raise ValueError(
+                f"separate_wider_position(): expected {total} characters in each "
+                f'value of {source!r}; {long} value(s) were longer. Use too_many="drop".'
+            )
+        expanded = pd.DataFrame(
+            rows,
+            columns=[_output_name(source, name, names_sep) for name in names],
+            index=pdf.index,
+            dtype=object,
+        )
+        return tidy(_replace_column(pdf, source, expanded, cols_remove), backend=tf._backend)
+
+    return Verb(_apply, "separate_wider_position")
+
+
+def separate_longer_position(column: Any, width: int, *, keep_empty: bool = False) -> Verb:
+    """Split each value into ``width``-character pieces, one row each (tidyr).
+
+    Missing values stay one missing row; empty strings are dropped unless
+    ``keep_empty=True``.
+    """
+    if int(width) <= 0:
+        raise ValueError("separate_longer_position() width must be positive")
+
+    def _apply(tf):
+        from tidy3.frame import tidy
+
+        source = _one_column(tf, column, "separate_longer_position")
+        pdf = tf.collect(as_="pandas").copy()
+
+        def chunks(value: Any) -> list[Any]:
+            if value is None or (isinstance(value, float) and value != value):
+                return [None]
+            text = str(value)
+            parts = [text[i : i + int(width)] for i in range(0, len(text), int(width))]
+            return parts or ([None] if keep_empty else [])
+
+        pdf[source] = pdf[source].map(chunks)
+        pdf = pdf[pdf[source].map(len) > 0].explode(source, ignore_index=True)
+        return tidy(pdf, backend=tf._backend)
+
+    return Verb(_apply, "separate_longer_position")
+
+
+def chop(*cols: Any) -> Verb:
+    """Collect columns into lists, one row per combination of the others (tidyr)."""
+    if not cols:
+        raise TypeError("chop() requires at least one column")
+
+    def _apply(tf):
+        chopped = resolve_selection(tf, cols)
+        columns = _columns(tf)
+        keys = [name for name in columns if name not in chopped]
+        if tf._backend == "pandas":
+            pdf = tf._pdf
+            if keys:
+                out = (
+                    pdf.groupby(keys, sort=False, dropna=False)[chopped]
+                    .agg(list)
+                    .reset_index()
+                )
+            else:
+                import pandas as pd
+
+                out = pd.DataFrame({name: [pdf[name].tolist()] for name in chopped})
+            return tf._with_pdf(out.loc[:, columns], groups=_result_groups(tf, columns))
+        lf = (
+            tf._lf.group_by(keys, maintain_order=True).agg(chopped)
+            if keys
+            else tf._lf.select(pl.col(name).implode() for name in chopped)
+        )
+        return tf._with_lf(lf.select(columns), groups=_result_groups(tf, columns))
+
+    return Verb(_apply, "chop")
+
+
+def unchop(*cols: Any, keep_empty: bool = False) -> Verb:
+    """Turn list columns back into rows, the inverse of :func:`chop` (tidyr).
+
+    Rows whose lists are empty or missing are dropped unless
+    ``keep_empty=True``, which keeps one row with missing values.
+    """
+    if not cols:
+        raise TypeError("unchop() requires at least one column")
+
+    def _apply(tf):
+        listed = resolve_selection(tf, cols)
+        columns = _columns(tf)
+        if tf._backend == "pandas":
+            pdf = tf._pdf.copy()
+
+            def as_list(value: Any) -> list[Any]:
+                if value is None or (isinstance(value, float) and value != value):
+                    return []
+                return list(value)
+
+            for name in listed:
+                pdf[name] = pdf[name].map(as_list)
+            sizes = pdf[listed[0]].map(len)
+            if not keep_empty:
+                pdf = pdf[sizes > 0]
+            else:
+                for name in listed:
+                    pdf[name] = pdf[name].map(lambda v: v if v else [None])
+            out = pdf.explode(listed, ignore_index=True)
+            whole = [name for name in listed if _all_ints(out[name].dropna())]
+            out = out.infer_objects()
+            for name in whole:
+                # Whole numbers with gaps: nullable Int64, not float (as in R).
+                out[name] = out[name].astype("Int64")
+            return tf._with_pdf(out, groups=_result_groups(tf, columns))
+        lf = tf._lf
+        if not keep_empty:
+            lf = lf.filter(pl.col(listed[0]).list.len().fill_null(0) > 0)
+        lf = lf.explode(listed, **_EXPLODE_OPTIONS)
+        return tf._with_lf(lf, groups=_result_groups(tf, columns))
+
+    return Verb(_apply, "unchop")
+
+
+def _all_ints(values: Any) -> bool:
+    import numpy as np
+
+    return len(values) > 0 and all(
+        isinstance(v, (int, np.integer)) and not isinstance(v, (bool, np.bool_))
+        for v in values
+    )
+
+
+def unnest_auto(column: str) -> Verb:
+    """``unnest_wider`` for named elements, ``unnest_longer`` otherwise (tidyr)."""
+
+    def _apply(tf):
+        if tf._backend == "pandas":
+            values = [v for v in tf._pdf[column].tolist() if v is not None]
+            named = bool(values) and all(isinstance(v, dict) for v in values)
+        else:
+            named = isinstance(tf._lf.collect_schema()[column], pl.Struct)
+        verb = unnest_wider(column) if named else unnest_longer(column)
+        return tf >> verb
+
+    return Verb(_apply, "unnest_auto")
+
+
 def hoist(column: str, *paths: Any, **named_paths: Any) -> Verb:
     """Extract named fields from dictionary/list columns."""
     def _apply(tf):
@@ -1855,6 +2156,12 @@ def unpack(column: str) -> Verb:
 
 
 __all__ = [
+    "chop",
+    "separate_longer_position",
+    "separate_wider_position",
+    "separate_wider_regex",
+    "unchop",
+    "unnest_auto",
     "crossing",
     "expand_grid",
     "full_seq",

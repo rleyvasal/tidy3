@@ -28,6 +28,10 @@ under **Changed**.
   `expand()` and `complete()` take named values, as in
   `complete("country", year=full_seq("year", 5))`; the values keep the
   column's type (R would turn a whole-number column into decimals).
+- tidyr's `separate_wider_regex()`, `separate_wider_position()`,
+  `separate_longer_position()`, `chop()`, `unchop()`, and `unnest_auto()`.
+  `separate_longer_position()` keeps a missing value as one missing row
+  (tidyr 1.3.2 errors on it).
 
 ### Changed
 

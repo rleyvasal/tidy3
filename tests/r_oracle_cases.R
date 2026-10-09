@@ -337,6 +337,27 @@ result <- switch(
       expanded=obs |> expand(country, year=as.integer(full_seq(year, 5)))
     )
   },
+  splitting = {
+    d <- tibble(id=1:3, code=c("ab-12", "cd-3", NA))
+    pattern <- c(letters="[a-z]+", "-", number="[0-9]+")
+    dates <- tibble(id=1:3, code=c("20240115", "2023", NA))
+    chopped <- chop(tibble(g=c("a", "a", "b"), x=1:3, y=c(10, 20, 30)), c(x, y))
+    lists <- tibble(g=c("a", "b", "c"), x=list(1:2, integer(), NULL))
+    list(
+      regex=separate_wider_regex(d, code, pattern),
+      regex_partial=separate_wider_regex(tibble(code=c("ab-12", "ab")), code, pattern, too_few="align_start"),
+      regex_prefixed=separate_wider_regex(d, code, pattern, names_sep="_"),
+      position=separate_wider_position(dates, code, c(year=4, month=2, day=2), too_few="align_start"),
+      position_skip=separate_wider_position(tibble(code="20240115"), code, c(year=4, 2, day=2)),
+      longer=separate_longer_position(tibble(id=1:3, x=c("abcde", "fg", "h")), x, width=2),
+      chopped=chopped,
+      unchopped=unchop(chopped, c(x, y)),
+      unchop_drop=unchop(lists, x),
+      unchop_keep=unchop(lists, x, keep_empty=TRUE),
+      auto_wider=suppressMessages(unnest_auto(tibble(id=1:2, v=list(list(a=1, b=2), list(a=3, b=4))), v)),
+      auto_longer=suppressMessages(unnest_auto(tibble(id=1:2, v=list(c(1, 2), c(3))), v))
+    )
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 

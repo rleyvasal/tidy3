@@ -892,6 +892,42 @@ def _grids(backend: str):
     }
 
 
+def _splitting(backend: str):
+    import tidy3 as t3
+
+    d = tidy({"id": [1, 2, 3], "code": ["ab-12", "cd-3", None]}, backend=backend)
+    pattern = [("letters", "[a-z]+"), "-", ("number", "[0-9]+")]
+    dates = tidy({"id": [1, 2, 3], "code": ["20240115", "2023", None]}, backend=backend)
+    chopped = tidy(
+        {"g": ["a", "a", "b"], "x": [1, 2, 3], "y": [10.0, 20.0, 30.0]}, backend=backend
+    ) >> t3.chop("x", "y")
+    lists = tidy({"g": ["a", "b", "c"], "x": [[1, 2], [], None]}, backend=backend)
+    return {
+        "regex": d >> t3.separate_wider_regex("code", pattern),
+        "regex_partial": tidy({"code": ["ab-12", "ab"]}, backend=backend)
+        >> t3.separate_wider_regex("code", pattern, too_few="align_start"),
+        "regex_prefixed": d >> t3.separate_wider_regex("code", pattern, names_sep="_"),
+        "position": dates
+        >> t3.separate_wider_position(
+            "code", [("year", 4), ("month", 2), ("day", 2)], too_few="align_start"
+        ),
+        "position_skip": tidy({"code": ["20240115"]}, backend=backend)
+        >> t3.separate_wider_position("code", [("year", 4), 2, ("day", 2)]),
+        "longer": tidy({"id": [1, 2, 3], "x": ["abcde", "fg", "h"]}, backend=backend)
+        >> t3.separate_longer_position("x", 2),
+        "chopped": chopped,
+        "unchopped": chopped >> t3.unchop("x", "y"),
+        "unchop_drop": lists >> t3.unchop("x"),
+        "unchop_keep": lists >> t3.unchop("x", keep_empty=True),
+        "auto_wider": tidy(
+            {"id": [1, 2], "v": [{"a": 1.0, "b": 2.0}, {"a": 3.0, "b": 4.0}]}, backend=backend
+        )
+        >> t3.unnest_auto("v"),
+        "auto_longer": tidy({"id": [1, 2], "v": [[1.0, 2.0], [3.0]]}, backend=backend)
+        >> t3.unnest_auto("v"),
+    }
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "filter_missing": _filter_missing,
     "filter_out_missing": _filter_out_missing,
@@ -943,6 +979,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "group_info": _group_info,
     "ordering": _ordering,
     "grids": _grids,
+    "splitting": _splitting,
 }
 
 
@@ -979,6 +1016,10 @@ CASE_VERBS = {
     "group_info": {"group_split", "group_modify", "group_nest"},
     "ordering": {"mutate"},
     "grids": {"expand_grid", "crossing", "uncount", "full_seq", "complete", "expand"},
+    "splitting": {
+        "separate_wider_regex", "separate_wider_position", "separate_longer_position",
+        "chop", "unchop", "unnest_auto",
+    },
 }
 
 
