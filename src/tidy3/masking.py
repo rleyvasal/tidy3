@@ -640,6 +640,51 @@ def default_known_names(extra: Iterable[str] | None = None) -> set[str]:
     return known
 
 
+def _imports_plot3(node: ast.Module) -> bool:
+    for statement in ast.walk(node):
+        if isinstance(statement, ast.ImportFrom) and statement.module:
+            if statement.module.split(".")[0] == "plot3":
+                return True
+        elif isinstance(statement, ast.Import):
+            if any(alias.name.split(".")[0] == "plot3" for alias in statement.names):
+                return True
+    return False
+
+
+def _plot3_masking_for_importing_cell(node: ast.Module) -> ast.Module:
+    """Give a cell that imports plot3 plot3's ``aes`` bare-name masking.
+
+    plot3 turns its masking on when it is imported, which is too late for
+    the cell doing the import: ``from plot3 import *`` followed by
+    ``aes(x=wt)`` in one cell would read ``wt`` as a Python name. Apply
+    plot3's pass to that cell here, and turn plot3 on for later cells once
+    the cell has run (plot3 may have been imported before IPython started).
+    """
+    try:
+        from IPython import get_ipython
+
+        ip = get_ipython()
+    except Exception:
+        return node
+    if ip is None or not _imports_plot3(node):
+        return node
+    active = getattr(ip, "ast_transformers", []) or []
+    if any(type(t).__name__ == "Plot3MaskTransformer" for t in active):
+        return node
+    try:
+        from plot3.masking import Plot3MaskTransformer
+        from plot3.jupyter import enable_r_style
+    except ImportError:
+        return node
+
+    def turn_on(*_: Any) -> None:
+        ip.events.unregister("post_run_cell", turn_on)
+        enable_r_style(ip)
+
+    ip.events.register("post_run_cell", turn_on)
+    return Plot3MaskTransformer().visit(node)
+
+
 class Tidy3MaskTransformer(ast.NodeTransformer):
     """Top-level AST pass: choose expr vs selector masking per verb."""
 
@@ -662,6 +707,10 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
 
     def _mask(self, node: ast.AST, mode: Mode) -> ast.AST:
         return MaskNames(mode, self._known()).visit(node)
+
+    def visit_Module(self, node: ast.Module) -> ast.AST:
+        node = self.generic_visit(node)
+        return _plot3_masking_for_importing_cell(node)
 
     def _mask_keyword(self, kw: ast.keyword, *, default: Mode) -> ast.keyword:
         """Apply masking rules for a single keyword by name."""
