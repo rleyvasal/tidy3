@@ -592,7 +592,7 @@ def complete(
     return Verb(_apply, "complete")
 
 
-def pivot_longer(
+def _pivot_longer_core(
     cols: Any,
     *,
     names_to: str | list[str] | tuple[str, ...] | None = "name",
@@ -798,6 +798,295 @@ def pivot_longer(
     return Verb(_apply, "pivot_longer")
 
 
+
+def _transform_columns(tf: Any, transform: Any, columns: list[str], what: str) -> Any:
+    """Apply ``names_transform``/``values_transform`` to *columns*.
+
+    *transform* is one function for every column or a dict by column name.
+    Python types (``int``, ``float``, ``str``, ``bool``) cast in the engine;
+    other functions run on each value, missing values passing through.
+    """
+    if transform is None:
+        return tf
+    mapping = (
+        dict(transform)
+        if isinstance(transform, dict)
+        else {name: transform for name in columns}
+    )
+    unknown = [name for name in mapping if name not in columns]
+    if unknown:
+        raise KeyError(f"{what} names unknown columns: {unknown}")
+    casts = {int: pl.Int64, float: pl.Float64, str: pl.String, bool: pl.Boolean}
+    if tf._backend == "pandas":
+        pdf = tf._pdf.copy()
+        for name, fn in mapping.items():
+            if fn in casts:
+                pdf[name] = pdf[name].map(lambda v, fn=fn: None if v is None or v != v else fn(v))
+                pdf[name] = pdf[name].astype({int: "Int64", float: "float64", str: "object", bool: "boolean"}[fn])
+            else:
+                pdf[name] = pdf[name].map(lambda v, fn=fn: None if v is None or v != v else fn(v))
+        return tf._with_pdf(pdf, groups=tf._groups)
+    expressions = []
+    for name, fn in mapping.items():
+        if fn in casts:
+            expressions.append(pl.col(name).cast(casts[fn]))
+        else:
+            expressions.append(
+                pl.col(name).map_elements(fn, skip_nulls=True, return_dtype=None)
+            )
+    return tf._with_lf(tf._lf.with_columns(expressions), groups=tf._groups)
+
+
+def pivot_longer(
+    cols: Any,
+    *,
+    names_to: str | list[str] | tuple[str, ...] | None = "name",
+    values_to: str = "value",
+    names_prefix: str | None = None,
+    names_sep: str | None = None,
+    names_pattern: str | None = None,
+    values_drop_na: bool = False,
+    cols_vary: str = "fastest",
+    names_transform: Any = None,
+    values_transform: Any = None,
+) -> Verb:
+    """Lengthen selected columns, with optional name splitting.
+
+    ``names_transform`` / ``values_transform`` convert the new name and value
+    columns, as in tidyr: one function, or a dict by column name, e.g.
+    ``names_transform={"week": int}`` turns ``"1"`` into ``1``.
+    """
+    core = _pivot_longer_core(
+        cols,
+        names_to=names_to,
+        values_to=values_to,
+        names_prefix=names_prefix,
+        names_sep=names_sep,
+        names_pattern=names_pattern,
+        values_drop_na=values_drop_na,
+        cols_vary=cols_vary,
+    )
+    name_columns = (
+        [] if names_to is None
+        else [names_to] if isinstance(names_to, str)
+        else [name for name in names_to if name is not None and name != ".value"]
+    )
+
+    def _apply(tf):
+        out = core._fn(tf)
+        out = _transform_columns(out, names_transform, name_columns, "names_transform")
+        if values_transform is not None:
+            value_columns = [
+                name for name in _columns(out)
+                if name not in _columns(tf) and name not in name_columns
+            ] or [values_to]
+            out = _transform_columns(out, values_transform, value_columns, "values_transform")
+        return out
+
+    return Verb(_apply, "pivot_longer")
+
+
+def _level_values(pdf: Any, name: str, levels: dict[str, list[Any]]) -> list[Any]:
+    """Every value a column can take: factor levels, else sorted distinct."""
+    if name in levels:
+        return list(levels[name])
+    column = pdf[name]
+    if hasattr(column, "cat"):
+        return list(column.cat.categories)
+    present = sorted(v for v in column.dropna().unique().tolist())
+    return present
+
+
+def pivot_wider(
+    *,
+    names_from: Any = "name",
+    values_from: Any = "value",
+    id_cols: Any = None,
+    names_prefix: str = "",
+    names_sep: str = "_",
+    names_glue: str | None = None,
+    names_sort: bool = False,
+    names_vary: str = "fastest",
+    names_expand: bool = False,
+    id_expand: bool = False,
+    values_fill: Any = None,
+    values_fn: str | None = None,
+    unused_fn: Any = None,
+    names: Iterable[Any] | None = None,
+) -> Verb:
+    """Widen a name/value pair; discovers output names when not supplied.
+
+    Like tidyr: ``names_sep`` joins name parts, ``names_glue`` builds names
+    from a template (``"{key}_{.value}"``), ``names_vary`` orders the columns
+    (``"fastest"``: v_a, v_b, w_a, w_b; ``"slowest"``: v_a, w_a, v_b, w_b),
+    ``names_expand`` / ``id_expand`` add columns / rows for every possible
+    value (unused factor levels too), and ``unused_fn`` summarises columns
+    that are not ids, names, or values instead of dropping them.
+
+    Values that are not uniquely identified become list columns with a
+    warning; ``values_fn="list"`` asks for them, ``values_fn="mean"`` (or
+    ``sum``, ``first``, …) summarises duplicates instead.
+    """
+    if names_vary not in {"fastest", "slowest"}:
+        raise ValueError("names_vary must be 'fastest' or 'slowest'")
+    if not isinstance(names_sep, str):
+        raise TypeError("names_sep must be a string")
+    plain = (
+        names_sep == "_" and names_glue is None and names_vary == "fastest"
+        and not names_expand and not id_expand and unused_fn is None
+    )
+    if plain:
+        return _pivot_wider_core(
+            names_from=names_from,
+            values_from=values_from,
+            id_cols=id_cols,
+            names_prefix=names_prefix,
+            names_sort=names_sort,
+            values_fill=values_fill,
+            values_fn=values_fn,
+            names=names,
+        )
+
+    def _apply(tf):
+        name_columns = resolve_selection(tf, [names_from])
+        value_columns = resolve_selection(tf, [values_from])
+        all_columns = _columns(tf)
+        identifiers = (
+            [c for c in all_columns if c not in {*name_columns, *value_columns}]
+            if id_cols is None
+            else resolve_selection(tf, [id_cols])
+        )
+        unused = [
+            c for c in all_columns
+            if c not in {*identifiers, *name_columns, *value_columns}
+        ]
+        # Only these options need the whole table (levels, per-row summaries).
+        pdf = tf.collect(as_="pandas") if (names_expand or id_expand or unused_fn is not None) else None
+        combos = _pivot_combinations(tf, pdf, name_columns, names, names_expand, names_sort)
+        out = _pivot_wider_core(
+            names_from=name_columns if len(name_columns) > 1 else name_columns[0],
+            values_from=value_columns if len(value_columns) > 1 else value_columns[0],
+            id_cols=identifiers if identifiers else None,
+            names_prefix="",
+            names_sort=False,
+            values_fill=values_fill,
+            values_fn=values_fn,
+            names=[c if len(name_columns) > 1 else c[0] for c in combos],
+        )._fn(tf)
+        produced = _columns(out)
+        kept_ids = [c for c in produced if c in identifiers]
+        value_outputs = [c for c in produced if c not in identifiers]
+        pairs = [(value, combo) for value in value_columns for combo in combos]
+        if len(value_outputs) != len(pairs):
+            raise RuntimeError("pivot_wider(): unexpected output columns")
+        new_names = {
+            old: _pivot_label(value, combo, name_columns, value_columns, names_prefix, names_sep, names_glue)
+            for old, (value, combo) in zip(value_outputs, pairs)
+        }
+        order = list(range(len(pairs)))
+        if names_vary == "slowest":
+            order.sort(key=lambda i: (combos.index(pairs[i][1]), value_columns.index(pairs[i][0])))
+        ordered = [*kept_ids, *[new_names[value_outputs[i]] for i in order]]
+        if pdf is None:
+            # Renaming and reordering only: stays lazy on Polars.
+            if out._backend == "pandas":
+                return out._with_pdf(out._pdf.rename(columns=new_names).loc[:, ordered], groups=out._groups)
+            return out._with_lf(out._lf.rename(new_names).select(ordered), groups=out._groups)
+        frame = (
+            out._pdf if out._backend == "pandas" else out._lf.collect().to_pandas()
+        ).rename(columns=new_names).loc[:, ordered]
+        if id_expand and kept_ids:
+            frame = _expand_ids(tf, pdf, frame, kept_ids, values_fill)
+        if unused_fn is not None and unused:
+            frame = _summarise_unused(pdf, frame, kept_ids, unused, unused_fn)
+        from tidy3.frame import tidy
+
+        result = tidy(frame.reset_index(drop=True), backend=out._backend)
+        groups = _result_groups(tf, list(frame.columns))
+        if result._backend == "pandas":
+            return result._with_pdf(result._pdf, groups=groups, category_levels=tf._category_levels)
+        return result._with_lf(result._lf, groups=groups, category_levels=tf._category_levels)
+
+    return Verb(_apply, "pivot_wider")
+
+
+def _pivot_combinations(tf, pdf, name_columns, names, names_expand, names_sort) -> list[tuple]:
+    """The ``names_from`` combinations that become columns, in order."""
+    import itertools
+
+    if names is not None:
+        return [(v,) for v in names] if len(name_columns) == 1 else [tuple(v) for v in names]
+    if names_expand:
+        # Every combination of every possible value, sorted (as tidyr).
+        return list(itertools.product(
+            *[_level_values(pdf, n, tf._category_levels) for n in name_columns]
+        ))
+    if tf._backend == "pandas":
+        seen = tf._pdf.loc[:, name_columns].drop_duplicates()
+        if names_sort:
+            seen = seen.sort_values(name_columns, kind="stable")
+        return list(seen.itertuples(index=False, name=None))
+    seen = tf._lf.select(name_columns).unique(maintain_order=True).collect()
+    if names_sort:
+        seen = seen.sort(name_columns)
+    return seen.rows()
+
+
+def _pivot_label(value, combo, name_columns, value_columns, prefix, sep, glue) -> str:
+    """Output column name for one value column and names_from combination."""
+    import re
+
+    if glue is not None:
+        fields = {".value": value, **dict(zip(name_columns, map(str, combo)))}
+        return re.sub(
+            r"\{([^{}]+)\}",
+            lambda m: fields.get(m.group(1).strip(), m.group(0)),
+            glue,
+        )
+    parts = list(map(str, combo))
+    if len(value_columns) > 1:
+        parts = [value, *parts]
+    return prefix + sep.join(parts)
+
+
+def _expand_ids(tf, pdf, frame, ids, values_fill):
+    """``id_expand``: a row for every combination of id values (and levels)."""
+    import itertools
+
+    import pandas as pd
+
+    grid = pd.DataFrame(
+        list(itertools.product(*[_level_values(pdf, n, tf._category_levels) for n in ids])),
+        columns=ids,
+    )
+    for name in ids:
+        if name in tf._category_levels or hasattr(pdf[name], "cat"):
+            grid[name] = pd.Categorical(
+                grid[name], categories=_level_values(pdf, name, tf._category_levels)
+            )
+            frame = frame.assign(**{name: pd.Categorical(frame[name], categories=grid[name].cat.categories)})
+        else:
+            grid[name] = grid[name].astype(pdf[name].dtype)
+    out = grid.merge(frame, on=ids, how="left", sort=False)
+    if values_fill is not None:
+        filled = [c for c in out.columns if c not in ids]
+        out[filled] = out[filled].fillna(values_fill)
+    return out
+
+
+def _summarise_unused(pdf, frame, ids, unused, unused_fn):
+    """``unused_fn``: summarise the leftover columns per id row."""
+    fns = unused_fn if isinstance(unused_fn, dict) else {c: unused_fn for c in unused}
+    stray = [c for c in fns if c not in unused]
+    if stray:
+        raise KeyError(f"unused_fn names columns that are not unused: {stray}")
+    if not ids:
+        summary = pdf.agg(fns).to_frame().T
+        return frame.reset_index(drop=True).join(summary)
+    summary = pdf.groupby(ids, sort=False, dropna=False, observed=True).agg(fns).reset_index()
+    return frame.merge(summary, on=ids, how="left", sort=False)
+
+
 def _warn_not_unique(values: list[str], keys: list[str], temp_id: str | None) -> None:
     """tidyr's warning for values that are not uniquely identified."""
     shown = ", ".join(f"`{name}`" for name in values)
@@ -814,7 +1103,7 @@ def _warn_not_unique(values: list[str], keys: list[str], temp_id: str | None) ->
     )
 
 
-def pivot_wider(
+def _pivot_wider_core(
     *,
     names_from: Any = "name",
     values_from: Any = "value",

@@ -968,6 +968,29 @@ def _join_names(backend: str):
     }
 
 
+def _pivot_options(backend: str):
+    d = tidy(
+        {"id": [1.0, 1.0, 2.0, 2.0], "extra": ["p", "q", "r", "s"], "key": ["a", "b", "a", "b"],
+         "sub": ["x", "y", "x", "x"], "v": [1.0, 2.0, 3.0, 4.0], "w": [5.0, 6.0, 7.0, 8.0]},
+        backend=backend,
+    )
+    f = tidy(pd.DataFrame({"id": [1.0, 2.0], "key": pd.Categorical(["a", "a"], categories=["a", "b", "c"]), "v": [1.0, 2.0]}), backend=backend)
+    g = tidy(pd.DataFrame({"id": pd.Categorical(["i1", "i1"], categories=["i1", "i2"]), "key": ["a", "b"], "v": [1.0, 2.0]}), backend=backend)
+    l = tidy({"id": [1, 2], "week_1": [5, 6], "week_2": [7, 8]}, backend=backend)
+    return {
+        "sep": d >> pivot_wider(id_cols="id", names_from=["key", "sub"], values_from="v", names_sep="."),
+        "glue": d >> pivot_wider(id_cols="id", names_from="key", values_from=["v", "w"], names_glue="{key}_{.value}"),
+        "slowest": d >> pivot_wider(id_cols="id", names_from="key", values_from=["v", "w"], names_vary="slowest"),
+        "names_expanded": f >> pivot_wider(names_from="key", values_from="v", names_expand=True),
+        "ids_expanded": g >> pivot_wider(names_from="key", values_from="v", id_expand=True),
+        "unused": d >> pivot_wider(id_cols="id", names_from="key", values_from="v", unused_fn={"w": "max"}),
+        "transformed": l >> pivot_longer(
+            ["week_1", "week_2"], names_to="week", names_prefix="week_",
+            names_transform={"week": int}, values_transform={"value": str},
+        ),
+    }
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "filter_missing": _filter_missing,
     "filter_out_missing": _filter_out_missing,
@@ -1022,6 +1045,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "splitting": _splitting,
     "empty_groups": _empty_groups,
     "join_names": _join_names,
+    "pivot_options": _pivot_options,
 }
 
 
@@ -1059,6 +1083,7 @@ CASE_VERBS = {
     "ordering": {"mutate"},
     "grids": {"expand_grid", "crossing", "uncount", "full_seq", "complete", "expand"},
     "empty_groups": {"summarise", "count"},
+    "pivot_options": {"pivot_wider", "pivot_longer"},
     "join_names": {"left_join", "inner_join", "full_join", "right_join", "cross_join"},
     "splitting": {
         "separate_wider_regex", "separate_wider_position", "separate_longer_position",

@@ -477,3 +477,24 @@ def test_pivot_wider_duplicates_become_list_columns_with_tidyr_warning(backend):
         )
     assert list(listed["a"][0]) == [1.0, 2.0]
     assert unique["a"].tolist()[0] == 1.0
+
+
+def test_pivot_wider_renaming_options_stay_lazy_on_polars(monkeypatch):
+    """names_sep / names_glue / names_vary never collect the whole frame."""
+    from tidy3.frame import TidyFrame
+
+    frame = tidy(
+        {"id": [1, 1, 2, 2], "key": ["a", "b", "a", "b"], "v": [1, 2, 3, 4], "w": [5, 6, 7, 8]}
+    )
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("pivot_wider collected the whole frame")
+
+    monkeypatch.setattr(TidyFrame, "collect", refuse)
+    plain = frame >> pivot_wider(names_from="key", values_from="v")
+    styled = frame >> pivot_wider(
+        names_from="key", values_from=["v", "w"], names_glue="{key}_{.value}", names_vary="slowest"
+    )
+    monkeypatch.undo()
+    assert as_pandas(plain).columns.tolist() == ["id", "w", "a", "b"]
+    assert as_pandas(styled).columns.tolist() == ["id", "a_v", "a_w", "b_v", "b_w"]

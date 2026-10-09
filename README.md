@@ -738,7 +738,26 @@ distinct `names_from` values unless `names=[...]` is supplied; providing
 `names` avoids that metadata query for known categories. `unnest_wider()`
 similarly discovers the width of unnamed list values.
 
-`pivot_wider()` accepts multiple `names_from` and `values_from` columns.
+`pivot_wider()` accepts multiple `names_from` and `values_from` columns, and
+tidyr's naming and shaping options:
+
+```python
+scores = tidy({"id": [1, 1, 2, 2], "term": ["fall", "spring", "fall", "spring"],
+               "math": [80, 85, 70, 75], "art": [90, 88, 60, 65]})
+scores >> pivot_wider(names_from="term", values_from=["math", "art"],
+                      names_glue="{term}_{.value}", names_vary="slowest")
+# id, fall_math, fall_art, spring_math, spring_art
+
+tidy({"id": [1, 2], "week_1": [5, 6], "week_2": [7, 8]}) >> pivot_longer(
+    ["week_1", "week_2"], names_to="week", names_prefix="week_",
+    names_transform={"week": int},                 # "1" -> 1
+)
+```
+
+`names_sep` joins name parts (default `_`), `names_expand=True` / `id_expand=True`
+add a column / row for every possible value (unused factor levels too), and
+`unused_fn` summarises columns that are not ids, names, or values, e.g.
+`unused_fn={"note": lambda s: "; ".join(s)}`.
 As in tidyr, values that the id and name columns do not uniquely identify
 become list columns with a warning; pass `values_fn="list"` to ask for lists,
 or `values_fn="mean"` (`sum`, `first`, …) to summarise duplicates.

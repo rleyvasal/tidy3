@@ -6,6 +6,14 @@ under **Changed**.
 
 ## Unreleased
 
+### Added
+
+- `pivot_wider()` gains tidyr's `names_sep`, `names_glue` (`"{key}_{.value}"`),
+  `names_vary`, `names_expand`, `id_expand`, and `unused_fn`;
+  `pivot_longer()` gains `names_transform` and `values_transform` (a function
+  or a dict by column, e.g. `{"week": int}`). Calls that use none of them run
+  exactly as before, and the naming options stay lazy on Polars.
+
 ### Changed
 
 - Joins name columns found in both tables like dplyr, in Python spelling:

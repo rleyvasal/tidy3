@@ -390,6 +390,23 @@ result <- switch(
       crossed=cross_join(a[1:2, ], b[1:2, ], suffix=sx)
     )
   },
+  pivot_options = {
+    d <- tibble(id=c(1, 1, 2, 2), extra=c("p", "q", "r", "s"), key=c("a", "b", "a", "b"),
+                sub=c("x", "y", "x", "x"), v=c(1, 2, 3, 4), w=c(5, 6, 7, 8))
+    f <- tibble(id=c(1, 2), key=factor(c("a", "a"), levels=c("a", "b", "c")), v=c(1, 2))
+    g <- tibble(id=factor(c("i1", "i1"), levels=c("i1", "i2")), key=c("a", "b"), v=c(1, 2))
+    l <- tibble(id=1:2, week_1=c(5L, 6L), week_2=c(7L, 8L))
+    list(
+      sep=pivot_wider(d, id_cols=id, names_from=c(key, sub), values_from=v, names_sep="."),
+      glue=pivot_wider(d, id_cols=id, names_from=key, values_from=c(v, w), names_glue="{key}_{.value}"),
+      slowest=pivot_wider(d, id_cols=id, names_from=key, values_from=c(v, w), names_vary="slowest"),
+      names_expanded=pivot_wider(f, names_from=key, values_from=v, names_expand=TRUE),
+      ids_expanded=pivot_wider(g, names_from=key, values_from=v, id_expand=TRUE),
+      unused=pivot_wider(d, id_cols=id, names_from=key, values_from=v, unused_fn=list(w=max)),
+      transformed=pivot_longer(l, starts_with("week_"), names_to="week", names_prefix="week_",
+                               names_transform=list(week=as.integer), values_transform=list(value=as.character))
+    )
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 
