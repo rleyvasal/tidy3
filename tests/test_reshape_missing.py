@@ -508,3 +508,38 @@ def test_check_pivot_spec_errors_like_tidyr():
     with pytest.raises(ValueError, match="must be unique"):
         check_pivot_spec({".name": ["a", "a"], ".value": ["v", "v"]})
     assert as_pandas(check_pivot_spec({".name": ["a"], ".value": ["v"]})).shape == (1, 2)
+
+
+def test_pivot_options_and_specs_never_convert_polars_frames_to_pandas(monkeypatch):
+    """Every pivot option and spec function stays in Polars on that backend."""
+    import polars as pl
+
+    from tidy3 import build_longer_spec, build_wider_spec, pivot_longer_spec, pivot_wider_spec
+    from tidy3.frame import TidyFrame
+
+    long = tidy(
+        {"id": ["i1", "i1", "i2", "i2"], "key": ["a", "b", "a", "b"],
+         "v": [1.0, 2.0, 3.0, 4.0], "note": ["p", "q", "r", "s"]}
+    )
+    wide = tidy({"id": [1, 2], "mean_1": [5.0, 6.0], "sd_1": [0.1, 0.2]})
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("converted a Polars frame to pandas")
+
+    monkeypatch.setattr(TidyFrame, "collect", refuse)
+    monkeypatch.setattr(pl.DataFrame, "to_pandas", refuse)
+    results = [
+        long >> pivot_wider(names_from="key", values_from="v", id_cols="id",
+                            names_expand=True, id_expand=True,
+                            unused_fn={"note": lambda s: "+".join(s)}),
+        long >> pivot_wider(names_from="key", values_from="v", id_cols="id", unused_fn={"note": "first"}),
+        long >> pivot_wider_spec(build_wider_spec(long, names_from="key", values_from="v"), id_cols="id"),
+        wide >> pivot_longer_spec(
+            build_longer_spec(wide, ["mean_1", "sd_1"], names_to=[".value", "visit"], names_sep="_")
+        ),
+    ]
+    monkeypatch.undo()
+    assert as_pandas(results[0])["note"].tolist() == ["p+q", "r+s"]
+    assert as_pandas(results[1]).columns.tolist() == ["id", "a", "b", "note"]
+    assert as_pandas(results[2]).columns.tolist() == ["id", "a", "b"]
+    assert as_pandas(results[3]).columns.tolist() == ["id", "visit", "mean", "sd"]

@@ -12,7 +12,7 @@ under **Changed**.
   `names_vary`, `names_expand`, `id_expand`, and `unused_fn`;
   `pivot_longer()` gains `names_transform` and `values_transform` (a function
   or a dict by column, e.g. `{"week": int}`). Calls that use none of them run
-  exactly as before, and the naming options stay lazy on Polars.
+  exactly as before, and on Polars every option stays in Polars (lazy).
 - tidyr's smaller list and splitting options: `separate_wider_delim()`'s
   `names_sep` and `cols_remove`; `unnest_longer()`'s `indices_include` and
   `transform`; `unnest_wider()`'s `transform`; `hoist()`'s `remove` and
@@ -20,7 +20,7 @@ under **Changed**.
 - tidyr's pivot specs: `build_longer_spec()` / `pivot_longer_spec()`,
   `build_wider_spec()` / `pivot_wider_spec()`, and `check_pivot_spec()`.
   Build the mapping as a table, edit it (rename columns, drop
-  combinations), and pivot with it.
+  combinations), and pivot with it; on Polars the pivots stay lazy.
 
 ### Changed
 
