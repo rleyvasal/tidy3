@@ -4,7 +4,10 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.6.0 — 2026-10-09
+
+dplyr-style join and column naming in Python spelling, the rest of tidyr's
+pivot and list options, pivot specs, and Polars-native verbs throughout.
 
 ### Added
 
