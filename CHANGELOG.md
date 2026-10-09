@@ -4,6 +4,18 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- In notebooks, columns named like Python builtins or tidy3 helpers (`id`,
+  `type`, `max`, `min`, `sum`, `n`, …) work as bare names wherever only a
+  column makes sense: `filter(id > 1)`, `select(id, type)`,
+  `arrange(desc(id))`, `mutate(z = max * 2)`, `summarise(m = mean(max))`.
+  They used to stay Python's `id`, `type`, `max` and fail. Functions passed
+  as functions (`across(everything(), mean)`) and names you assign in the
+  notebook are unchanged.
+
 ## 0.3.0 — 2026-10-08
 
 First release on PyPI: `pip install tidy3`.

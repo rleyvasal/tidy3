@@ -446,6 +446,11 @@ ggplot(cars_space, aes(x=`hp new`, y=mpg)) + geom_point()
 - **Expression context** (`filter`, `mutate` RHS, …): bare name → `col("name")`
 - **Selector context** (`select`, `group_by`, …): bare name → `"name"`
 - **Backticks**: `` `any column name` `` for spaces / odd identifiers
+- **Columns named like Python builtins or tidy3 helpers** (`id`, `type`, `max`,
+  `n`) work bare wherever only a column makes sense: `filter(id > 1)`,
+  `select(id, type)`, `arrange(desc(id))`, `mutate(z = max * 2)`. Passed as a
+  function, as in `across(everything(), mean)`, they stay functions. A name you
+  assign in the notebook (`n = 5`) means your variable.
 - **plot3** `aes` / `facet_wrap` use the same style in Jupyter
 
 #### Export notebook → plain Python script (`nb_export`)

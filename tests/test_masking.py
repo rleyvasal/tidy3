@@ -170,3 +170,30 @@ def test_comprehension_variables_are_not_columns():
     )
     assert f"{COL_NAME}('v')" not in _norm("mutate(z=sum(v for v in [1, 2]))")
     assert f"{COL_NAME}('k')" not in _norm("mutate(z={k: 1 for k in ['a']})")
+
+
+def test_builtin_and_helper_names_mean_columns_where_only_a_column_fits():
+    c = COL_NAME
+    assert f"filter({c}('id') > 1)" in _norm("filter(id > 1)")
+    assert f"mutate(z={c}('max') * 2, w={c}('n') + 1, v={c}('id'))" in _norm(
+        "mutate(z = max * 2, w = n + 1, v = id)"
+    )
+    assert "select('id', 'type', ~all_of(['max']))" in _norm("select(id, type, -max)")
+    assert f"arrange(desc({c}('id')), {c}('type'))" in _norm("arrange(desc(id), type)")
+    assert f"summarise(m=mean({c}('max')), k=n())" in _norm("summarise(m = mean(max), k = n())")
+    assert "count('type')" in _norm("count(type)")
+
+
+def test_builtin_and_helper_names_stay_functions_when_passed_as_functions():
+    assert "across(where(is_numeric), mean)" in _norm("summarise(across(where(is_numeric), mean))")
+    assert "{'m': mean, 's': sum}" in _norm("summarise(across(everything(), {'m': mean, 's': sum}))")
+    assert "rename_with(str.upper" in _norm("rename_with(str.upper, starts_with('x'))")
+    assert "len('abc')" in _norm("mutate(z = len('abc'))")
+
+
+def test_rebound_notebook_names_are_not_soft():
+    from tidy3.masking import soft_names
+
+    soft = soft_names({"n": 5, "id": id})
+    assert "id" in soft and "max" in soft
+    assert "n" not in soft

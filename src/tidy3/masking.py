@@ -155,6 +155,20 @@ _PASSTHROUGH_KW = frozenset(
 # Keywords that are expressions (weights, order, …).
 _EXPR_KW = frozenset({"wt", "order_by", "weight"})
 
+# Helpers whose positional arguments are columns or values, so a bare
+# builtin-named column there (desc(id), mean(max)) means the column.
+_FIRST_COLUMN_ARG = frozenset(
+    {
+        "desc", "mean", "sum", "min", "max", "median", "std", "sd", "var",
+        "first", "last", "nth", "lead", "lag", "cummean", "cumall", "cumany",
+        "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist",
+        "ntile", "case_match", "recode", "any", "all", "abs", "round",
+    }
+)
+_ALL_COLUMN_ARGS = frozenset(
+    {"coalesce", "if_else", "near", "na_if", "n_distinct", "between", "consecutive_id"}
+)
+
 _BT_RE = re.compile(r"`([^`\n]+)`")
 
 
@@ -507,11 +521,46 @@ def _is_bt_call(node: ast.AST) -> bool:
 
 
 class MaskNames(ast.NodeTransformer):
-    """Rewrite bare names / backtick sentinels inside one expression tree."""
+    """Rewrite bare names / backtick sentinels inside one expression tree.
 
-    def __init__(self, mode: Mode, known: set[str]):
+    ``soft`` names are Python builtins and tidy3 helpers the notebook has not
+    rebound (``id``, ``type``, ``max``, ``n``). They stay Python objects,
+    except where only a column makes sense: the whole argument
+    (``select(id)``, ``mutate(z = id)``), an operand (``id > 1``,
+    ``max * 2``), or the column argument of a tidy3 helper (``desc(id)``).
+    """
+
+    def __init__(self, mode: Mode, known: set[str], soft: set[str] | None = None):
         self.mode = mode
         self.known = known
+        self.soft = soft or set()
+
+    def mask_root(self, node: ast.AST) -> ast.AST:
+        """Mask one whole verb argument."""
+        return self._operand(node)
+
+    def _operand(self, node: ast.AST) -> ast.AST:
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id in self.soft
+        ):
+            return self._replacement(node.id, node)
+        return self.visit(node)
+
+    def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
+        node.left = self._operand(node.left)
+        node.right = self._operand(node.right)
+        return node
+
+    def visit_Compare(self, node: ast.Compare) -> ast.AST:
+        node.left = self._operand(node.left)
+        node.comparators = [self._operand(value) for value in node.comparators]
+        return node
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> ast.AST:
+        node.values = [self._operand(value) for value in node.values]
+        return node
 
     def _replacement(self, name: str, old: ast.AST) -> ast.AST:
         if self.mode == "selector":
@@ -594,7 +643,7 @@ class MaskNames(ast.NodeTransformer):
         if self.mode == "selector" and isinstance(
             node.op, (ast.USub, ast.Invert, ast.Not)
         ):
-            operand = self.visit(node.operand)
+            operand = self._operand(node.operand)
             if isinstance(operand, ast.Constant) and isinstance(operand.value, str):
                 # -"mpg" is invalid; -mpg → all_of(["mpg"]) then invert
                 operand = self._all_of_one(operand.value)
@@ -602,7 +651,7 @@ class MaskNames(ast.NodeTransformer):
                 ast.UnaryOp(op=ast.Invert(), operand=operand),
                 node,
             )
-        node.operand = self.visit(node.operand)
+        node.operand = self._operand(node.operand)
         return node
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
@@ -613,7 +662,16 @@ class MaskNames(ast.NodeTransformer):
         if not isinstance(node.func, ast.Name):
             node.func = self.visit(node.func)
         # Do not treat helper names as columns; leave Name funcs alone.
-        node.args = [self.visit(arg) for arg in node.args]
+        helper = node.func.id if isinstance(node.func, ast.Name) else None
+        if helper in _ALL_COLUMN_ARGS:
+            node.args = [self._operand(arg) for arg in node.args]
+        elif helper in _FIRST_COLUMN_ARG and node.args:
+            node.args = [
+                self._operand(node.args[0]),
+                *(self.visit(arg) for arg in node.args[1:]),
+            ]
+        else:
+            node.args = [self.visit(arg) for arg in node.args]
         node.keywords = [
             ast.keyword(arg=kw.arg, value=self.visit(kw.value))
             for kw in node.keywords
@@ -638,6 +696,36 @@ def default_known_names(extra: Iterable[str] | None = None) -> set[str]:
     if extra:
         known.update(extra)
     return known
+
+
+_UNSET = object()
+
+
+def soft_names(namespace: dict[str, Any] | None = None) -> set[str]:
+    """Builtins and tidy3 helpers that may also name a column (``id``, ``n``).
+
+    A name the notebook has rebound (``n = 5``) is the user's variable and is
+    not soft.
+    """
+    names = set(dir(builtins))
+    try:
+        import tidy3 as t3
+
+        names.update(t3.__all__)
+    except Exception:
+        t3 = None
+    soft = set()
+    for name in names:
+        if name.startswith("_"):
+            continue
+        if namespace is not None and name in namespace:
+            value = namespace[name]
+            if value is not getattr(builtins, name, _UNSET) and (
+                t3 is None or value is not getattr(t3, name, _UNSET)
+            ):
+                continue
+        soft.add(name)
+    return soft
 
 
 def _imports_plot3(node: ast.Module) -> bool:
@@ -690,25 +778,37 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
 
     def __init__(self, known: set[str] | None = None):
         self._known_static = known
+        self._soft: set[str] = set()
 
     def _known(self) -> set[str]:
         if self._known_static is not None:
             return set(self._known_static)
         extra: set[str] = set()
+        namespace = self._namespace()
+        if namespace is not None:
+            extra.update(namespace.keys())
+        return default_known_names(extra)
+
+    @staticmethod
+    def _namespace() -> dict[str, Any] | None:
         try:
             from IPython import get_ipython
 
             ip = get_ipython()
-            if ip is not None and getattr(ip, "user_ns", None) is not None:
-                extra.update(ip.user_ns.keys())
         except Exception:
-            pass
-        return default_known_names(extra)
+            return None
+        return getattr(ip, "user_ns", None) if ip is not None else None
 
     def _mask(self, node: ast.AST, mode: Mode) -> ast.AST:
-        return MaskNames(mode, self._known()).visit(node)
+        return MaskNames(mode, self._known(), self._soft).mask_root(node)
 
     def visit_Module(self, node: ast.Module) -> ast.AST:
+        # Static known names (export, tests) have no notebook to consult.
+        self._soft = soft_names(
+            None if self._known_static is not None else self._namespace()
+        )
+        if self._known_static is not None:
+            self._soft &= self._known_static
         node = self.generic_visit(node)
         return _plot3_masking_for_importing_cell(node)
 
