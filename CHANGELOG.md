@@ -4,7 +4,10 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.4.0 — 2026-10-08
+
+dplyr 1.2 parity, dplyr's group functions, and more tidyr verbs, each checked
+against R.
 
 ### Added
 
