@@ -6,6 +6,12 @@ under **Changed**.
 
 ## Unreleased
 
+### Changed
+
+- `group_rows()` and `group_data()`'s `.rows` give 1-based row positions, as
+  in dplyr and the rest of tidy3 (`slice(1)` is the first row). They were
+  0-based in 0.4.0 and 0.5.0, so each position is now one higher.
+
 ### Fixed
 
 - `summarise()` and `count()` after `group_by(..., drop=False)` with several

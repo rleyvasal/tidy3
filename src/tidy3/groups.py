@@ -5,9 +5,10 @@ Each function takes a frame or pipes: ``group_size(df)`` or
 missing values last. With ``group_by(..., drop=False)``, unused levels of a
 categorical (factor) key form empty groups, following dplyr's rule.
 
-Row positions (``group_rows``, ``group_data``'s ``.rows``) are 0-based, so
-they index Python sequences directly; dplyr's are 1-based. Group numbers
-(``group_indices``) are 1-based, like ``cur_group_id()`` and dplyr.
+Row positions (``group_rows``, ``group_data``'s ``.rows``) and group numbers
+(``group_indices``) are 1-based, as in dplyr and the rest of tidy3
+(``slice(1)`` is the first row), so ``slice(*group_rows(df)[0])`` picks the
+first group's rows. Subtract 1 to index a pandas frame or NumPy array.
 """
 
 from __future__ import annotations
@@ -148,13 +149,13 @@ def _result(tf: Any, pdf: pd.DataFrame) -> Any:
 
 
 def group_data(data: Any = _MISSING):
-    """Group keys plus a ``.rows`` column of each group's 0-based row positions."""
+    """Group keys plus a ``.rows`` column of each group's 1-based row positions."""
     if data is _MISSING:
         return _pipeable("group_data", group_data)
     tf = _frame(data)
     names, pdf, table = _group_table(tf)
     out = _keys_frame(tf, names, pdf, table)
-    out[".rows"] = [positions.tolist() for _, positions in table]
+    out[".rows"] = [(positions + 1).tolist() for _, positions in table]
     return _result(tf, out)
 
 
@@ -168,11 +169,11 @@ def group_keys(data: Any = _MISSING):
 
 
 def group_rows(data: Any = _MISSING):
-    """List of each group's 0-based row positions."""
+    """List of each group's 1-based row positions (as in dplyr)."""
     if data is _MISSING:
         return _pipeable("group_rows", group_rows)
     _, _, table = _group_table(_frame(data))
-    return [positions.tolist() for _, positions in table]
+    return [(positions + 1).tolist() for _, positions in table]
 
 
 def group_size(data: Any = _MISSING):

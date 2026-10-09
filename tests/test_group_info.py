@@ -1,4 +1,4 @@
-"""Group metadata: call and pipe forms, 0-based rows, group_walk, nest_by.
+"""Group metadata: call and pipe forms, 1-based rows, group_walk, nest_by.
 
 Values are compared with dplyr in test_r_oracle_parity.py (group_info).
 """
@@ -20,6 +20,8 @@ from tidy3 import (
     groups,
     n_groups,
     nest_by,
+    slice,
+    ungroup,
     tidy,
 )
 
@@ -39,9 +41,12 @@ def test_functions_work_called_or_piped(backend):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_rows_are_zero_based_and_group_numbers_one_based(backend):
+def test_rows_and_group_numbers_are_one_based_like_dplyr(backend):
     grouped = tidy(DATA, backend=backend) >> group_by("g")
-    assert group_rows(grouped) == [[1, 3], [0, 2, 4]]
+    assert group_rows(grouped) == [[2, 4], [1, 3, 5]]
+    # Positions work with slice(), which is 1-based too.
+    first = (grouped >> ungroup() >> slice(*group_rows(grouped)[0])).collect(as_="pandas")
+    assert first["g"].tolist() == ["a", "a"]
     assert group_indices(grouped) == [2, 1, 2, 1, 2]
     assert group_size(grouped) == [2, 3]
 

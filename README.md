@@ -874,7 +874,7 @@ by_team = tidy(df) >> group_by("team")
 
 group_keys(by_team)        # one row per group, sorted by key
 group_size(by_team)        # [2, 2]
-group_rows(by_team)        # [[2, 3], [0, 1]]: 0-based row positions
+group_rows(by_team)        # [[3, 4], [1, 2]]: 1-based row positions
 by_team >> group_indices() # each row's 1-based group number
 by_team >> group_walk(lambda part, key: print(key["team"], part.collect().height))
 
@@ -883,7 +883,8 @@ tidy(df) >> nest_by("team")  # one row per team, other columns nested in `data`
 
 Groups come in dplyr's order, sorted by key with missing last, in these
 functions and in `group_split()`, `group_map()`, `group_modify()`, and
-`group_nest()`. Row positions are 0-based for Python; dplyr's are 1-based.
+`group_nest()`. Row positions are 1-based, as in dplyr and `slice()`;
+subtract 1 to index a pandas frame or NumPy array.
 
 Aggregates accept `na_rm=` and default to `False`, matching dplyr: a missing
 value propagates unless removal is requested explicitly. Use
