@@ -699,6 +699,9 @@ distinct `names_from` values unless `names=[...]` is supplied; providing
 similarly discovers the width of unnamed list values.
 
 `pivot_wider()` accepts multiple `names_from` and `values_from` columns.
+As in tidyr, values that the id and name columns do not uniquely identify
+become list columns with a warning; pass `values_fn="list"` to ask for lists,
+or `values_fn="mean"` (`sum`, `first`, …) to summarise duplicates.
 `pivot_longer()` supports the `.value` sentinel, and `separate(convert=True)`
 performs R-style logical/numeric inference on both backends. Schema-dependent
 reshape and conversion operations issue a metadata-only query on Polars.

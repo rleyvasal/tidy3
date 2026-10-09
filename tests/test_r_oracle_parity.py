@@ -453,9 +453,18 @@ def _pivots(backend: str):
     long = wide >> pivot_longer(
         ["a", "b"], names_to="name", values_to="value"
     )
+    dup = tidy(
+        {"id": [1, 1, 2], "key": ["a", "a", "b"], "val": [1.0, 2.0, 3.0]},
+        backend=backend,
+    )
+    with pytest.warns(UserWarning, match="not uniquely identified"):
+        duplicated = dup >> pivot_wider(names_from="key", values_from="val")
     return {
         "long": long,
         "wide": long >> pivot_wider(names_from="name", values_from="value"),
+        "duplicated": duplicated,
+        "as_list": dup >> pivot_wider(names_from="key", values_from="val", values_fn="list"),
+        "averaged": dup >> pivot_wider(names_from="key", values_from="val", values_fn="mean"),
     }
 
 

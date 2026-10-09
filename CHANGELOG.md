@@ -6,6 +6,13 @@ under **Changed**.
 
 ## Unreleased
 
+### Changed
+
+- `pivot_wider()` handles values that are not uniquely identified like
+  tidyr: they become list columns with tidyr's warning and advice, instead
+  of a low-level Polars or pandas error. `values_fn="list"` asks for list
+  columns without the warning.
+
 ### Fixed
 
 - In notebooks, columns named like Python builtins or tidy3 helpers (`id`,

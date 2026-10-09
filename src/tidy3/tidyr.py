@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import warnings
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -557,6 +558,22 @@ def pivot_longer(
     return Verb(_apply, "pivot_longer")
 
 
+def _warn_not_unique(values: list[str], keys: list[str], temp_id: str | None) -> None:
+    """tidyr's warning for values that are not uniquely identified."""
+    shown = ", ".join(f"`{name}`" for name in values)
+    by = [key for key in keys if key != temp_id]
+    warnings.warn(
+        f"Values from {shown} are not uniquely identified; output will contain "
+        "list-cols.\n"
+        '* Use values_fn="list" to suppress this warning.\n'
+        '* Use values_fn="mean" (or "sum", "first", ...) to summarise duplicates.\n'
+        "* Use the following tidy3 code to identify duplicates:\n"
+        f"  data >> summarise(n=n(), by={by!r}) >> filter(col(\"n\") > 1)",
+        UserWarning,
+        stacklevel=4,
+    )
+
+
 def pivot_wider(
     *,
     names_from: Any = "name",
@@ -568,12 +585,19 @@ def pivot_wider(
     values_fn: str | None = None,
     names: Iterable[Any] | None = None,
 ) -> Verb:
-    """Widen a name/value pair; discovers output names when not supplied."""
+    """Widen a name/value pair; discovers output names when not supplied.
+
+    Like tidyr, values that are not uniquely identified by the id and name
+    columns become list columns with a warning; ``values_fn="list"`` asks for
+    list columns without the warning, and ``values_fn="mean"`` (or ``sum``,
+    ``first``, …) summarises duplicates instead.
+    """
     if values_fn is not None and values_fn not in {
-        "first", "last", "sum", "min", "max", "mean", "median", "len"
+        "first", "last", "sum", "min", "max", "mean", "median", "len", "list"
     }:
         raise ValueError(
-            "values_fn must be first, last, sum, min, max, mean, median, len, or None"
+            "values_fn must be first, last, sum, min, max, mean, median, len, "
+            "list, or None"
         )
 
     def _apply(tf):
@@ -619,7 +643,23 @@ def pivot_wider(
                 combinations = [(value,) for value in names]
             else:
                 combinations = [tuple(value) for value in names]
-            if values_fn is None:
+            as_lists = values_fn == "list" or (
+                values_fn is None
+                and bool(pdf.duplicated(subset=[*identifiers, *name_columns]).any())
+            )
+            if as_lists and values_fn is None:
+                _warn_not_unique(value_columns, [*identifiers, *name_columns], temp_id)
+            if as_lists:
+                out = pdf.pivot_table(
+                    index=identifiers,
+                    columns=name_argument,
+                    values=value_argument,
+                    aggfunc=list,
+                    sort=names_sort,
+                )
+                # Combinations with no rows are missing (tidyr's NULL).
+                out = out.astype(object).where(out.notna(), None)
+            elif values_fn is None:
                 out = pdf.pivot(
                     index=identifiers,
                     columns=name_argument,
@@ -679,12 +719,25 @@ def pivot_wider(
         lf = tf._lf
         if temp_id:
             lf = lf.with_columns(pl.lit(0).alias(temp_id))
-        if names is None:
-            discovered = (
-                lf.select(name_columns)
-                .unique(maintain_order=not names_sort)
-                .collect()
+        # tidyr turns values that are not uniquely identified into lists, so
+        # check for duplicates (with the name discovery when there is one).
+        duplicates = None
+        if values_fn is None:
+            count = _temp_name(all_columns, "__tidy3_n")
+            duplicates = (
+                lf.group_by([*identifiers, *name_columns])
+                .agg(pl.len().alias(count))
+                .select((pl.col(count).max() > 1).fill_null(False))
             )
+        if names is None:
+            discovery = lf.select(name_columns).unique(
+                maintain_order=not names_sort
+            )
+            if duplicates is not None:
+                discovered, duplicated = pl.collect_all([discovery, duplicates])
+                duplicates = duplicated
+            else:
+                discovered = discovery.collect()
             if names_sort:
                 discovered = discovered.sort(name_columns)
             combinations = discovered.rows()
@@ -705,12 +758,19 @@ def pivot_wider(
                         for index, column in enumerate(name_columns)
                     }
                 )
+        if isinstance(duplicates, pl.LazyFrame):
+            duplicates = duplicates.collect()
+        as_lists = values_fn == "list" or (
+            duplicates is not None and bool(duplicates.item())
+        )
+        if as_lists and values_fn is None:
+            _warn_not_unique(value_columns, [*identifiers, *name_columns], temp_id)
         out = lf.pivot(
             on=name_argument,
             on_columns=on_columns,
             index=identifiers,
             values=value_argument,
-            aggregate_function=values_fn,
+            aggregate_function=pl.element() if as_lists else values_fn,
             maintain_order=True,
         )
         if temp_id:
@@ -738,6 +798,16 @@ def pivot_wider(
         }
         if rename:
             out = out.rename(rename)
+        if as_lists:
+            # Combinations with no rows come back as [] — make them missing.
+            out = out.with_columns(
+                pl.when(pl.col(name).list.len() > 0).then(pl.col(name)).alias(name)
+                for name in (
+                    rename.get(column, column)
+                    for column in output_columns
+                    if column not in identifiers
+                )
+            )
         if values_fill is not None:
             value_outputs = [rename.get(name, name) for name in output_columns if name not in identifiers]
             if isinstance(values_fill, dict):

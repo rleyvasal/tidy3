@@ -449,3 +449,31 @@ def test_reshape_argument_validation():
         )
     with pytest.raises(ValueError, match="direction"):
         fill("x", direction="sideways")
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_pivot_wider_duplicates_become_list_columns_with_tidyr_warning(backend):
+    import warnings
+
+    data = {"id": [1, 1, 2], "key": ["a", "a", "b"], "val": [1.0, 2.0, 3.0]}
+    with pytest.warns(UserWarning, match='values_fn="list"') as caught:
+        out = as_pandas(
+            tidy(data, backend=backend)
+            >> pivot_wider(names_from="key", values_from="val")
+        )
+    assert "summarise(n=n(), by=['id', 'key'])" in str(caught[0].message)
+    assert [list(cell) for cell in out["a"][:1]] == [[1.0, 2.0]]
+    assert out["a"][1] is None and out["b"][0] is None
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        listed = as_pandas(
+            tidy(data, backend=backend)
+            >> pivot_wider(names_from="key", values_from="val", values_fn="list")
+        )
+        unique = as_pandas(
+            tidy({"id": [1, 2], "key": ["a", "b"], "val": [1.0, 3.0]}, backend=backend)
+            >> pivot_wider(names_from="key", values_from="val")
+        )
+    assert list(listed["a"][0]) == [1.0, 2.0]
+    assert unique["a"].tolist()[0] == 1.0

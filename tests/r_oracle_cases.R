@@ -30,7 +30,13 @@ normalise <- function(x) {
       columns=unname(names(x)),
       types=unname(vapply(x, column_type, character(1))),
       data=unname(lapply(x, function(column) {
-        unname(lapply(as.list(column), normalise_value))
+        cells <- lapply(as.list(column), normalise_value)
+        # Keep list-column cells as arrays: auto_unbox would turn list(3)
+        # into a bare 3.
+        if (is.list(column)) {
+          cells <- lapply(cells, function(v) if (is.atomic(v) && !is.null(v)) I(v) else v)
+        }
+        unname(cells)
       }))
     ))
   }
@@ -158,7 +164,14 @@ result <- switch(
   pivots = {
     wide <- tibble(id=1:2, a=c(10L, 20L), b=c(30L, 40L))
     long <- wide |> pivot_longer(c(a, b), names_to="name", values_to="value")
-    list(long=long, wide=long |> pivot_wider(names_from=name, values_from=value))
+    dup <- tibble(id=c(1L, 1L, 2L), key=c("a", "a", "b"), val=c(1, 2, 3))
+    list(
+      long=long,
+      wide=long |> pivot_wider(names_from=name, values_from=value),
+      duplicated=suppressWarnings(dup |> pivot_wider(names_from=key, values_from=val)),
+      as_list=dup |> pivot_wider(names_from=key, values_from=val, values_fn=list),
+      averaged=dup |> pivot_wider(names_from=key, values_from=val, values_fn=mean)
+    )
   },
   separate_unite = {
     x <- tibble(id=1:2, code=c("a-10", "b-20"))
