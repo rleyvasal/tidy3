@@ -58,6 +58,9 @@ from tidy3 import (
     rename_with,
     replace_na,
     recode,
+    recode_values,
+    replace_values,
+    replace_when,
     right_join,
     rowwise,
     rows_append,
@@ -91,6 +94,8 @@ from tidy3 import (
     unnest,
     unnest_longer,
     unnest_wider,
+    when_all,
+    when_any,
 )
 
 
@@ -720,6 +725,56 @@ def _new_helpers(backend: str):
     }
 
 
+def _dplyr_12_helpers(backend: str):
+    x = tidy(
+        {
+            "state": ["NC", "NYC", "CA", None, "NYC", "Unknown"],
+            "score": [1.0, 2.0, 3.0, 4.0, 5.0, None],
+        },
+        backend=backend,
+    )
+    b = tidy(
+        {
+            "x": [True, True, True, False, False, False, None, None, None],
+            "y": [True, False, None, True, False, None, True, False, None],
+        },
+        backend=backend,
+    )
+    pets = tidy(
+        {"type": ["dog", "dog", "cat", "dog", "cat"], "age": [1.0, 3.0, 5.0, 2.0, 4.0]},
+        backend=backend,
+    )
+    return {
+        "values": x >> mutate(
+            full=recode_values(
+                "state", ("NC", "North Carolina"), ("NYC", "New York"), ("CA", "California")
+            ),
+            grouped=recode_values(
+                "state", ("NC", "North Carolina"), (["NYC", "CA"], "elsewhere"),
+                default="<not recorded>",
+            ),
+            label=recode_values("score", from_=[1, 2, 3, 4, 5], to=["SD", "D", "N", "A", "SA"]),
+            replaced=replace_values("state", ("NYC", "NY")),
+            no_missing=replace_values("state", (None, "Unknown (NA)")),
+            tidied=replace_values("state", ([None, "Unknown"], "<not recorded>")),
+            capped=replace_when("score", (col("score") > 3, 0.0)),
+            big=col("score") > 3,
+        ),
+        "logic": b >> mutate(
+            any_p=when_any(col("x"), col("y")),
+            any_r=when_any(col("x"), col("y"), na_rm=True),
+            all_p=when_all(col("x"), col("y")),
+            all_r=when_all(col("x"), col("y"), na_rm=True),
+        ),
+        "pets": pets >> mutate(
+            type=replace_when(
+                "type", ((col("type") == "dog") & (col("age") <= 2), "puppy")
+            )
+        ),
+        "filtered": x >> filter(when_any(col("state") == "CA", col("score") >= 5)),
+    }
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "filter_missing": _filter_missing,
     "filter_out_missing": _filter_out_missing,
@@ -767,6 +822,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "separate_convert_types": _separate_convert_types,
     "arrange_by_group": _arrange_by_group,
     "new_helpers": _new_helpers,
+    "dplyr_12_helpers": _dplyr_12_helpers,
 }
 
 
@@ -798,6 +854,8 @@ CASE_VERBS = {
     "nest_roundtrip": {"nest", "unnest"},
     "unnest_longer": {"unnest_longer"},
     "unnest_wider": {"unnest_wider"},
+    "new_helpers": {"separate_longer_delim", "separate_wider_delim"},
+    "dplyr_12_helpers": {"mutate", "filter"},
 }
 
 
@@ -839,8 +897,6 @@ def test_every_public_frame_verb_has_a_parity_classification():
         "hoist",
         "pack",
         "unpack",
-        "separate_longer_delim",
-        "separate_wider_delim",
     }
     # Column-name helpers from janitor and rlang, not dplyr or tidyr.
     not_dplyr = {"clean_names", "make_clean_names", "set_names"}

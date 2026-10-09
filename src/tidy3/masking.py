@@ -162,11 +162,15 @@ _FIRST_COLUMN_ARG = frozenset(
         "desc", "mean", "sum", "min", "max", "median", "std", "sd", "var",
         "first", "last", "nth", "lead", "lag", "cummean", "cumall", "cumany",
         "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist",
-        "ntile", "case_match", "recode", "any", "all", "abs", "round",
+        "ntile", "case_match", "recode", "recode_values", "replace_values",
+        "replace_when", "any", "all", "abs", "round",
     }
 )
 _ALL_COLUMN_ARGS = frozenset(
-    {"coalesce", "if_else", "near", "na_if", "n_distinct", "between", "consecutive_id"}
+    {
+        "coalesce", "if_else", "near", "na_if", "n_distinct", "between",
+        "consecutive_id", "when_any", "when_all",
+    }
 )
 
 _BT_RE = re.compile(r"`([^`\n]+)`")

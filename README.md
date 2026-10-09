@@ -523,7 +523,7 @@ ln -sfn /path/to/plot3 plot3
 | Selectors | `everything`, `col_range`/`cols_between`, `last_col`, `group_cols`, `starts_with`, `ends_with`, `contains`, `matches`, `num_range`, `all_of`, `any_of`, `where`; set ops `\|` `&` `-` `~`/`!`/`-helper`; predicates `is_numeric`, `is_integer`, `is_float`, `is_string`/`is_character`, `is_bool`/`is_boolean`, `is_datetime`, `is_categorical`, `is_temporal` |
 | Column-wise | `across`, `if_any`, `if_all`, `pick`, `c_across` |
 | Materialize | `collect`, `pull`, `glimpse`, `peek` |
-| Expr | `col`, `n`, `mean`, `sum`, `min`, `max`, `median`, `std`/`sd`, `var`, `any`, `all`, `first`, `last`, `nth`, `near`, `na_if`, `between`, `consecutive_id`, `case_match`, `recode`, ranking/window helpers, `n_distinct`, `coalesce`, `if_else`, `case_when` |
+| Expr | `col`, `n`, `mean`, `sum`, `min`, `max`, `median`, `std`/`sd`, `var`, `any`, `all`, `first`, `last`, `nth`, `near`, `na_if`, `between`, `consecutive_id`, `case_match`, `recode`, ranking/window helpers, `n_distinct`, `coalesce`, `if_else`, `case_when`, `recode_values`, `replace_values`, `replace_when`, `when_any`, `when_all` |
 | Jupyter | `%load_ext tidy3.jupyter`, `%tidy3_run`, `%%tidy3_run`, `%tidy3_pipes` |
 | Partial | `partial_run`, `maybe_rewrite_cell`, `normalize_pipe_source` |
 | Escape | `TidyFrame.with_polars(fn)` |
@@ -934,6 +934,24 @@ tidy(events) >> mutate(
     by="team",
 )
 ```
+
+dplyr 1.2's recoding helpers map values with `(values, replacement)` pairs,
+where `None` matches missing values, or with a `from_=`/`to=` lookup table:
+
+```python
+tidy(events) >> mutate(
+    team_name=recode_values("team", ("red", "Red Rockets"), ("blue", "Blue Jays")),
+    score=replace_values("score", (None, 0)),
+    capped=replace_when("value", (col("value") > 3.5, 3.5)),
+    flagged=when_any(col("score") >= 90, col("value") < 3),
+)
+```
+
+`recode_values()` builds a new column (unmatched values become `default`, or
+an error with `unmatched="error"`); `replace_values()` and `replace_when()`
+change some values and keep the rest. `when_any()` and `when_all()` combine
+conditions with `|` and `&`; `na_rm=True` ignores missing values. They
+supersede `case_match()` and `recode()`, which still work.
 
 Ranking helpers are `row_number`, `min_rank`, `dense_rank`, `percent_rank`,
 `cume_dist`, and `ntile`. Window and value helpers include `lead`, `lag`,

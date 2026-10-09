@@ -29,6 +29,51 @@ _BIN = {
     "&": operator.and_, "|": operator.or_,
 }
 
+_COMPARE = frozenset({"==", "!=", "<", "<=", ">", ">="})
+
+
+def _is_missing(value: Any) -> Any:
+    if isinstance(value, pd.Series):
+        return value.isna()
+    return value is None or value is pd.NA or (
+        isinstance(value, float) and value != value
+    )
+
+
+def _compare(op: str, left: Any, right: Any) -> Any:
+    """Compare like R and Polars: a missing operand gives a missing result.
+
+    NumPy comparisons give False for NaN/None; ``filter`` would drop those
+    rows either way, but ``mutate`` and ``when_any`` must see NA.
+    """
+    result = _BIN[op](left, right)
+    if not isinstance(result, pd.Series):
+        return result
+    missing = _is_missing(left) | _is_missing(right)
+    if isinstance(missing, pd.Series):
+        if not missing.any():
+            return result
+    elif not missing:
+        return result
+    return result.astype("boolean").mask(missing, pd.NA)
+
+
+def _as_logical(value: Any) -> Any:
+    if isinstance(value, pd.Series):
+        return value if str(value.dtype) == "boolean" else value.astype("boolean")
+    return pd.NA if _is_missing(value) is True else value
+
+
+def _logic(op: str, left: Any, right: Any) -> Any:
+    """``&`` / ``|`` with three-valued logic (TRUE | NA is TRUE, as in R)."""
+    if not isinstance(left, pd.Series) and not isinstance(right, pd.Series):
+        return _BIN[op](left, right)
+    result = _BIN[op](_as_logical(left), _as_logical(right))
+    if isinstance(result, pd.Series) and not result.isna().any():
+        return result.astype(bool)
+    return result
+
+
 # polars method name → pandas reduction name
 _AGG = {
     "mean": "mean", "sum": "sum", "min": "min", "max": "max",
@@ -55,7 +100,10 @@ _ELEM = {
     "ceil": lambda s: np.ceil(s),
     "is_null": lambda s: s.isna(),
     "is_not_null": lambda s: s.notna(),
-    "fill_null": lambda s, v: s.fillna(v),
+    # Object columns: fill without fillna's deprecated silent downcast.
+    "fill_null": lambda s, v: (
+        s.mask(s.isna(), v).infer_objects() if s.dtype == object else s.fillna(v)
+    ),
     "alias": lambda s, name: s,  # naming handled by the verbs
 }
 
@@ -101,7 +149,13 @@ def _ev(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str) -> A
     if kind == "not":
         return ~_ev(node[1], df, groups, mode)
     if kind == "bin":
-        return _BIN[node[1]](_ev(node[2], df, groups, mode), _ev(node[3], df, groups, mode))
+        left = _ev(node[2], df, groups, mode)
+        right = _ev(node[3], df, groups, mode)
+        if node[1] in _COMPARE:
+            return _compare(node[1], left, right)
+        if node[1] in {"&", "|"}:
+            return _logic(node[1], left, right)
+        return _BIN[node[1]](left, right)
     if kind == "horizontal":
         _, operation, columns = node
         if not columns:
@@ -410,6 +464,13 @@ def _ev_func(
         for value in args[1:]:
             result = result.combine_first(_as_series(value, df.index))
         return result.infer_objects()
+
+    if name == "must_match":
+        matched = _as_series(args[1], df.index).fillna(False).astype(bool)
+        unmatched_count = int((~matched).sum())
+        if unmatched_count:
+            raise ValueError(f"{args[2]} {unmatched_count} value(s) had no match.")
+        return args[0]
 
     if name == "if_else":
         condition = _as_series(args[0], df.index)

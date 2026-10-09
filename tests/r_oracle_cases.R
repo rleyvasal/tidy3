@@ -246,6 +246,35 @@ result <- switch(
         separate_wider_delim(text, names=c("left", "right"), delim="|", too_few="align_start", too_many="drop")
     )
   },
+  dplyr_12_helpers = {
+    x <- tibble(
+      state=c("NC", "NYC", "CA", NA, "NYC", "Unknown"),
+      score=c(1, 2, 3, 4, 5, NA)
+    )
+    b <- tibble(
+      x=c(TRUE, TRUE, TRUE, FALSE, FALSE, FALSE, NA, NA, NA),
+      y=c(TRUE, FALSE, NA, TRUE, FALSE, NA, TRUE, FALSE, NA)
+    )
+    pets <- tibble(type=c("dog", "dog", "cat", "dog", "cat"), age=c(1, 3, 5, 2, 4))
+    list(
+      values=x |> mutate(
+        full=recode_values(state, "NC" ~ "North Carolina", "NYC" ~ "New York", "CA" ~ "California"),
+        grouped=recode_values(state, "NC" ~ "North Carolina", c("NYC", "CA") ~ "elsewhere", default="<not recorded>"),
+        label=recode_values(score, from=c(1, 2, 3, 4, 5), to=c("SD", "D", "N", "A", "SA")),
+        replaced=replace_values(state, "NYC" ~ "NY"),
+        no_missing=replace_values(state, NA ~ "Unknown (NA)"),
+        tidied=replace_values(state, c(NA, "Unknown") ~ "<not recorded>"),
+        capped=replace_when(score, score > 3 ~ 0),
+        big=score > 3
+      ),
+      logic=b |> mutate(
+        any_p=when_any(x, y), any_r=when_any(x, y, na_rm=TRUE),
+        all_p=when_all(x, y), all_r=when_all(x, y, na_rm=TRUE)
+      ),
+      pets=pets |> mutate(type=replace_when(type, type == "dog" & age <= 2 ~ "puppy")),
+      filtered=x |> filter(when_any(state == "CA", score >= 5))
+    )
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 

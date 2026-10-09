@@ -6,6 +6,14 @@ under **Changed**.
 
 ## Unreleased
 
+### Added
+
+- dplyr 1.2's recoding helpers: `recode_values()` and `replace_values()`
+  (cases as `(values, replacement)` pairs, or a `from_=`/`to=` lookup table;
+  `None` matches missing values), `replace_when()`, and `when_any()` /
+  `when_all()` with `na_rm=`. `recode_values(unmatched="error")` raises when
+  a value has no case.
+
 ### Changed
 
 - `pivot_wider()` handles values that are not uniquely identified like
@@ -15,6 +23,10 @@ under **Changed**.
 
 ### Fixed
 
+- pandas backend: comparisons with a missing value give a missing result and
+  `&` / `|` use three-valued logic, as in R and Polars. `mutate(big = x > 3)`
+  used to give `False` where `x` is missing.
+- `case_match()` matches missing values with `None`, like `NA ~` in R.
 - In notebooks, columns named like Python builtins or tidy3 helpers (`id`,
   `type`, `max`, `min`, `sum`, `n`, …) work as bare names wherever only a
   column makes sense: `filter(id > 1)`, `select(id, type)`,

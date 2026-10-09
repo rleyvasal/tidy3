@@ -27,7 +27,8 @@ __all__ = [
     "row_number", "min_rank",
     "dense_rank", "percent_rank", "cume_dist", "ntile", "lead", "lag",
     "cummean", "cumall", "cumany", "n_distinct", "coalesce", "if_else",
-    "case_when", "case_match", "recode", "cur_group_id", "n_groups", "to_polars",
+    "case_when", "case_match", "recode", "recode_values", "replace_values",
+    "replace_when", "when_any", "when_all", "cur_group_id", "n_groups", "to_polars",
 ]
 
 _PL_BIN = {
@@ -387,16 +388,167 @@ def case_match(x: Any, *cases: tuple[Any, Any], default: Any = None) -> Expr:
         if not isinstance(case, tuple) or len(case) != 2:
             raise TypeError("case_match() cases must be (values, replacement) pairs")
         values, replacement = case
-        if isinstance(values, (list, tuple, set, frozenset)):
-            values = tuple(values)
-        else:
-            values = (values,)
-        condition = None
-        for candidate in values:
-            current = value == candidate
-            condition = current if condition is None else condition | current
-        normalized.append((condition, replacement))
+        normalized.append((_matches(value, values), replacement))
     return case_when(*normalized, default=default)
+
+
+def _matches(value: Expr, values: Any) -> Expr:
+    """True where *value* equals one of *values*; ``None`` matches missing."""
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        values = (values,)
+    condition = None
+    for candidate in values:
+        missing = candidate is None or (
+            isinstance(candidate, float) and candidate != candidate
+        )
+        current = value.is_null() if missing else value == candidate
+        condition = current if condition is None else condition | current
+    if condition is None:
+        raise ValueError("a case needs at least one value to match")
+    return condition
+
+
+def _value_cases(
+    name: str, cases: tuple[Any, ...], from_: Any, to: Any
+) -> list[tuple[Any, Any]]:
+    """``(values, replacement)`` pairs from cases or a ``from_``/``to`` lookup."""
+    if cases and (from_ is not None or to is not None):
+        raise TypeError(f"{name}() takes cases or from_=/to=, not both")
+    if not cases:
+        if from_ is None or to is None:
+            raise TypeError(f"{name}() needs cases, or both from_= and to=")
+        lookup = list(from_)
+        if isinstance(to, (list, tuple)):
+            targets = list(to)
+            if len(targets) == 1:
+                targets *= len(lookup)
+        else:
+            targets = [to] * len(lookup)
+        if len(targets) != len(lookup):
+            raise ValueError(
+                f"{name}() to= must have length 1 or {len(lookup)} (the length "
+                f"of from_=), not {len(targets)}"
+            )
+        cases = tuple(zip(lookup, targets))
+    for case in cases:
+        if not isinstance(case, tuple) or len(case) != 2:
+            raise TypeError(f"{name}() cases must be (values, replacement) pairs")
+    return list(cases)
+
+
+def recode_values(
+    x: Any,
+    *cases: tuple[Any, Any],
+    from_: Any = None,
+    to: Any = None,
+    default: Any = None,
+    unmatched: str = "default",
+) -> Expr:
+    """Map values of ``x`` to new values (dplyr 1.2 ``recode_values()``).
+
+    Give cases as ``(values, replacement)`` pairs, where ``values`` is one
+    value or a list and ``None`` matches missing values, or give a lookup
+    table as ``from_=`` and ``to=``. The first matching case wins. Values
+    with no match become ``default`` (missing by default), or raise when
+    ``unmatched="error"``::
+
+        recode_values("state", ("NC", "North Carolina"), ("CA", "California"))
+        recode_values("score", from_=[1, 2, 3], to=["low", "mid", "high"])
+    """
+    if unmatched not in {"default", "error"}:
+        raise ValueError("unmatched must be 'default' or 'error'")
+    if unmatched == "error" and default is not None:
+        raise TypeError("default= can only be set when unmatched='default'")
+    value = col(x) if isinstance(x, str) else x
+    conditions = [
+        (_matches(value, values), replacement)
+        for values, replacement in _value_cases("recode_values", cases, from_, to)
+    ]
+    result = case_when(*conditions, default=default)
+    if unmatched == "error":
+        matched = conditions[0][0].fill_null(False)
+        for condition, _ in conditions[1:]:
+            matched = matched | condition.fill_null(False)
+        result = _func(
+            "must_match",
+            result,
+            matched,
+            "recode_values(): each value must be matched by a case, or set "
+            "default= with unmatched='default'.",
+        )
+    return result
+
+
+def replace_values(
+    x: Any,
+    *cases: tuple[Any, Any],
+    from_: Any = None,
+    to: Any = None,
+) -> Expr:
+    """Replace some values of ``x``; others are kept (dplyr 1.2).
+
+    Takes the same cases or ``from_=``/``to=`` lookup as
+    :func:`recode_values`::
+
+        replace_values("state", ("NYC", "NY"), (None, "Unknown"))
+    """
+    value = col(x) if isinstance(x, str) else x
+    conditions = [
+        (_matches(value, values), replacement)
+        for values, replacement in _value_cases("replace_values", cases, from_, to)
+    ]
+    return case_when(*conditions, default=value)
+
+
+def replace_when(x: Any, *cases: tuple[Any, Any]) -> Expr:
+    """Replace ``x`` where a condition holds; elsewhere keep ``x`` (dplyr 1.2).
+
+    ``cases`` are ``(condition, value)`` pairs like :func:`case_when`::
+
+        replace_when("type", ((col("type") == "dog") & (col("age") <= 2), "puppy"))
+    """
+    value = col(x) if isinstance(x, str) else x
+    if not cases:
+        return value
+    return case_when(*cases, default=value)
+
+
+def _when(name: str, conditions: tuple[Any, ...], na_rm: bool, empty: bool) -> Any:
+    if not conditions:
+        return Expr(("lit", empty))
+    result = None
+    for condition in conditions:
+        if na_rm:
+            # Drop missing values: they can neither satisfy any() nor break all().
+            condition = (
+                condition.fill_null(empty)
+                if isinstance(condition, Expr)
+                else (empty if condition is None else condition)
+            )
+        if result is None:
+            result = condition
+        elif name == "when_any":
+            result = result | condition
+        else:
+            result = result & condition
+    return result
+
+
+def when_any(*conditions: Any, na_rm: bool = False) -> Any:
+    """Elementwise any across conditions: ``when_any(a, b, c)`` is ``a | b | c``.
+
+    Missing values follow ``|``; ``na_rm=True`` drops them first, so the
+    result is always True or False (dplyr 1.2).
+    """
+    return _when("when_any", conditions, na_rm, False)
+
+
+def when_all(*conditions: Any, na_rm: bool = False) -> Any:
+    """Elementwise all across conditions: ``when_all(a, b, c)`` is ``a & b & c``.
+
+    Missing values follow ``&``; ``na_rm=True`` drops them first (dplyr 1.2).
+    """
+    return _when("when_all", conditions, na_rm, True)
 
 
 def recode(
@@ -620,6 +772,23 @@ def _compile_pl(node: tuple) -> Any:
             return changed.cum_sum().cast(pl.UInt32)
         if name == "coalesce":
             return pl.coalesce(args)
+        if name == "must_match":
+            value, matched = args[0], args[1]
+            message = raw_args[2][1]
+
+            def check(series: pl.Series) -> pl.Series:
+                unmatched_count = int((~series).sum())
+                if unmatched_count:
+                    raise ValueError(
+                        f"{message} {unmatched_count} value(s) had no match."
+                    )
+                return series
+
+            return (
+                pl.when(matched.map_batches(check, return_dtype=pl.Boolean))
+                .then(value)
+                .otherwise(value)
+            )
         if name == "if_else":
             condition, true, false = args
             missing = kwargs["missing"]
