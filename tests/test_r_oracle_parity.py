@@ -991,6 +991,30 @@ def _pivot_options(backend: str):
     }
 
 
+def _list_options(backend: str):
+    import tidy3 as t3
+
+    d = tidy({"id": [1, 2], "code": ["a-1", "b-2"]}, backend=backend)
+    h = tidy(
+        {"id": [1, 2], "info": [{"name": "x", "n": "1", "k": 5.0}, {"name": "y", "n": "2", "k": 6.0}]},
+        backend=backend,
+    )
+    n = tidy({"g": [1.0, 1.0, 2.0], "x_a": [1, 2, 3], "x_b": [4, 5, 6]}, backend=backend)
+    return {
+        "sep": d >> t3.separate_wider_delim("code", ["l", "n"], "-", names_sep="_"),
+        "kept": d >> t3.separate_wider_delim("code", ["l", "n"], "-", cols_remove=False),
+        "indexed": tidy({"id": [1, 2], "x": [[10.0, 11.0], [20.0]]}, backend=backend)
+        >> t3.unnest_longer("x", indices_include=True),
+        "longer_int": tidy({"id": [1, 2], "x": [["1", "2"], ["3"]]}, backend=backend)
+        >> t3.unnest_longer("x", transform=int),
+        "wider_int": tidy({"id": [1, 2], "x": [{"a": "1", "b": "2"}, {"a": "3", "b": "4"}]}, backend=backend)
+        >> t3.unnest_wider("x", transform={"a": int}),
+        "hoisted": h >> t3.hoist("info", nm="name", n="n", transform={"n": int}) >> t3.select(~t3.all_of(["info"])),
+        "hoisted_all": h >> t3.hoist("info", name="name", n="n", k="k"),
+        "nested": n >> t3.nest("x", cols=["x_a", "x_b"], names_sep="_") >> t3.unnest("x"),
+    }
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "filter_missing": _filter_missing,
     "filter_out_missing": _filter_out_missing,
@@ -1046,6 +1070,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "empty_groups": _empty_groups,
     "join_names": _join_names,
     "pivot_options": _pivot_options,
+    "list_options": _list_options,
 }
 
 
@@ -1084,6 +1109,7 @@ CASE_VERBS = {
     "grids": {"expand_grid", "crossing", "uncount", "full_seq", "complete", "expand"},
     "empty_groups": {"summarise", "count"},
     "pivot_options": {"pivot_wider", "pivot_longer"},
+    "list_options": {"separate_wider_delim", "unnest_longer", "unnest_wider", "hoist", "nest", "unnest"},
     "join_names": {"left_join", "inner_join", "full_join", "right_join", "cross_join"},
     "splitting": {
         "separate_wider_regex", "separate_wider_position", "separate_longer_position",
@@ -1124,7 +1150,6 @@ def test_every_public_frame_verb_has_a_parity_classification():
         "group_by",
         "group_map",
         "with_groups",
-        "hoist",
         "pack",
         "unpack",
     }

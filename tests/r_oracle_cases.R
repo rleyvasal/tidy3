@@ -407,6 +407,22 @@ result <- switch(
                                names_transform=list(week=as.integer), values_transform=list(value=as.character))
     )
   },
+  list_options = {
+    d <- tibble(id=1:2, code=c("a-1", "b-2"))
+    h <- tibble(id=1:2, info=list(list(name="x", n="1", k=5), list(name="y", n="2", k=6)))
+    n <- tibble(g=c(1, 1, 2), x_a=1:3, x_b=4:6)
+    list(
+      sep=separate_wider_delim(d, code, "-", names=c("l", "n"), names_sep="_"),
+      kept=separate_wider_delim(d, code, "-", names=c("l", "n"), cols_remove=FALSE),
+      indexed=unnest_longer(tibble(id=1:2, x=list(c(10, 11), 20)), x, indices_include=TRUE),
+      longer_int=unnest_longer(tibble(id=1:2, x=list(c("1", "2"), "3")), x, transform=as.integer),
+      wider_int=unnest_wider(tibble(id=1:2, x=list(list(a="1", b="2"), list(a="3", b="4"))), x,
+                             transform=list(a=as.integer)),
+      hoisted=hoist(h, info, nm="name", n="n", .transform=list(n=as.integer)) |> select(-info),
+      hoisted_all=hoist(h, info, name="name", n="n", k="k"),
+      nested=nest(n, x=c(x_a, x_b), .names_sep="_") |> unnest(x)
+    )
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 

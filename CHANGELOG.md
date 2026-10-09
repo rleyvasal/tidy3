@@ -13,6 +13,10 @@ under **Changed**.
   `pivot_longer()` gains `names_transform` and `values_transform` (a function
   or a dict by column, e.g. `{"week": int}`). Calls that use none of them run
   exactly as before, and the naming options stay lazy on Polars.
+- tidyr's smaller list and splitting options: `separate_wider_delim()`'s
+  `names_sep` and `cols_remove`; `unnest_longer()`'s `indices_include` and
+  `transform`; `unnest_wider()`'s `transform`; `hoist()`'s `remove` and
+  `transform`; and `nest()`'s `names_sep` (tidyr's `.names_sep`).
 
 ### Changed
 
@@ -25,6 +29,10 @@ under **Changed**.
   (`v`, `v_right`); `suffix=("", "_right")` gives those names back.
 - `suffix="_r"` (one string) still renames only the right copy but is
   deprecated; it warns and will be removed.
+- `hoist()` works like tidyr's: new columns go just before the list column,
+  and the fields it pulls out are removed from it (the column goes when
+  nothing is left). `remove=False` keeps them. Before, it added columns at
+  the end and left the list column unchanged.
 - `bind_cols()` names duplicated columns `x_1`, `x_3` (each column's
   position), dplyr's `x...1`, `x...3` in Python spelling. A repaired name
   that would clash with an existing column gets its position again.

@@ -1629,11 +1629,14 @@ def nest(
     *,
     cols: Any = None,
     by: Any = None,
+    names_sep: str | None = None,
 ) -> Verb:
     """Collapse selected columns into a nested list-column.
 
     Polars stores list-of-struct; pandas stores a DataFrame per group
-    (same representation as ``group_nest``).
+    (same representation as ``group_nest``). ``names_sep="_"`` drops the
+    ``{column}_`` prefix from the nested names (``x_a`` -> ``a``), as tidyr's
+    ``.names_sep``.
     """
     if not isinstance(column, str) or not column:
         raise TypeError("nest() column must be a non-empty string")
@@ -1657,6 +1660,21 @@ def nest(
             raise TypeError("nest() requires cols=, by=, or a grouped frame")
         if not nested:
             raise ValueError("nest() selected no columns to nest")
+        if names_sep is not None:
+            prefix = f"{column}{names_sep}"
+            renames = {
+                name: name[len(prefix):]
+                for name in nested
+                if name.startswith(prefix) and len(name) > len(prefix)
+            }
+            if renames:
+                tf = (
+                    tf._with_pdf(tf._pdf.rename(columns=renames), groups=tf._groups)
+                    if tf._backend == "pandas"
+                    else tf._with_lf(tf._lf.rename(renames), groups=tf._groups)
+                )
+                nested = [renames.get(name, name) for name in nested]
+                columns = _columns(tf)
 
         if tf._backend == "pandas":
             output = _pandas_nested_frames(
@@ -1687,6 +1705,36 @@ def nest(
 
 
 def unnest_longer(
+    column: str,
+    *,
+    values_to: str | None = None,
+    indices_to: str | None = None,
+    indices_include: bool | None = None,
+    keep_empty: bool = False,
+    transform: Any = None,
+) -> Verb:
+    """Expand each element of a list-column into its own row.
+
+    ``indices_include=True`` adds each element's 1-based position as
+    ``{column}_id`` (or ``indices_to``); ``transform`` converts the values,
+    e.g. ``transform=int``, as in tidyr.
+    """
+    if indices_include and indices_to is None:
+        indices_to = f"{values_to or column}_id"
+    core = _unnest_longer_core(
+        column, values_to=values_to, indices_to=indices_to, keep_empty=keep_empty
+    )
+    if transform is None:
+        return core
+
+    def _apply(tf):
+        out = core._fn(tf)
+        return _transform_columns(out, transform, [values_to or column], "transform")
+
+    return Verb(_apply, "unnest_longer")
+
+
+def _unnest_longer_core(
     column: str,
     *,
     values_to: str | None = None,
@@ -1901,7 +1949,28 @@ def unnest(
     return Verb(_apply, "unnest")
 
 
-def unnest_wider(column: str, *, names_sep: str | None = None) -> Verb:
+def unnest_wider(
+    column: str, *, names_sep: str | None = None, transform: Any = None
+) -> Verb:
+    """Expand a struct/dict or fixed-width list column into columns.
+
+    ``transform`` converts the new columns: one function, or a dict by name
+    (``transform={"a": int}``), as in tidyr.
+    """
+    core = _unnest_wider_core(column, names_sep=names_sep)
+    if transform is None:
+        return core
+
+    def _apply(tf):
+        out = core._fn(tf)
+        before = set(_columns(tf))
+        new = [name for name in _columns(out) if name not in before]
+        return _transform_columns(out, transform, new, "transform")
+
+    return Verb(_apply, "unnest_wider")
+
+
+def _unnest_wider_core(column: str, *, names_sep: str | None = None) -> Verb:
     """Expand a struct/dict or fixed-width list column into columns."""
 
     def _apply(tf):
@@ -2010,8 +2079,13 @@ def separate_wider_delim(
     *,
     too_few: str = "error",
     too_many: str = "error",
+    names_sep: str | None = None,
+    cols_remove: bool = True,
 ) -> Verb:
     """Split one delimited column into named columns, like tidyr.
+
+    ``names_sep="_"`` names the pieces ``{column}_{name}``;
+    ``cols_remove=False`` keeps the original column after them.
 
     ``too_few`` is ``error`` (default), ``align_start``, or ``align_end``;
     ``too_many`` is ``error`` (default), ``drop``, or ``merge`` (the extra
@@ -2067,15 +2141,12 @@ def separate_wider_delim(
 
         expanded = pd.DataFrame(
             [align(values) for values in pieces],
-            columns=list(names),
+            columns=[_output_name(source, name, names_sep) for name in names],
             index=pdf.index,
             dtype=object,
         )
         # The new columns take the place of the split one, as in tidyr.
-        at = pdf.columns.get_loc(source)
-        pdf = pd.concat(
-            [pdf.iloc[:, :at], expanded, pdf.iloc[:, at + 1 :]], axis=1
-        )
+        pdf = _replace_column(pdf, source, expanded, cols_remove)
         return tidy(pdf, backend=tf._backend)
 
     return Verb(_apply, "separate_wider_delim")
@@ -2382,21 +2453,65 @@ def unnest_auto(column: str) -> Verb:
     return Verb(_apply, "unnest_auto")
 
 
-def hoist(column: str, *paths: Any, **named_paths: Any) -> Verb:
-    """Extract named fields from dictionary/list columns."""
+def hoist(
+    column: str,
+    *paths: Any,
+    remove: bool = True,
+    transform: Any = None,
+    **named_paths: Any,
+) -> Verb:
+    """Pull fields out of a dict/list column into columns, as tidyr's hoist().
+
+    ``hoist("info", name="name", city=["address", "city"])`` adds ``name`` and
+    ``city`` just before ``info``. Pulled fields are removed from ``info``
+    (the column goes when nothing is left) unless ``remove=False``;
+    ``transform`` converts the new columns (``transform={"n": int}``).
+    """
     def _apply(tf):
+        import copy
+
         import pandas as pd
         from tidy3.frame import tidy
 
         pdf = tf.collect(as_="pandas").copy()
         specs = list(named_paths.items()) or [(str(path), path) for path in paths]
+        hoisted = {}
         for name, path in specs:
-            keys = path if isinstance(path, (list, tuple)) else [path]
-            pdf[name] = pdf[column].map(
-                lambda value: _pluck(value, keys)
-            )
-        return tidy(pdf, backend=tf._backend)
+            keys = list(path) if isinstance(path, (list, tuple)) else [path]
+            hoisted[name] = pdf[column].map(lambda value, keys=keys: _pluck(value, keys))
+        at = pdf.columns.get_loc(column)
+        new = pd.DataFrame(hoisted, index=pdf.index)
+        if remove:
+            def strip(value: Any) -> Any:
+                if not isinstance(value, dict):
+                    return value
+                value = copy.deepcopy(value)
+                for _, path in specs:
+                    keys = list(path) if isinstance(path, (list, tuple)) else [path]
+                    _drop_path(value, keys)
+                return value
+
+            pdf[column] = pdf[column].map(strip)
+        empty = remove and all(
+            isinstance(v, dict) and not v for v in pdf[column] if v is not None
+        )
+        parts = [pdf.iloc[:, :at], new]
+        if not empty:
+            parts.append(pdf[[column]])
+        parts.append(pdf.iloc[:, at + 1 :])
+        out = tidy(pd.concat(parts, axis=1), backend=tf._backend)
+        return _transform_columns(out, transform, list(hoisted), "transform")
     return Verb(_apply, "hoist")
+
+
+def _drop_path(value: Any, keys: list[Any]) -> None:
+    """Remove the element at *keys* from nested dicts (in place)."""
+    for key in keys[:-1]:
+        if not isinstance(value, dict) or key not in value:
+            return
+        value = value[key]
+    if isinstance(value, dict):
+        value.pop(keys[-1], None)
 
 
 def _pluck(value: Any, keys: list[Any]) -> Any:
