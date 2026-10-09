@@ -301,6 +301,24 @@ result <- switch(
       group_nested=group_nest(gd) |> mutate(rows=vapply(data, nrow, integer(1))) |> select(g, h, rows)
     )
   },
+  ordering = {
+    d <- tibble(
+      g=c("a", "a", "b", "b", "a", "b", "a"),
+      t=c(3, 1, 2, NA, 2, 1, 1),
+      x=c(10, 20, 30, 40, 50, 60, 70)
+    )
+    list(
+      ungrouped=d |> mutate(
+        running=order_by(t, cumsum(x)),
+        previous=with_order(t, lag, x),
+        latest_first=order_by(desc(t), cumsum(x))
+      ),
+      grouped=d |> group_by(g) |> mutate(
+        running=order_by(t, cumsum(x)),
+        rank=with_order(desc(t), row_number, x)
+      ) |> ungroup()
+    )
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 

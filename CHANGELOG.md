@@ -21,6 +21,9 @@ under **Changed**.
   take a frame (`n_groups(df)`, `df >> n_groups()`). Empty groups for unused
   factor levels follow dplyr's `.drop = FALSE` rule. Row positions are
   0-based.
+- `order_by()` and `with_order()`: compute a window expression as if the
+  rows were sorted (`order_by("year", col("value").cum_sum())`), with results
+  in the original row order; missing keys sort last and ties keep their order.
 
 ### Changed
 

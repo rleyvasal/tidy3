@@ -163,7 +163,7 @@ _FIRST_COLUMN_ARG = frozenset(
         "first", "last", "nth", "lead", "lag", "cummean", "cumall", "cumany",
         "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist",
         "ntile", "case_match", "recode", "recode_values", "replace_values",
-        "replace_when", "any", "all", "abs", "round",
+        "replace_when", "any", "all", "abs", "round", "order_by", "with_order",
     }
 )
 _ALL_COLUMN_ARGS = frozenset(

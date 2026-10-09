@@ -842,6 +842,33 @@ def _group_info(backend: str):
     }
 
 
+def _ordering(backend: str):
+    import tidy3 as t3
+
+    d = tidy(
+        {
+            "g": ["a", "a", "b", "b", "a", "b", "a"],
+            "t": [3.0, 1.0, 2.0, None, 2.0, 1.0, 1.0],
+            "x": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0],
+        },
+        backend=backend,
+    )
+    return {
+        "ungrouped": d >> mutate(
+            running=t3.order_by("t", col("x").cum_sum()),
+            previous=t3.with_order("t", t3.lag, "x"),
+            latest_first=t3.order_by(t3.desc("t"), col("x").cum_sum()),
+        ),
+        "grouped": d
+        >> group_by("g")
+        >> mutate(
+            running=t3.order_by("t", col("x").cum_sum()),
+            rank=t3.with_order(t3.desc("t"), t3.row_number, "x"),
+        )
+        >> ungroup(),
+    }
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "filter_missing": _filter_missing,
     "filter_out_missing": _filter_out_missing,
@@ -891,6 +918,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "new_helpers": _new_helpers,
     "dplyr_12_helpers": _dplyr_12_helpers,
     "group_info": _group_info,
+    "ordering": _ordering,
 }
 
 
@@ -925,6 +953,7 @@ CASE_VERBS = {
     "new_helpers": {"separate_longer_delim", "separate_wider_delim"},
     "dplyr_12_helpers": {"mutate", "filter"},
     "group_info": {"group_split", "group_modify", "group_nest"},
+    "ordering": {"mutate"},
 }
 
 

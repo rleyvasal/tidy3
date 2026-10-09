@@ -28,7 +28,8 @@ __all__ = [
     "dense_rank", "percent_rank", "cume_dist", "ntile", "lead", "lag",
     "cummean", "cumall", "cumany", "n_distinct", "coalesce", "if_else",
     "case_when", "case_match", "recode", "recode_values", "replace_values",
-    "replace_when", "when_any", "when_all", "cur_group_id", "n_groups", "to_polars",
+    "replace_when", "when_any", "when_all", "order_by", "with_order",
+    "cur_group_id", "n_groups", "to_polars",
 ]
 
 _PL_BIN = {
@@ -538,6 +539,29 @@ def replace_when(x: Any, *cases: tuple[Any, Any]) -> Expr:
     return case_when(*cases, default=value)
 
 
+def order_by(order: Any, expr: Any) -> Expr:
+    """Compute a window expression as if rows were sorted by ``order``.
+
+    dplyr's ``order_by()``: the result comes back in the original row order
+    (within each group when grouped). Use ``desc("t")`` for descending;
+    missing ``order`` values sort last and ties keep their row order::
+
+        mutate(running=order_by("year", col("value").cum_sum()))
+    """
+    key = col(order) if isinstance(order, str) else order
+    return _func("order_by", key, expr)
+
+
+def with_order(order: Any, fn: Any, x: Any, *args: Any, **kwargs: Any) -> Expr:
+    """``fn(x, *args, **kwargs)`` computed in ``order`` (dplyr ``with_order()``).
+
+    ``with_order("year", lag, "value")`` is ``order_by("year", lag("value"))``.
+    """
+    if not callable(fn):
+        raise TypeError("with_order() fn must be callable")
+    return order_by(order, fn(x, *args, **kwargs))
+
+
 def _when(name: str, conditions: tuple[Any, ...], na_rm: bool, empty: bool) -> Any:
     if not conditions:
         return Expr(("lit", empty))
@@ -595,6 +619,39 @@ def recode(
 
 
 # ── polars compiler ─────────────────────────────────────────────────────
+
+
+def _sorted_columns(node: Any, order: Any, descending: bool) -> Any:
+    """Copy of *node* whose column references read rows sorted by *order*."""
+    if not isinstance(node, tuple) or not node:
+        return node
+    if node[0] == "col":
+        return (
+            "pl",
+            pl.col(node[1]).sort_by(
+                order, descending=descending, nulls_last=True, maintain_order=True
+            ),
+        )
+    return tuple(
+        _sorted_columns(part, order, descending)
+        if isinstance(part, tuple)
+        else tuple(_sorted_columns(item, order, descending) for item in part)
+        if isinstance(part, list)
+        else {key: _sorted_columns(value, order, descending) for key, value in part.items()}
+        if isinstance(part, dict)
+        else part
+        for part in node
+    )
+
+
+def _compile_order_by(raw_order: tuple, raw_expr: tuple) -> Any:
+    descending = raw_order[0] == "desc"
+    order = _compile_pl(raw_order[1] if descending else raw_order)
+    # Evaluate on sorted rows, then put each result back at its row:
+    # arg_sort().arg_sort() is every row's position in the sorted order.
+    computed = _compile_pl(_sorted_columns(raw_expr, order, descending))
+    positions = order.arg_sort(descending=descending, nulls_last=True).arg_sort()
+    return computed.gather(positions)
 
 
 def to_polars(e: Any) -> Any:
@@ -655,6 +712,8 @@ def _compile_pl(node: tuple) -> Any:
         if as_list:
             return pl.concat_list(expressions)
         return pl.struct(expressions)
+    if kind == "func" and node[1] == "order_by":
+        return _compile_order_by(node[2][0], node[2][1])
     if kind == "func":
         _, name, raw_args, raw_kwargs = node
         descending = bool(

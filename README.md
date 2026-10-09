@@ -523,7 +523,7 @@ ln -sfn /path/to/plot3 plot3
 | Selectors | `everything`, `col_range`/`cols_between`, `last_col`, `group_cols`, `starts_with`, `ends_with`, `contains`, `matches`, `num_range`, `all_of`, `any_of`, `where`; set ops `\|` `&` `-` `~`/`!`/`-helper`; predicates `is_numeric`, `is_integer`, `is_float`, `is_string`/`is_character`, `is_bool`/`is_boolean`, `is_datetime`, `is_categorical`, `is_temporal` |
 | Column-wise | `across`, `if_any`, `if_all`, `pick`, `c_across` |
 | Materialize | `collect`, `pull`, `glimpse`, `peek` |
-| Expr | `col`, `n`, `mean`, `sum`, `min`, `max`, `median`, `std`/`sd`, `var`, `any`, `all`, `first`, `last`, `nth`, `near`, `na_if`, `between`, `consecutive_id`, `case_match`, `recode`, ranking/window helpers, `n_distinct`, `coalesce`, `if_else`, `case_when`, `recode_values`, `replace_values`, `replace_when`, `when_any`, `when_all` |
+| Expr | `col`, `n`, `mean`, `sum`, `min`, `max`, `median`, `std`/`sd`, `var`, `any`, `all`, `first`, `last`, `nth`, `near`, `na_if`, `between`, `consecutive_id`, `case_match`, `recode`, ranking/window helpers, `n_distinct`, `coalesce`, `if_else`, `case_when`, `recode_values`, `replace_values`, `replace_when`, `when_any`, `when_all`, `order_by`, `with_order` |
 | Jupyter | `%load_ext tidy3.jupyter`, `%tidy3_run`, `%%tidy3_run`, `%tidy3_pipes` |
 | Partial | `partial_run`, `maybe_rewrite_cell`, `normalize_pipe_source` |
 | Escape | `TidyFrame.with_polars(fn)` |
@@ -975,6 +975,16 @@ Ranking helpers are `row_number`, `min_rank`, `dense_rank`, `percent_rank`,
 `cume_dist`, and `ntile`. Window and value helpers include `lead`, `lag`,
 `cummean`, `cumall`, `cumany`, `n_distinct`, `coalesce`, `if_else`, and
 `case_when`. `lead`, `lag`, `first`, `last`, and `nth` accept `order_by=`.
+For any other window expression, `order_by()` computes it as if the rows were
+sorted, then returns results in the original row order:
+
+```python
+tidy(sales) >> mutate(
+    running=order_by("sale_date", col("amount").cum_sum()),
+    previous=with_order("sale_date", lag, "amount"),
+    by="region",
+)
+```
 
 Mutating joins accept dplyr-style safety controls:
 

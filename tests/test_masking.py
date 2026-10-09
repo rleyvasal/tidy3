@@ -197,3 +197,14 @@ def test_rebound_notebook_names_are_not_soft():
     soft = soft_names({"n": 5, "id": id})
     assert "id" in soft and "max" in soft
     assert "n" not in soft
+
+
+def test_order_by_and_with_order_take_bare_columns():
+    c = COL_NAME
+    assert f"order_by({c}('year'), {c}('value').cum_sum())" in _norm(
+        "mutate(running = order_by(year, value.cum_sum()))"
+    )
+    # with_order(order, fn, x): fn stays a function.
+    assert f"with_order({c}('year'), lag, {c}('value'))" in _norm(
+        "mutate(previous = with_order(year, lag, value))"
+    )

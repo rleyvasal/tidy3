@@ -214,6 +214,21 @@ def _ev_func(
     mode: str,
 ) -> Any:
     _, name, raw_args, raw_kwargs = node
+    if name == "order_by":
+        # Evaluate on rows sorted by the key (stable, missing last), then
+        # line the results back up with the original rows by index.
+        raw_order, raw_expr = raw_args
+        descending = raw_order[0] == "desc"
+        order = _as_series(
+            _ev(raw_order[1] if descending else raw_order, df, groups, mode), df.index
+        )
+        ordered = df.loc[
+            order.sort_values(
+                ascending=not descending, kind="stable", na_position="last"
+            ).index
+        ]
+        value = _ev(raw_expr, ordered, groups, mode)
+        return _as_series(value, ordered.index).reindex(df.index)
     descending = bool(
         name
         in {"row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist", "ntile"}
