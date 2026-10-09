@@ -2278,47 +2278,61 @@ def group_nest(*cols: Any, name: str = "data") -> Verb:
     return Verb(_apply, "group_nest")
 
 
+def _dplyr_group_keys(tf: Any, observed: Any, groups: list[str]) -> Any:
+    """Every group dplyr shows with ``drop = FALSE``, in dplyr's order.
+
+    *observed* holds the key combinations that occur (a pandas frame); unused
+    factor levels add empty groups by dplyr's rule (see tidy3.groups).
+    """
+    from tidy3.frame import TidyFrame
+    from tidy3.groups import _group_table, _keys_frame
+
+    keys_only = TidyFrame(
+        observed.loc[:, groups].reset_index(drop=True),
+        groups=groups,
+        group_drop=False,
+        category_levels=tf._category_levels,
+    )
+    names, pdf, table = _group_table(keys_only)
+    return _keys_frame(keys_only, names, pdf, table)
+
+
 def _complete_polars_empty_groups(
     tf: Any,
     result: pl.LazyFrame,
     groups: list[str],
     assignments: dict[str, Any],
 ) -> pl.LazyFrame:
-    """Add factor levels omitted by Polars group_by when drop=False."""
-    schema = tf._lf.collect_schema()
-    grids: list[pl.LazyFrame] = []
-    for name in groups:
-        levels = tf._category_levels.get(name)
-        if levels is not None:
-            grid = pl.DataFrame({name: levels}).lazy().with_columns(
-                pl.col(name).cast(schema[name])
-            )
-        else:
-            grid = tf._lf.select(name).unique(maintain_order=True)
-        grids.append(grid)
-    grid = grids[0]
-    for other in grids[1:]:
-        grid = grid.join(other, how="cross")
+    """Add dplyr's empty groups (unused factor levels) when drop=False.
 
-    marker = _temp_column(
-        [*result.collect_schema().names(), *groups],
-        "__tidy3_observed_group",
+    Groups with a missing key are kept: the join treats missing keys as equal.
+    """
+    observed = result.collect()
+    keys = _dplyr_group_keys(tf, observed.select(groups).to_pandas(), groups)
+    schema = observed.schema
+    grid = pl.from_pandas(keys.astype(object), nan_to_null=True).with_columns(
+        pl.col(name).cast(schema[name], strict=False) for name in groups
     )
-    defaults_frame = tf._lf.limit(0).select(
-        *(
-            (_plx(expr) if isinstance(_plx(expr), pl.Expr) else pl.lit(expr))
-            .alias(name)
-            for name, expr in assignments.items()
+    marker = _temp_column([*observed.columns, *groups], "__tidy3_observed_group")
+    defaults = (
+        tf._lf.limit(0)
+        .select(
+            *(
+                (_plx(expr) if isinstance(_plx(expr), pl.Expr) else pl.lit(expr)).alias(name)
+                for name, expr in assignments.items()
+            )
         )
-    ).collect()
-    defaults = defaults_frame.row(0, named=True)
+        .collect()
+        .row(0, named=True)
+    )
     joined = grid.join(
-        result.with_columns(pl.lit(True).alias(marker)),
+        observed.with_columns(pl.lit(True).alias(marker)),
         on=groups,
         how="left",
+        nulls_equal=True,
         maintain_order="left",
     )
-    return joined.select(
+    return joined.lazy().select(
         *groups,
         *(
             pl.when(pl.col(marker).is_null())
@@ -2328,6 +2342,30 @@ def _complete_polars_empty_groups(
             for name in assignments
         ),
     )
+
+
+def _complete_pandas_empty_groups(
+    tf: Any, out: Any, groups: list[str], defaults: dict[str, Any]
+) -> Any:
+    """pandas twin of :func:`_complete_polars_empty_groups`.
+
+    *defaults* are the values an empty group gets (``n()`` is 0).
+    """
+    keys = _dplyr_group_keys(tf, out, groups)
+    marker = _temp_column([*out.columns, *groups], "__tidy3_observed_group")
+    joined = keys.merge(
+        out.assign(**{marker: True}), on=groups, how="left", sort=False
+    )
+    missing = joined[marker].isna()
+    for name, default in defaults.items():
+        filled = joined[name].where(~missing, default)
+        try:
+            # Keep the summary's type: counts stay integers.
+            filled = filled.astype(out[name].dtype)
+        except (TypeError, ValueError):
+            pass
+        joined[name] = filled
+    return joined.drop(columns=marker)
 
 
 def summarise(
@@ -2394,17 +2432,19 @@ def summarise(
                 lf, groups=result_groups, rowwise=result_rowwise
             )
         if tf._backend == "pandas":
-            return tf._with_pdf(
-                _pe().do_summarise(
-                    tf._pdf,
-                    assignments,
-                    operation_groups,
-                    sort_groups=not transient,
-                    observed=tf._group_drop or transient,
-                ),
-                groups=result_groups,
-                rowwise=result_rowwise,
+            out = _pe().do_summarise(
+                tf._pdf,
+                assignments,
+                operation_groups,
+                sort_groups=not transient,
+                observed=True,
             )
+            if operation_groups and not transient and not tf._group_drop:
+                empty = _pe().do_summarise(tf._pdf.iloc[:0], assignments, None)
+                out = _complete_pandas_empty_groups(
+                    tf, out, list(operation_groups), empty.iloc[0].to_dict()
+                )
+            return tf._with_pdf(out, groups=result_groups, rowwise=result_rowwise)
         named = []
         sizes: dict[str, str] = {}
         occupied = [*_frame_columns(tf), *assignments]
@@ -2568,10 +2608,15 @@ def _count_rows(
             tuple(eff),
             out_name,
             wt=wt,
-            sort=sort,
-            observed=drop,
+            sort=False,
+            observed=True,
         )
-        return tf._with_pdf(pdf, groups=result_groups)
+        if eff and not drop:
+            # dplyr's drop = FALSE groups: unused factor levels count 0.
+            pdf = _complete_pandas_empty_groups(tf, pdf, eff, {out_name: 0})
+        if sort:
+            pdf = pdf.sort_values(out_name, ascending=False, kind="stable")
+        return tf._with_pdf(pdf.reset_index(drop=True), groups=result_groups)
 
     if wt is None:
         agg = pl.len()

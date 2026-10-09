@@ -928,6 +928,27 @@ def _splitting(backend: str):
     }
 
 
+def _empty_groups(backend: str):
+    d = tidy(
+        pd.DataFrame(
+            {
+                "k": pd.Categorical(["x", "x", None], categories=["x", "y"]),
+                "g": ["b", "a", "b"],
+                "v": [1.0, 2.0, 3.0],
+            }
+        ),
+        backend=backend,
+    )
+    stats = dict(n=n(), s=tidy_sum("v"), m=mean("v"), groups="drop")
+    return {
+        "kg": d >> group_by("k", "g", drop=False) >> summarise(**stats),
+        "gk": d >> group_by("g", "k", drop=False) >> summarise(**stats),
+        "k": d >> group_by("k", drop=False) >> summarise(n=n(), groups="drop"),
+        "counted": d >> count("k", "g", drop=False),
+        "sorted": d >> count("k", drop=False, sort=True),
+    }
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "filter_missing": _filter_missing,
     "filter_out_missing": _filter_out_missing,
@@ -980,6 +1001,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "ordering": _ordering,
     "grids": _grids,
     "splitting": _splitting,
+    "empty_groups": _empty_groups,
 }
 
 
@@ -1016,6 +1038,7 @@ CASE_VERBS = {
     "group_info": {"group_split", "group_modify", "group_nest"},
     "ordering": {"mutate"},
     "grids": {"expand_grid", "crossing", "uncount", "full_seq", "complete", "expand"},
+    "empty_groups": {"summarise", "count"},
     "splitting": {
         "separate_wider_regex", "separate_wider_position", "separate_longer_position",
         "chop", "unchop", "unnest_auto",

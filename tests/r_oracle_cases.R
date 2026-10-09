@@ -358,6 +358,16 @@ result <- switch(
       auto_longer=suppressMessages(unnest_auto(tibble(id=1:2, v=list(c(1, 2), c(3))), v))
     )
   },
+  empty_groups = {
+    d <- tibble(k=factor(c("x", "x", NA), levels=c("x", "y")), g=c("b", "a", "b"), v=c(1, 2, 3))
+    list(
+      kg=d |> group_by(k, g, .drop=FALSE) |> summarise(n=n(), s=sum(v), m=mean(v), .groups="drop"),
+      gk=d |> group_by(g, k, .drop=FALSE) |> summarise(n=n(), s=sum(v), m=mean(v), .groups="drop"),
+      k=d |> group_by(k, .drop=FALSE) |> summarise(n=n(), .groups="drop"),
+      counted=count(d, k, g, .drop=FALSE),
+      sorted=count(d, k, .drop=FALSE, sort=TRUE)
+    )
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 

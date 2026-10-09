@@ -4,6 +4,17 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- `summarise()` and `count()` after `group_by(..., drop=False)` with several
+  keys follow dplyr's empty-group rule: an unused factor level adds one empty
+  group (later keys missing) instead of a full grid of combinations. On
+  Polars, groups with a missing key were dropped from the result; on pandas,
+  `summarise()` ignored `drop=False` and `count()` used a full grid. All now
+  match dplyr, and counts stay whole numbers.
+
 ## 0.5.0 — 2026-10-08
 
 Notebook bare names follow dplyr's data mask: columns win.
