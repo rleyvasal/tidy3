@@ -1237,7 +1237,80 @@ def do_add_count(
     return out.reset_index(drop=True)
 
 
+JOIN_SUFFIX = ("_x", "_y")
+# Internal name for a right column that clashes, renamed by join_names().
+RIGHT_TAG = "__tidy3_y"
+
+
+def _add_suffixes(names: list[str], others: list[str], suffix: str) -> list[str]:
+    """dplyr's add_suffixes(): suffix *names* until none repeats *others*."""
+    if suffix == "":
+        return list(names)
+    combined = [*others, *names]
+    while True:
+        seen: set[str] = set()
+        repeats = []
+        for index, name in enumerate(combined):
+            if name in seen:
+                repeats.append(index)
+            seen.add(name)
+        if not repeats:
+            break
+        for index in repeats:
+            combined[index] = combined[index] + suffix
+    return combined[len(others):]
+
+
+def join_names(
+    left: list[str],
+    right: list[str],
+    left_keys: list[str],
+    right_keys: list[str],
+    keep: bool,
+    suffix: tuple[str, str] = JOIN_SUFFIX,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Output names of a join's left and right columns, by dplyr's rule.
+
+    Columns in both tables get ``suffix`` ("_x"/"_y" here, dplyr's ".x"/".y"
+    in Python spelling). Join keys are left alone unless ``keep=True``.
+    """
+    left_suffix, right_suffix = suffix
+    if keep:
+        left_out = _add_suffixes(left, right, left_suffix)
+    else:
+        ignore = [name for name in left if name in left_keys]
+        check = [name for name in left if name not in left_keys]
+        aux = [name for name in right if name not in right_keys]
+        renamed = dict(zip(check, _add_suffixes(check, [*ignore, *aux], left_suffix)))
+        left_out = [renamed.get(name, name) for name in left]
+    right_out = _add_suffixes(right, left, right_suffix)
+    return dict(zip(left, left_out)), dict(zip(right, right_out))
+
+
 def do_join(
+    df: pd.DataFrame,
+    right: pd.DataFrame,
+    on,
+    how: str,
+    suffix: tuple[str, str] = JOIN_SUFFIX,
+    **kwargs,
+) -> pd.DataFrame:
+    keys = [] if on is None else ([on] if isinstance(on, str) else list(on))
+    left_names, right_names = join_names(
+        list(df.columns), list(right.columns), keys, keys, False, suffix
+    )
+    rename = {
+        **{name: left_names[name] for name in df.columns},
+        **{
+            (name + RIGHT_TAG if name in df.columns else name): right_names[name]
+            for name in right.columns
+            if name not in keys
+        },
+    }
+    return _do_join(df, right, on, how, **kwargs).rename(columns=rename)
+
+
+def _do_join(
     df: pd.DataFrame, right: pd.DataFrame, on, how: str, **kwargs
 ) -> pd.DataFrame:
     if how == "outer":
@@ -1253,7 +1326,7 @@ def do_join(
         other = right.assign(**{right_order: range(len(right))})
         params = {
             "how": how,
-            "suffixes": ("", "_right"),
+            "suffixes": ("", RIGHT_TAG),
             "on": on,
             **kwargs,
         }
@@ -1267,7 +1340,7 @@ def do_join(
             .drop(columns=[left_order, right_order])
             .reset_index(drop=True)
         )
-    params = {"how": how, "suffixes": ("", "_right"), **kwargs}
+    params = {"how": how, "suffixes": ("", RIGHT_TAG), **kwargs}
     if how != "cross":
         params["on"] = on
     return df.merge(right, **params)
@@ -1365,7 +1438,7 @@ def do_join_by(
     spec: JoinSpec,
     how: str,
     *,
-    suffix: str = "_right",
+    suffix: tuple[str, str] = JOIN_SUFFIX,
     keep: bool = False,
     na_matches: str = "na",
     multiple: str = "all",
@@ -1516,17 +1589,28 @@ def do_join_by(
 
     equality_map = {condition.left: condition.right for condition in equality}
     equality_right = {condition.right for condition in equality}
+    left_out, right_out = join_names(
+        list(left_columns),
+        list(right_columns),
+        list(equality_map),
+        list(equality_right),
+        keep,
+        suffix,
+    )
     output: dict[str, Any] = {}
     for column in left_columns:
         if column in equality_map and not keep:
-            output[column] = combined[column].combine_first(
+            output[left_out[column]] = combined[column].combine_first(
                 combined[right_names[equality_map[column]]]
             )
         else:
-            output[column] = combined[column]
+            output[left_out[column]] = combined[column]
     for column in right_columns:
         if column in equality_right and not keep:
             continue
-        name = column + suffix if column in left_columns else column
-        output[name] = combined[right_names[column]]
+        values = combined[right_names[column]]
+        if pd.api.types.is_integer_dtype(right[column].dtype) and values.dtype.kind == "f":
+            # Unmatched rows add missing values: keep whole numbers (as R).
+            values = values.astype("Int64")
+        output[right_out[column]] = values
     return pd.DataFrame(output).reset_index(drop=True)

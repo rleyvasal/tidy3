@@ -221,8 +221,9 @@ def test_join_na_matching_and_keep_controls(backend):
     assert never["key"].tolist() == [1.0]
 
     kept = collect(left >> inner_join(right, on="key", keep=True))
-    assert list(kept.columns) == ["key", "x", "key_right", "y"]
-    assert pd.isna(kept.loc[0, "key_right"])
+    # dplyr's key.x / key.y, in Python spelling.
+    assert list(kept.columns) == ["key_x", "x", "key_y", "y"]
+    assert pd.isna(kept.loc[0, "key_y"])
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -276,3 +277,18 @@ def test_join_control_validation_is_clear():
         tidy({"id": [1]}) >> left_join(
             {"id": [1]}, on="id", na_matches="sometimes"
         )
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_join_suffix_pairs_and_the_old_single_string(backend):
+    left = tidy({"id": [1, 2], "v": [1, 2]}, backend=backend)
+    right = {"id": [1, 2], "v": [3, 4]}
+    assert list(collect(left >> left_join(right, on="id")).columns) == ["id", "v_x", "v_y"]
+    assert list(
+        collect(left >> left_join(right, on="id", suffix=("", "_right"))).columns
+    ) == ["id", "v", "v_right"]
+    with pytest.warns(FutureWarning, match="pass a pair"):
+        old = collect(left >> left_join(right, on="id", suffix="_r"))
+    assert list(old.columns) == ["id", "v", "v_r"]
+    with pytest.raises(TypeError, match="pair of strings"):
+        left >> left_join(right, on="id", suffix=("_a", "_b", "_c"))

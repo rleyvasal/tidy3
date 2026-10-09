@@ -367,6 +367,24 @@ result <- switch(
       sorted=count(d, k, .drop=FALSE, sort=TRUE)
     )
   },
+  join_names = {
+    # tidy3 spells dplyr's default .x/.y as _x/_y.
+    sx <- c("_x", "_y")
+    a <- tibble(id=1:3, v=c(1, 2, 3), w=c(5, 6, 7))
+    b <- tibble(id=c(1L, 2L, 4L), v=c(10, 20, 40))
+    clash <- tibble(id=1:2, v=c(1, 2), v_x=c(9, 9))
+    list(
+      left=left_join(a, b, by="id", suffix=sx),
+      inner=inner_join(a, b, by="id", suffix=sx),
+      full=full_join(a, b, by="id", suffix=sx),
+      right=right_join(a, b, by="id", suffix=sx),
+      pair=left_join(a, b, by="id", suffix=c("_l", "_r")),
+      kept=left_join(a, b, by="id", suffix=sx, keep=TRUE),
+      clash=left_join(clash, b, by="id", suffix=sx),
+      empty_left=left_join(a, b, by="id", suffix=c("", "_right")),
+      crossed=cross_join(a[1:2, ], b[1:2, ], suffix=sx)
+    )
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 

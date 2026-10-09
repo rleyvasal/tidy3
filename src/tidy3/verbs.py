@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import random
 import re
+import warnings
 from typing import Any, Callable
 
 import polars as pl
@@ -3101,7 +3102,7 @@ def _polars_join_by(
     spec: JoinSpec,
     how: str,
     *,
-    suffix: str,
+    suffix: tuple[str, str],
     keep: bool,
     na_matches: str,
     multiple: str,
@@ -3268,25 +3269,56 @@ def _polars_join_by(
 
     equality_map = {condition.left: condition.right for condition in equality}
     equality_right = {condition.right for condition in equality}
+    left_out, right_out = _pe().join_names(
+        list(left_columns),
+        list(right_columns),
+        list(equality_map),
+        list(equality_right),
+        keep,
+        suffix,
+    )
     output = []
     for column in left_columns:
         if column in equality_map and not keep:
             output.append(
                 pl.coalesce(
                     pl.col(column), pl.col(right_names[equality_map[column]])
-                ).alias(column)
+                ).alias(left_out[column])
             )
         else:
-            output.append(pl.col(column))
+            output.append(pl.col(column).alias(left_out[column]))
     for column in right_columns:
         if column in equality_right and not keep:
             continue
-        name = column + suffix if column in left_columns else column
-        output.append(pl.col(right_names[column]).alias(name))
+        output.append(pl.col(right_names[column]).alias(right_out[column]))
     lf = combined.select(output)
     for violations, message in guards:
         lf = _pl_guard_no_rows(lf, violations, message)
     return tf._with_lf(lf, groups=tf._groups)
+
+
+def _join_suffix(suffix: Any) -> tuple[str, str]:
+    """``suffix=`` as dplyr's pair: names for the left and right copies.
+
+    The default is ``("_x", "_y")``, dplyr's ``.x``/``.y`` in Python spelling.
+    A single string (tidy3 before 0.6) suffixes only the right copy, as
+    ``("", suffix)`` does, and warns.
+    """
+    if suffix is None:
+        return _pe().JOIN_SUFFIX
+    if isinstance(suffix, str):
+        warnings.warn(
+            f"join suffix={suffix!r} is deprecated; pass a pair, e.g. "
+            f"suffix=('', {suffix!r}) for the same names, or ('_x', '_y') "
+            "(the default).",
+            FutureWarning,
+            stacklevel=4,
+        )
+        return ("", suffix)
+    pair = tuple(suffix)
+    if len(pair) != 2 or not all(isinstance(part, str) for part in pair):
+        raise TypeError("join suffix must be a pair of strings, e.g. ('_x', '_y')")
+    return pair  # type: ignore[return-value]
 
 
 def _join_by_operation(
@@ -3297,15 +3329,13 @@ def _join_by_operation(
     kwargs: dict[str, Any],
 ):
     params = dict(kwargs)
-    suffix = params.pop("suffix", "_right")
+    suffix = _join_suffix(params.pop("suffix", None))
     keep_value = params.pop("keep", None)
     keep = bool(keep_value) if keep_value is not None else False
     na_matches = params.pop("na_matches", "na")
     multiple = params.pop("multiple", "all")
     unmatched = params.pop("unmatched", "drop")
     relationship = params.pop("relationship", None)
-    if not isinstance(suffix, str) or not suffix:
-        raise TypeError("join suffix must be a non-empty string")
     if keep_value is not None and not isinstance(keep_value, bool):
         raise TypeError("join keep must be True, False, or None")
     if na_matches not in {"na", "never"}:
@@ -3373,10 +3403,11 @@ def _mutating_join(
             return _join_by_operation(tf, right, on, how, kwargs)
         r = _right_frame(right, tf._backend)
         keys = _join_keys(tf._pdf if tf._backend == "pandas" else tf._lf, r, on)
-        if not kwargs:
+        if set(kwargs) <= {"suffix"}:
+            suffix = _join_suffix(kwargs.get("suffix"))
             if tf._backend == "pandas":
                 return tf._with_pdf(
-                    _pe().do_join(tf._pdf, r, keys, pandas_how or how),
+                    _pe().do_join(tf._pdf, r, keys, pandas_how or how, suffix=suffix),
                     groups=tf._groups,
                 )
             params: dict[str, Any] = {
@@ -3391,17 +3422,20 @@ def _mutating_join(
             }
             if how == "full":
                 params["coalesce"] = True
-            lf = tf._lf.join(r, on=keys, how=how, **params)
+            tag = _pe().RIGHT_TAG
+            lf = tf._lf.join(r, on=keys, how=how, suffix=tag, **params)
             left_columns = tf._lf.collect_schema().names()
             right_columns = r.collect_schema().names()
             key_columns = [keys] if isinstance(keys, str) else list(keys)
-            ordered = [*left_columns]
+            left_out, right_out = _pe().join_names(
+                left_columns, right_columns, key_columns, key_columns, False, suffix
+            )
+            ordered = [pl.col(column).alias(left_out[column]) for column in left_columns]
             for column in right_columns:
                 if column in key_columns:
                     continue
-                ordered.append(
-                    f"{column}_right" if column in left_columns else column
-                )
+                source = column + tag if column in left_columns else column
+                ordered.append(pl.col(source).alias(right_out[column]))
             return tf._with_lf(lf.select(ordered), groups=tf._groups)
         key_names = [keys] if isinstance(keys, str) else list(keys)
         return _join_by_operation(tf, r, join_by(*key_names), how, kwargs)
@@ -3667,16 +3701,29 @@ def anti_join(
 def cross_join(right: Any, **kwargs: Any) -> Verb:
     """Return the Cartesian product of the left and right frames."""
 
+    params = dict(kwargs)
+    suffix = _join_suffix(params.pop("suffix", None))
+    if params:
+        raise TypeError(f"unsupported cross_join arguments: {sorted(params)}")
+
     def _apply(tf):
         r = _right_frame(right, tf._backend)
         if tf._backend == "pandas":
-            pdf = _pe().do_join(tf._pdf, r, None, "cross", **kwargs)
+            pdf = _pe().do_join(tf._pdf, r, None, "cross", suffix=suffix)
             return tf._with_pdf(pdf, groups=tf._groups)
-        params = dict(kwargs)
-        params.setdefault("maintain_order", "left")
-        return tf._with_lf(
-            tf._lf.join(r, how="cross", **params), groups=tf._groups
+        tag = _pe().RIGHT_TAG
+        left_columns = tf._lf.collect_schema().names()
+        right_columns = r.collect_schema().names()
+        left_out, right_out = _pe().join_names(
+            left_columns, right_columns, [], [], False, suffix
         )
+        lf = tf._lf.join(r, how="cross", suffix=tag, maintain_order="left")
+        ordered = [pl.col(column).alias(left_out[column]) for column in left_columns]
+        ordered += [
+            pl.col(column + tag if column in left_columns else column).alias(right_out[column])
+            for column in right_columns
+        ]
+        return tf._with_lf(lf.select(ordered), groups=tf._groups)
 
     return Verb(_apply, "cross_join")
 

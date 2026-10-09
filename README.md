@@ -1027,6 +1027,18 @@ tidy(sales) >> mutate(
 )
 ```
 
+Columns found in both tables get dplyr's suffixes in Python spelling:
+`_x` and `_y` rather than `.x` and `.y` (as `na.rm` is `na_rm`), so
+`v_x` works as a bare name in notebooks. Pass a pair to choose others:
+
+```python
+before = tidy({"id": [1, 2], "price": [10.0, 12.0]})
+after = tidy({"id": [1, 2], "price": [11.0, 15.0]})
+
+before >> left_join(after, by="id")                             # id, price_x, price_y
+before >> left_join(after, by="id", suffix=("_old", "_new"))    # id, price_old, price_new
+```
+
 Mutating joins accept dplyr-style safety controls:
 
 ```python

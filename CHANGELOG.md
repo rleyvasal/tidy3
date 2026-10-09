@@ -4,6 +4,25 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- Joins name columns found in both tables like dplyr, in Python spelling:
+  both copies get a suffix, `_x` and `_y` by default (dplyr's `.x`/`.y`),
+  and `suffix=` takes a pair, e.g. `suffix=("_old", "_new")`. `keep=True`
+  gives `id_x`/`id_y`, and a suffixed name that already exists gets the
+  suffix again (`v_x_x`), as in dplyr. This applies to left, right, inner,
+  full, and cross joins. Before, only the right copy was renamed
+  (`v`, `v_right`); `suffix=("", "_right")` gives those names back.
+- `suffix="_r"` (one string) still renames only the right copy but is
+  deprecated; it warns and will be removed.
+
+### Fixed
+
+- pandas backend: a right-table whole-number column stays whole numbers when
+  a join leaves some rows unmatched (it became decimals).
+
 ## 0.5.1 — 2026-10-08
 
 dplyr's empty groups for `drop = FALSE`, and 1-based group row positions.

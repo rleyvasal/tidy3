@@ -949,6 +949,25 @@ def _empty_groups(backend: str):
     }
 
 
+def _join_names(backend: str):
+    import tidy3 as t3
+
+    a = tidy({"id": [1, 2, 3], "v": [1.0, 2.0, 3.0], "w": [5.0, 6.0, 7.0]}, backend=backend)
+    b = tidy({"id": [1, 2, 4], "v": [10.0, 20.0, 40.0]}, backend=backend)
+    clash = tidy({"id": [1, 2], "v": [1.0, 2.0], "v_x": [9.0, 9.0]}, backend=backend)
+    return {
+        "left": a >> left_join(b, by="id"),
+        "inner": a >> inner_join(b, by="id"),
+        "full": a >> full_join(b, by="id"),
+        "right": a >> right_join(b, by="id"),
+        "pair": a >> left_join(b, by="id", suffix=("_l", "_r")),
+        "kept": a >> left_join(b, by="id", keep=True),
+        "clash": clash >> left_join(b, by="id"),
+        "empty_left": a >> left_join(b, by="id", suffix=("", "_right")),
+        "crossed": (a >> t3.slice_head(n=2)) >> t3.cross_join(b >> t3.slice_head(n=2)),
+    }
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "filter_missing": _filter_missing,
     "filter_out_missing": _filter_out_missing,
@@ -1002,6 +1021,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "grids": _grids,
     "splitting": _splitting,
     "empty_groups": _empty_groups,
+    "join_names": _join_names,
 }
 
 
@@ -1039,6 +1059,7 @@ CASE_VERBS = {
     "ordering": {"mutate"},
     "grids": {"expand_grid", "crossing", "uncount", "full_seq", "complete", "expand"},
     "empty_groups": {"summarise", "count"},
+    "join_names": {"left_join", "inner_join", "full_join", "right_join", "cross_join"},
     "splitting": {
         "separate_wider_regex", "separate_wider_position", "separate_longer_position",
         "chop", "unchop", "unnest_auto",
