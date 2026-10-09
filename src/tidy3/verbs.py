@@ -107,7 +107,20 @@ class Verb:
                     "After editing tidy3 source, restart the kernel so "
                     "pipes and verbs share one TidyFrame class."
                 )
-        return self._fn(other)
+        from tidy3.expr import _FRAME_COLUMNS
+
+        known: list[frozenset[str]] = []
+
+        def columns() -> frozenset[str]:
+            if not known:
+                known.append(frozenset(_frame_columns(other)))
+            return known[0]
+
+        token = _FRAME_COLUMNS.set(columns)
+        try:
+            return self._fn(other)
+        finally:
+            _FRAME_COLUMNS.reset(token)
 
     # Also support ``verb(frame)`` call style for type checkers / tooling.
     def __call__(self, other: Any) -> "TidyFrame":
@@ -170,7 +183,7 @@ def _column_references(value: Any) -> set[str]:
     references: set[str] = set()
 
     def visit(node: tuple) -> None:
-        if node[0] == "col":
+        if node[0] in {"col", "name"}:
             references.add(node[1])
             return
         for child in _expression_children(node):
@@ -178,6 +191,34 @@ def _column_references(value: Any) -> set[str]:
 
     visit(value.node)
     return references
+
+
+def _is_name_ref(value: Any) -> bool:
+    """A bare notebook name (column if present, else value): a selection."""
+    from tidy3.expr import NameRef
+
+    return isinstance(value, NameRef) or (
+        isinstance(value, Expr) and value.node[0] == "name"
+    )
+
+
+def _resolve_in_order(assignments: dict[str, Any], columns: list[str]) -> dict[str, Any]:
+    """Resolve bare notebook names left to right, as dplyr's data mask does.
+
+    A name means a column that exists or that an earlier assignment in the
+    same call creates (``mutate(y = x * 2, z = y + 1)``); otherwise it keeps
+    the notebook value.
+    """
+    from tidy3.expr import resolve_names
+
+    seen = set(columns)
+    resolved: dict[str, Any] = {}
+    for name, value in assignments.items():
+        if isinstance(value, Expr):
+            value = Expr(resolve_names(value.node, seen))
+        resolved[name] = value
+        seen.add(name)
+    return resolved
 
 
 def _assignment_stages(assignments: dict[str, Any]) -> list[dict[str, Any]]:
@@ -559,7 +600,7 @@ def _expr_column_names(value: Any) -> set[str]:
         if not isinstance(node, tuple) or not node:
             return
         kind = node[0]
-        if kind == "col":
+        if kind in {"col", "name"}:  # a bare notebook name may be a column
             names.add(str(node[1]))
         elif kind == "lit":
             return
@@ -825,7 +866,9 @@ def mutate(
         input_columns = _frame_columns(tf)
         groups, transient = _operation_groups(tf, by, "mutate")
         context = _group_context(tf, groups)
-        assignments = _expanded_assignments(context, specs, kwargs, "mutate")
+        assignments = _resolve_in_order(
+            _expanded_assignments(context, specs, kwargs, "mutate"), input_columns
+        )
         deleted_so_far: set[str] = set()
         for name, value in assignments.items():
             if value is None:
@@ -979,7 +1022,7 @@ def select(*cols: Any, **renames: Any) -> Verb:
                     ordered.append(old)
                     seen_sources.add(old)
                 continue
-            if isinstance(spec, (Expr, pl.Expr)):
+            if isinstance(spec, (Expr, pl.Expr)) and not _is_name_ref(spec):
                 ordered.append(spec)
                 continue
             for source in resolve_selection(tf, [spec]):
@@ -2322,7 +2365,10 @@ def summarise(
             result_groups = input_groups[:-1] or None
         result_rowwise = grouping_policy == "rowwise"
         context = _group_context(tf, operation_groups)
-        assignments = _expanded_assignments(context, specs, kwargs, "summarise")
+        assignments = _resolve_in_order(
+            _expanded_assignments(context, specs, kwargs, "summarise"),
+            _frame_columns(tf),
+        )
         assignments = _sequential_summary_assignments(assignments)
         if tf._rowwise:
             marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
@@ -2509,6 +2555,11 @@ def _count_rows(
     result_groups: list[str] | None,
     drop: bool,
 ):
+    # Bare notebook names (count(g)) become the column names they resolve to.
+    cols = tuple(
+        column for spec in cols
+        for column in (resolve_selection(tf, [spec]) if _is_name_ref(spec) else [spec])
+    )
     eff = list(dict.fromkeys([*(tf._groups or []), *cols]))
     out_name = _count_name(tf, name, eff)
     if tf._backend == "pandas":
@@ -2617,6 +2668,11 @@ def _add_count_rows(
     sort: bool,
     name: str | None,
 ):
+    # Bare notebook names (count(g)) become the column names they resolve to.
+    cols = tuple(
+        column for spec in cols
+        for column in (resolve_selection(tf, [spec]) if _is_name_ref(spec) else [spec])
+    )
     eff = list(dict.fromkeys([*(tf._groups or []), *cols]))
     out_name = _count_name(tf, name, eff)
     if tf._backend == "pandas":

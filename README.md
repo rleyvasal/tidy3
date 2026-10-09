@@ -449,8 +449,14 @@ ggplot(cars_space, aes(x=`hp new`, y=mpg)) + geom_point()
 - **Columns named like Python builtins or tidy3 helpers** (`id`, `type`, `max`,
   `n`) work bare wherever only a column makes sense: `filter(id > 1)`,
   `select(id, type)`, `arrange(desc(id))`, `mutate(z = max * 2)`. Passed as a
-  function, as in `across(everything(), mean)`, they stay functions. A name you
-  assign in the notebook (`n = 5`) means your variable.
+  function, as in `across(everything(), mean)`, they stay functions.
+- **Columns win over notebook variables**, as in dplyr: with `x = 100` in the
+  notebook, `filter(x > limit)` still compares the column `x`, and `limit`
+  is your variable because there is no column called `limit`. Use `env.x`
+  for the variable when a column has the same name (dplyr's `.env$x`), or
+  `col("x")` to insist on the column. Within one `mutate()`, a column made
+  earlier counts: `mutate(y = x * 2, z = y + 1)`. Calls skip non-functions
+  like R does, so `n()` still counts rows after `n = 7`.
 - **plot3** `aes` / `facet_wrap` use the same style in Jupyter
 
 #### Export notebook → plain Python script (`nb_export`)

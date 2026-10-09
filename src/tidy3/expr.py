@@ -19,6 +19,7 @@ import operator
 from typing import Any
 
 import polars as pl
+from contextvars import ContextVar
 
 __all__ = [
     "Expr", "col", "desc", "n", "mean", "sum", "min", "max",
@@ -29,8 +30,89 @@ __all__ = [
     "cummean", "cumall", "cumany", "n_distinct", "coalesce", "if_else",
     "case_when", "case_match", "recode", "recode_values", "replace_values",
     "replace_when", "when_any", "when_all", "order_by", "with_order",
-    "cur_group_id", "n_groups", "to_polars",
+    "cur_group_id", "n_groups", "to_polars", "env",
 ]
+
+# Columns of the frame a verb is running on, read only when needed. A bare
+# notebook name is the column when the frame has one (dplyr's data mask).
+_FRAME_COLUMNS: ContextVar[Any] = ContextVar("tidy3_frame_columns", default=None)
+
+
+class NameRef(str):
+    """A bare notebook name in a selection: the column name, carrying the
+    notebook value to use when the frame has no such column.
+
+    A ``str`` subclass, so every verb that takes column names sees the name.
+    """
+
+    __slots__ = ("value",)
+
+    def __new__(cls, name: str, value: Any) -> "NameRef":
+        ref = super().__new__(cls, name)
+        ref.value = value
+        return ref
+
+
+def name_ref(name: str, value: Any, selection: bool = False) -> Any:
+    """A bare notebook name: the column if the frame has it, else ``value``.
+
+    Notebook masking writes ``x`` as ``name_ref("x", x)`` when ``x`` is both
+    a notebook variable and possibly a column; the verb decides when it runs.
+    In selections (``select(x)``) it is a :class:`NameRef` string.
+    """
+    if selection:
+        return NameRef(name, value)
+    return Expr(("name", name, _node(value)))
+
+
+def resolve_names(node: Any, columns: Any) -> Any:
+    """Copy of *node* with each name reference resolved against *columns*."""
+    if not isinstance(node, tuple) or not node:
+        return node
+    if node[0] == "name":
+        return ("col", node[1]) if node[1] in columns else resolve_names(node[2], columns)
+    return tuple(
+        resolve_names(part, columns)
+        if isinstance(part, tuple)
+        else [resolve_names(item, columns) for item in part]
+        if isinstance(part, list)
+        else {key: resolve_names(value, columns) for key, value in part.items()}
+        if isinstance(part, dict)
+        else part
+        for part in node
+    )
+
+
+class _Env:
+    """``env.x``: the notebook variable ``x``, even when a column is named ``x``.
+
+    Like dplyr's ``.env$x``; ``col("x")`` is the column.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        namespace = None
+        try:
+            from IPython import get_ipython
+
+            shell = get_ipython()
+            namespace = getattr(shell, "user_ns", None)
+        except Exception:
+            pass
+        if namespace is None:
+            import sys
+
+            namespace = sys._getframe(1).f_globals
+        if name not in namespace:
+            raise NameError(f"env.{name}: no variable named {name!r}")
+        return namespace[name]
+
+    def __repr__(self) -> str:
+        return "env"
+
+
+env = _Env()
 
 _PL_BIN = {
     "+": operator.add, "-": operator.sub, "*": operator.mul,
@@ -712,6 +794,12 @@ def _compile_pl(node: tuple) -> Any:
         if as_list:
             return pl.concat_list(expressions)
         return pl.struct(expressions)
+    if kind == "name":
+        _, name, value = node
+        columns = _FRAME_COLUMNS.get()
+        if columns is not None and name in columns():
+            return pl.col(name)
+        return _compile_pl(value)
     if kind == "func" and node[1] == "order_by":
         return _compile_order_by(node[2][0], node[2][1])
     if kind == "func":

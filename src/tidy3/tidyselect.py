@@ -10,7 +10,7 @@ from typing import Any
 
 import polars as pl
 
-from tidy3.expr import Expr, col, cur_group_id as _expr_cur_group_id, n_groups as _expr_n_groups
+from tidy3.expr import Expr, NameRef, col, cur_group_id as _expr_cur_group_id, n_groups as _expr_n_groups
 
 
 _CURRENT_COLUMN: ContextVar[str | None] = ContextVar("tidy3_current_column", default=None)
@@ -119,6 +119,12 @@ def resolve_selection(
     def add(spec: Any) -> None:
         if isinstance(spec, Selector):
             selected.extend(spec.resolve(columns, schema, groups))
+        elif isinstance(spec, NameRef):
+            # A bare notebook name: the column if it exists, else its value.
+            if str(spec) in columns:
+                selected.append(str(spec))
+            else:
+                add(spec.value)
         elif isinstance(spec, str):
             if spec not in columns:
                 if strict_strings:

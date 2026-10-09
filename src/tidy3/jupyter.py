@@ -279,6 +279,15 @@ def enable_r_style(ipython: Any | None = None) -> bool:
         ns[BT_NAME] = col
         # Runtime carrier for `new col` = expr → NamedAssign
         ns[ASSIGN_NAME] = make_named_assign
+        # Bare notebook names that may be columns (dplyr's data mask).
+        from tidy3.expr import name_ref
+        from tidy3.masking import NAME_REF
+
+        ns[NAME_REF] = name_ref
+        import tidy3
+        from tidy3.masking import API_NAME
+
+        ns[API_NAME] = tidy3
     enable_pipe_transform(ipython)
     transformers = getattr(ipython, "ast_transformers", None)
     if isinstance(transformers, list):

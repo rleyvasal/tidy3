@@ -129,6 +129,8 @@ def _ev(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str) -> A
     kind = node[0]
     if kind == "col":
         return df[node[1]]
+    if kind == "name":  # a bare notebook name: column first (dplyr)
+        return df[node[1]] if node[1] in df.columns else _ev(node[2], df, groups, mode)
     if kind == "lit":
         return node[1]
     if kind == "pl":

@@ -404,6 +404,14 @@ def partial_run(
 
         ns.setdefault(COL_NAME, col)
         ns.setdefault(BT_NAME, col)
+        from tidy3.expr import name_ref
+        from tidy3.masking import NAME_REF
+
+        ns.setdefault(NAME_REF, name_ref)
+        import tidy3
+        from tidy3.masking import API_NAME
+
+        ns.setdefault(API_NAME, tidy3)
         code = apply_masking(code, known=default_known_names(set(ns)))
     except SyntaxError:
         pass

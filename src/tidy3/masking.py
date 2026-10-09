@@ -28,6 +28,12 @@ COL_NAME = "__tidy3_col__"
 # Spaced / odd *new* column names in mutate/select/rename:
 #   `new hp` = expr  →  __tidy3_assign__("new hp", (expr))
 ASSIGN_NAME = "__tidy3_assign__"
+# A notebook variable that may also name a column: name_ref("x", x) picks the
+# column when the frame has one (dplyr's data mask), else the value.
+NAME_REF = "__tidy3_name__"
+# The tidy3 module, for n() after a notebook rebinds n = 7: like R, a call
+# skips names that are not functions.
+API_NAME = "__tidy3_api__"
 
 Mode = Literal["expr", "selector"]
 
@@ -541,23 +547,55 @@ class MaskNames(ast.NodeTransformer):
     ``max * 2``), or the column argument of a tidy3 helper (``desc(id)``).
     """
 
-    def __init__(self, mode: Mode, known: set[str], soft: set[str] | None = None):
+    def __init__(
+        self,
+        mode: Mode,
+        known: set[str],
+        soft: set[str] | None = None,
+        variables: dict[str, Any] | None = None,
+    ):
         self.mode = mode
         self.known = known
         self.soft = soft or set()
+        self.variables = variables or {}
 
     def mask_root(self, node: ast.AST) -> ast.AST:
         """Mask one whole verb argument."""
         return self._operand(node)
 
     def _operand(self, node: ast.AST) -> ast.AST:
-        if (
-            isinstance(node, ast.Name)
-            and isinstance(node.ctx, ast.Load)
-            and node.id in self.soft
-        ):
-            return self._replacement(node.id, node)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if node.id in self.soft:
+                return self._replacement(node.id, node)
+            if node.id in self.variables and _may_name_a_column(
+                self.variables[node.id], self.mode
+            ):
+                args = [ast.Constant(value=node.id), node]
+                if self.mode == "selector":
+                    args.append(ast.Constant(value=True))
+                return ast.copy_location(
+                    ast.Call(
+                        func=ast.Name(id=NAME_REF, ctx=ast.Load()),
+                        args=args,
+                        keywords=[],
+                    ),
+                    node,
+                )
         return self.visit(node)
+
+    def visit_List(self, node: ast.List) -> ast.AST:
+        # select([x, y]) / pivot_longer([x, y]): like R's c(x, y), each item
+        # is a column position.
+        if self.mode == "selector":
+            node.elts = [self._operand(item) for item in node.elts]
+            return node
+        return self.generic_visit(node)
+
+    def visit_Tuple(self, node: ast.Tuple) -> ast.AST:
+        if self.mode == "selector":
+            node.elts = [self._operand(item) for item in node.elts]
+            return node
+        return self.generic_visit(node)
 
     def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
         node.left = self._operand(node.left)
@@ -594,12 +632,15 @@ class MaskNames(ast.NodeTransformer):
 
     def _with_bound(self, names: Iterable[str], visit: Any) -> Any:
         """Run *visit* with *names* treated as local variables, not columns."""
-        saved = self.known
-        self.known = saved | set(names)
+        local = set(names)
+        saved = self.known, self.soft, self.variables
+        self.known = saved[0] | local
+        self.soft = saved[1] - local
+        self.variables = {k: v for k, v in saved[2].items() if k not in local}
         try:
             return visit()
         finally:
-            self.known = saved
+            self.known, self.soft, self.variables = saved
 
     def visit_Lambda(self, node: ast.Lambda) -> ast.AST:
         # lambda x: x > 0 — x is the lambda's parameter, not column "x".
@@ -672,6 +713,15 @@ class MaskNames(ast.NodeTransformer):
         # Keep function names (mean, if_else, n, starts_with, …); rewrite args.
         if not isinstance(node.func, ast.Name):
             node.func = self.visit(node.func)
+        elif _shadowed_api_function(node.func.id, self.variables):
+            node.func = ast.copy_location(
+                ast.Attribute(
+                    value=ast.Name(id=API_NAME, ctx=ast.Load()),
+                    attr=node.func.id,
+                    ctx=ast.Load(),
+                ),
+                node.func,
+            )
         # Do not treat helper names as columns; leave Name funcs alone.
         helper = node.func.id if isinstance(node.func, ast.Name) else None
         if helper in _ALL_COLUMN_ARGS:
@@ -693,7 +743,7 @@ class MaskNames(ast.NodeTransformer):
 def default_known_names(extra: Iterable[str] | None = None) -> set[str]:
     """Names that must not be rewritten to columns (funcs, builtins, sentinels)."""
     known = set(dir(builtins))
-    known.update({BT_NAME, COL_NAME, "True", "False", "None"})
+    known.update({BT_NAME, COL_NAME, NAME_REF, ASSIGN_NAME, API_NAME, "True", "False", "None"})
     # tidy3 helpers commonly used bare in expressions
     try:
         import tidy3 as t3
@@ -710,6 +760,59 @@ def default_known_names(extra: Iterable[str] | None = None) -> set[str]:
 
 
 _UNSET = object()
+_SHELL_NAMES = frozenset({"In", "Out", "exit", "quit", "get_ipython", "open"})
+
+
+def _notebook_variables(namespace: dict[str, Any] | None, soft: set[str]) -> dict[str, Any]:
+    """The user's own notebook variables, including reused names (``n = 7``).
+
+    Builtins and tidy3 names the notebook has not rebound are ``soft``.
+    """
+    if not namespace:
+        return {}
+    return {
+        name: value
+        for name, value in namespace.items()
+        if not name.startswith("_")
+        and name not in soft
+        and name not in _SHELL_NAMES
+    }
+
+
+def _shadowed_api_function(name: str, variables: dict[str, Any]) -> bool:
+    """``n()`` after ``n = 7``: a tidy3 function hidden by a non-function."""
+    if name not in variables or callable(variables[name]):
+        return False
+    try:
+        import tidy3 as t3
+    except Exception:
+        return False
+    return name in t3.__all__ and callable(getattr(t3, name, None))
+
+
+def _may_name_a_column(value: Any, mode: Mode) -> bool:
+    """Whether a variable used bare could mean a same-named column instead.
+
+    In expressions only simple values qualify (a function or array stays
+    itself); in selections anything but functions and modules does, so
+    ``select(cols)`` with a list of names still works.
+    """
+    import datetime
+    import decimal
+    import types
+
+    if mode == "selector":
+        return not callable(value) and not isinstance(value, types.ModuleType)
+    if value is None or isinstance(
+        value, (bool, int, float, complex, str, decimal.Decimal, datetime.date, datetime.time)
+    ):
+        return True
+    try:
+        import numpy as np
+
+        return isinstance(value, np.generic)
+    except ImportError:
+        return False
 
 
 def soft_names(namespace: dict[str, Any] | None = None) -> set[str]:
@@ -790,6 +893,7 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
     def __init__(self, known: set[str] | None = None):
         self._known_static = known
         self._soft: set[str] = set()
+        self._variables: dict[str, Any] = {}
 
     def _known(self) -> set[str]:
         if self._known_static is not None:
@@ -811,15 +915,17 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
         return getattr(ip, "user_ns", None) if ip is not None else None
 
     def _mask(self, node: ast.AST, mode: Mode) -> ast.AST:
-        return MaskNames(mode, self._known(), self._soft).mask_root(node)
+        return MaskNames(
+            mode, self._known(), self._soft, self._variables
+        ).mask_root(node)
 
     def visit_Module(self, node: ast.Module) -> ast.AST:
         # Static known names (export, tests) have no notebook to consult.
-        self._soft = soft_names(
-            None if self._known_static is not None else self._namespace()
-        )
+        namespace = None if self._known_static is not None else self._namespace()
+        self._soft = soft_names(namespace)
         if self._known_static is not None:
             self._soft &= self._known_static
+        self._variables = _notebook_variables(namespace, self._soft)
         node = self.generic_visit(node)
         return _plot3_masking_for_importing_cell(node)
 

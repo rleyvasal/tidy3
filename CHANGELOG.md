@@ -4,6 +4,29 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- Notebook bare names follow dplyr's data mask: a column beats a notebook
+  variable with the same name, in expressions (`filter(x > limit)`) and in
+  selections (`select(x)`, `count(g)`, `select([g, x])`). A name with no
+  matching column is still your variable, and `select(cols)` with a list
+  of names still works. Within one `mutate()` or `summarise()`, columns
+  made by earlier assignments count. Before, any notebook variable won.
+
+### Added
+
+- `env.x`: the notebook variable `x` even when a column is named `x`, like
+  dplyr's `.env$x`.
+
+### Fixed
+
+- After a notebook rebinds a tidy3 function name (`n = 7`), calls inside verbs
+  still use the function (`n()` counts rows), as R skips non-functions.
+- Lambda parameters and comprehension variables named like builtins
+  (`lambda n: n > 0`) are no longer read as columns.
+
 ## 0.4.0 — 2026-10-08
 
 dplyr 1.2 parity, dplyr's group functions, and more tidyr verbs, each checked
