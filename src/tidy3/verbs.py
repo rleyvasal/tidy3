@@ -3766,17 +3766,27 @@ def bind_rows(*others: Any, id: str | None = None) -> Verb:  # noqa: A002
 
 
 def _repair_bind_names(names: list[str]) -> list[str]:
-    """Apply the default vctrs-style unique repair used by bind_cols()."""
-    bases = [re.sub(r"\.\.\.[0-9]+$", "", name) for name in names]
+    """bind_cols() names: dplyr's unique repair in Python spelling.
+
+    Duplicated (or empty) names get their 1-based position, ``x_1`` and
+    ``x_3`` where dplyr writes ``x...1`` and ``x...3``. A repaired name that
+    would clash with another column gets the position again until unique.
+    """
     counts: dict[str, int] = {}
-    for name in bases:
+    for name in names:
         counts[name] = counts.get(name, 0) + 1
     repaired = [
-        f"{name}...{position}"
-        if not name or counts[name] > 1
-        else name
-        for position, name in enumerate(bases, start=1)
+        f"{name}_{position}" if not name or counts[name] > 1 else name
+        for position, name in enumerate(names, start=1)
     ]
+    taken = set(name for name in names if name and counts[name] == 1)
+    for index, name in enumerate(repaired):
+        if names[index] and counts[names[index]] == 1:
+            continue
+        while name in taken:
+            name = f"{name}_{index + 1}"
+        repaired[index] = name
+        taken.add(name)
     return repaired
 
 

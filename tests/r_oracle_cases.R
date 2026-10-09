@@ -198,7 +198,12 @@ result <- switch(
   categorical_count = tibble(
     g=factor("a", levels=c("a", "b")), x=1
   ) |> count(g, .drop=FALSE),
-  duplicate_names = bind_cols(tibble(x=1L), tibble(x=2L)),
+  duplicate_names = {
+    # tidy3 spells dplyr's repaired x...1 as x_1.
+    out <- suppressMessages(bind_cols(tibble(x=1L), tibble(x=2L)))
+    names(out) <- sub("...", "_", names(out), fixed=TRUE)
+    out
+  },
   descending_rank = tibble(x=c(3, 1, 2, NA_real_)) |>
     mutate(rank=min_rank(desc(x))),
   sequential_summary = tibble(x=1:3) |>

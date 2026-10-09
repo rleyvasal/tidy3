@@ -17,6 +17,9 @@ under **Changed**.
   (`v`, `v_right`); `suffix=("", "_right")` gives those names back.
 - `suffix="_r"` (one string) still renames only the right copy but is
   deprecated; it warns and will be removed.
+- `bind_cols()` names duplicated columns `x_1`, `x_3` (each column's
+  position), dplyr's `x...1`, `x...3` in Python spelling. A repaired name
+  that would clash with an existing column gets its position again.
 
 ### Fixed
 

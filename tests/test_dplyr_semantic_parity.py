@@ -206,8 +206,9 @@ def test_bind_cols_repairs_names_and_recycles_size_one(backend):
         tidy({"x": [1, 2, 3]}, backend=backend)
         >> bind_cols(pd.DataFrame({"x": [9]}))
     )
-    assert out.columns.tolist() == ["x...1", "x...2"]
-    assert out["x...2"].tolist() == [9, 9, 9]
+    # dplyr's x...1 / x...2, in Python spelling.
+    assert out.columns.tolist() == ["x_1", "x_2"]
+    assert out["x_2"].tolist() == [9, 9, 9]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -229,3 +230,13 @@ def test_group_by_drop_false_retains_unused_factor_levels(backend):
     counted = as_pandas(frame >> count("g", drop=False))
     assert counted["g"].tolist() == ["a", "b"]
     assert counted["n"].tolist() == [1, 0]
+
+
+def test_bind_cols_repaired_names_never_clash_with_existing_columns():
+    from tidy3.verbs import _repair_bind_names
+
+    assert _repair_bind_names(["a", "b", "a", "c"]) == ["a_1", "b", "a_3", "c"]
+    # An existing a_2 column keeps its name; the repaired one moves aside.
+    assert _repair_bind_names(["a", "a", "a_2"]) == ["a_1", "a_2_2", "a_2"]
+    # Names that merely end in a number are left alone.
+    assert _repair_bind_names(["week_1", "rain"]) == ["week_1", "rain"]
