@@ -423,6 +423,20 @@ result <- switch(
       nested=nest(n, x=c(x_a, x_b), .names_sep="_") |> unnest(x)
     )
   },
+  specs = {
+    wide <- tibble(id=1:2, mean_1=c(5, 6), mean_2=c(7, 8), sd_1=c(0.1, 0.2), sd_2=c(0.3, 0.4))
+    long <- tibble(id=c(1, 1, 2, 2), key=c("a", "b", "a", "b"), v=1:4, w=5:8)
+    s1 <- build_longer_spec(wide, -id, names_to=c(".value", "visit"), names_sep="_")
+    s2 <- build_longer_spec(wide, starts_with("mean"), names_to="visit", names_prefix="mean_", values_to="score")
+    s3 <- build_wider_spec(long, names_from=key, values_from=c(v, w))
+    s4 <- build_wider_spec(long, names_from=key, values_from=v)
+    s4$.name <- c("first", "second")
+    list(
+      longer_spec=s1, longer=pivot_longer_spec(wide, s1), longer_values=pivot_longer_spec(wide, s2),
+      wider_spec=s3, wider=pivot_wider_spec(long, s3), renamed=pivot_wider_spec(long, s4, id_cols=id),
+      glued=build_wider_spec(long, names_from=key, values_from=v, names_glue="col_{key}", names_sort=TRUE)
+    )
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 

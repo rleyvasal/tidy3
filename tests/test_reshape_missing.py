@@ -498,3 +498,13 @@ def test_pivot_wider_renaming_options_stay_lazy_on_polars(monkeypatch):
     monkeypatch.undo()
     assert as_pandas(plain).columns.tolist() == ["id", "w", "a", "b"]
     assert as_pandas(styled).columns.tolist() == ["id", "a_v", "a_w", "b_v", "b_w"]
+
+
+def test_check_pivot_spec_errors_like_tidyr():
+    from tidy3 import check_pivot_spec
+
+    with pytest.raises(ValueError, match="must have `.name` and `.value`"):
+        check_pivot_spec({"x": [1]})
+    with pytest.raises(ValueError, match="must be unique"):
+        check_pivot_spec({".name": ["a", "a"], ".value": ["v", "v"]})
+    assert as_pandas(check_pivot_spec({".name": ["a"], ".value": ["v"]})).shape == (1, 2)

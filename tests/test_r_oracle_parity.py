@@ -1015,6 +1015,28 @@ def _list_options(backend: str):
     }
 
 
+def _specs(backend: str):
+    import tidy3 as t3
+
+    wide = tidy(
+        {"id": [1, 2], "mean_1": [5.0, 6.0], "mean_2": [7.0, 8.0], "sd_1": [0.1, 0.2], "sd_2": [0.3, 0.4]},
+        backend=backend,
+    )
+    long = tidy({"id": [1.0, 1.0, 2.0, 2.0], "key": ["a", "b", "a", "b"], "v": [1, 2, 3, 4], "w": [5, 6, 7, 8]}, backend=backend)
+    s1 = t3.build_longer_spec(wide, ~t3.all_of(["id"]), names_to=[".value", "visit"], names_sep="_")
+    s2 = t3.build_longer_spec(wide, t3.starts_with("mean"), names_to="visit", names_prefix="mean_", values_to="score")
+    s3 = t3.build_wider_spec(long, names_from="key", values_from=["v", "w"])
+    s4 = t3.build_wider_spec(long, names_from="key", values_from="v").collect(as_="pandas")
+    s4[".name"] = ["first", "second"]
+    return {
+        "longer_spec": s1, "longer": wide >> t3.pivot_longer_spec(s1),
+        "longer_values": wide >> t3.pivot_longer_spec(s2),
+        "wider_spec": s3, "wider": long >> t3.pivot_wider_spec(s3),
+        "renamed": long >> t3.pivot_wider_spec(s4, id_cols="id"),
+        "glued": t3.build_wider_spec(long, names_from="key", values_from="v", names_glue="col_{key}", names_sort=True),
+    }
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "filter_missing": _filter_missing,
     "filter_out_missing": _filter_out_missing,
@@ -1071,6 +1093,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "join_names": _join_names,
     "pivot_options": _pivot_options,
     "list_options": _list_options,
+    "specs": _specs,
 }
 
 
@@ -1109,6 +1132,10 @@ CASE_VERBS = {
     "grids": {"expand_grid", "crossing", "uncount", "full_seq", "complete", "expand"},
     "empty_groups": {"summarise", "count"},
     "pivot_options": {"pivot_wider", "pivot_longer"},
+    "specs": {
+        "build_longer_spec", "pivot_longer_spec", "build_wider_spec",
+        "pivot_wider_spec", "check_pivot_spec",
+    },
     "list_options": {"separate_wider_delim", "unnest_longer", "unnest_wider", "hoist", "nest", "unnest"},
     "join_names": {"left_join", "inner_join", "full_join", "right_join", "cross_join"},
     "splitting": {

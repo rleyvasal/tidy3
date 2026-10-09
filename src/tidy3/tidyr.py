@@ -1087,6 +1087,256 @@ def _summarise_unused(pdf, frame, ids, unused, unused_fn):
     return frame.merge(summary, on=ids, how="left", sort=False)
 
 
+
+# ── pivot specs (tidyr's build_*_spec / pivot_*_spec) ────────────────────
+
+
+def _spec_frame(spec: Any) -> Any:
+    """A spec as a pandas frame, checked like tidyr's check_pivot_spec()."""
+    import pandas as pd
+
+    from tidy3.frame import TidyFrame
+
+    if isinstance(spec, TidyFrame):
+        frame = spec.collect(as_="pandas")
+    elif isinstance(spec, pl.DataFrame):
+        frame = spec.to_pandas()
+    elif isinstance(spec, pd.DataFrame):
+        frame = spec.copy()
+    else:
+        frame = pd.DataFrame(spec)
+    if ".name" not in frame.columns or ".value" not in frame.columns:
+        raise ValueError("spec must have `.name` and `.value` columns")
+    if frame[".name"].duplicated().any():
+        raise ValueError("spec `.name` must be unique")
+    return frame.reset_index(drop=True)
+
+
+def check_pivot_spec(spec: Any) -> Any:
+    """Check a pivot spec: ``.name`` and ``.value`` columns, unique names."""
+    from tidy3.frame import tidy
+
+    return tidy(_spec_frame(spec))
+
+
+def build_longer_spec(
+    data: Any,
+    cols: Any,
+    *,
+    names_to: str | list[str] | tuple[str, ...] | None = "name",
+    values_to: str = "value",
+    names_prefix: str | None = None,
+    names_sep: str | None = None,
+    names_pattern: str | None = None,
+    names_transform: Any = None,
+) -> Any:
+    """The spec ``pivot_longer()`` would use, as a table you can edit (tidyr).
+
+    One row per pivoted column: ``.name`` (the column), ``.value`` (where its
+    values go), and one column per ``names_to`` entry. Pass it to
+    :func:`pivot_longer_spec`.
+    """
+    import re
+
+    import pandas as pd
+
+    from tidy3.frame import TidyFrame, tidy
+
+    tf = data if isinstance(data, TidyFrame) else tidy(data)
+    pivoted = resolve_selection(tf, [cols])
+    if not pivoted:
+        raise ValueError("build_longer_spec() selected no columns")
+    targets = (
+        [] if names_to is None
+        else [names_to] if isinstance(names_to, str)
+        else list(names_to)
+    )
+    if len(targets) > 1 and names_sep is None and names_pattern is None:
+        raise ValueError("multiple names_to columns require names_sep or names_pattern")
+    names = pd.Series(pivoted, dtype="string")
+    if names_prefix:
+        names = names.str.replace(rf"^(?:{names_prefix})", "", regex=True)
+    if names_pattern:
+        pieces = names.str.extract(names_pattern)
+    elif len(targets) > 1:
+        pieces = names.str.split(names_sep, n=len(targets) - 1, expand=True)
+    else:
+        pieces = names.to_frame()
+    if targets and pieces.shape[1] != len(targets):
+        raise ValueError("name split did not produce the requested number of columns")
+    spec = pd.DataFrame({".name": pivoted})
+    spec[".value"] = pieces.iloc[:, targets.index(".value")].astype(object) if ".value" in targets else values_to
+    for index, target in enumerate(targets):
+        if target != ".value":
+            spec[target] = pieces.iloc[:, index].astype(object)
+    out = tidy(spec)
+    extra = [t for t in targets if t != ".value"]
+    return _transform_columns(out, names_transform, extra, "names_transform")
+
+
+def pivot_longer_spec(
+    spec: Any,
+    *,
+    values_drop_na: bool = False,
+    cols_vary: str = "fastest",
+    values_transform: Any = None,
+) -> Verb:
+    """Lengthen with a spec from :func:`build_longer_spec` (tidyr).
+
+    Edit the spec first to rename or regroup: every ``.name`` column moves
+    into rows, keyed by the spec's other columns, with values in ``.value``.
+    """
+    if cols_vary not in {"fastest", "slowest"}:
+        raise ValueError("cols_vary must be 'fastest' or 'slowest'")
+    table = _spec_frame(spec)
+    keys = [c for c in table.columns if c not in {".name", ".value"}]
+
+    def _apply(tf):
+        import pandas as pd
+
+        from tidy3.frame import tidy
+
+        pdf = tf.collect(as_="pandas").reset_index(drop=True)
+        missing = [name for name in table[".name"] if name not in pdf.columns]
+        if missing:
+            raise KeyError(f"spec names columns the data does not have: {missing}")
+        ids = [c for c in pdf.columns if c not in set(table[".name"])]
+        values = list(dict.fromkeys(table[".value"]))
+        combos = list(dict.fromkeys(tuple(r) for r in table[keys].itertuples(index=False, name=None)))
+        row = _temp_name(list(pdf.columns), "__tidy3_row")
+        order = _temp_name([*pdf.columns, row], "__tidy3_combo")
+        pieces = []
+        for position, combo in enumerate(combos):
+            rows = table[[tuple(r) == combo for r in table[keys].itertuples(index=False, name=None)]]
+            piece = pdf[ids].copy()
+            for key, value in zip(keys, combo):
+                piece[key] = value
+            for value in values:
+                source = rows.loc[rows[".value"] == value, ".name"]
+                piece[value] = pdf[source.iloc[0]] if len(source) else None
+            piece[row] = range(len(pdf))
+            piece[order] = position
+            pieces.append(piece)
+        out = pd.concat(pieces, ignore_index=True)
+        out = out.sort_values([row, order] if cols_vary == "fastest" else [order, row], kind="stable")
+        if values_drop_na:
+            out = out.dropna(subset=values, how="all")
+        out = out.drop(columns=[row, order]).reset_index(drop=True)
+        result = tidy(out.loc[:, [*ids, *keys, *values]], backend=tf._backend)
+        return _transform_columns(result, values_transform, values, "values_transform")
+
+    return Verb(_apply, "pivot_longer_spec")
+
+
+def build_wider_spec(
+    data: Any,
+    *,
+    names_from: Any = "name",
+    values_from: Any = "value",
+    names_prefix: str = "",
+    names_sep: str = "_",
+    names_glue: str | None = None,
+    names_sort: bool = False,
+    names_vary: str = "fastest",
+    names_expand: bool = False,
+) -> Any:
+    """The spec ``pivot_wider()`` would use, as a table you can edit (tidyr).
+
+    One row per output column: ``.name``, ``.value`` (the value column it
+    comes from), and the ``names_from`` values. Pass it to
+    :func:`pivot_wider_spec`.
+    """
+    import pandas as pd
+
+    from tidy3.frame import TidyFrame, tidy
+
+    if names_vary not in {"fastest", "slowest"}:
+        raise ValueError("names_vary must be 'fastest' or 'slowest'")
+    tf = data if isinstance(data, TidyFrame) else tidy(data)
+    name_columns = resolve_selection(tf, [names_from])
+    value_columns = resolve_selection(tf, [values_from])
+    pdf = tf.collect(as_="pandas") if names_expand else None
+    combos = _pivot_combinations(tf, pdf, name_columns, None, names_expand, names_sort)
+    pairs = [(value, combo) for value in value_columns for combo in combos]
+    if names_vary == "slowest":
+        pairs.sort(key=lambda pair: (combos.index(pair[1]), value_columns.index(pair[0])))
+    spec = pd.DataFrame(
+        {
+            ".name": [
+                _pivot_label(v, c, name_columns, value_columns, names_prefix, names_sep, names_glue)
+                for v, c in pairs
+            ],
+            ".value": [v for v, _ in pairs],
+            **{name: [c[i] for _, c in pairs] for i, name in enumerate(name_columns)},
+        }
+    )
+    return tidy(spec)
+
+
+def pivot_wider_spec(
+    spec: Any,
+    *,
+    id_cols: Any = None,
+    id_expand: bool = False,
+    values_fill: Any = None,
+    values_fn: str | None = None,
+    unused_fn: Any = None,
+) -> Verb:
+    """Widen with a spec from :func:`build_wider_spec` (tidyr).
+
+    Each spec row is one output column: ``.name`` takes the ``.value``
+    column's values where the data's name columns equal the spec's.
+    """
+    table = _spec_frame(spec)
+    keys = [c for c in table.columns if c not in {".name", ".value"}]
+
+    def _apply(tf):
+        from tidy3.frame import tidy
+
+        values = list(dict.fromkeys(table[".value"]))
+        combos = list(dict.fromkeys(tuple(r) for r in table[keys].itertuples(index=False, name=None)))
+        all_columns = _columns(tf)
+        identifiers = (
+            [c for c in all_columns if c not in {*keys, *values}]
+            if id_cols is None
+            else resolve_selection(tf, [id_cols])
+        )
+        unused = [c for c in all_columns if c not in {*identifiers, *keys, *values}]
+        out = _pivot_wider_core(
+            names_from=keys if len(keys) > 1 else keys[0],
+            values_from=values if len(values) > 1 else values[0],
+            id_cols=identifiers or None,
+            values_fill=values_fill,
+            values_fn=values_fn,
+            names=[c if len(keys) > 1 else c[0] for c in combos],
+        )._fn(tf)
+        produced = _columns(out)
+        kept_ids = [c for c in produced if c in identifiers]
+        outputs = [c for c in produced if c not in identifiers]
+        pairs = [(value, combo) for value in values for combo in combos]
+        by_pair = dict(zip(pairs, outputs))
+        rename, ordered = {}, list(kept_ids)
+        for row in table.itertuples(index=False):
+            spec_row = dict(zip(table.columns, row))
+            combo = tuple(spec_row[k] for k in keys)
+            source = by_pair[(spec_row[".value"], combo)]
+            rename[source] = spec_row[".name"]
+            ordered.append(spec_row[".name"])
+        frame = (
+            out._pdf if out._backend == "pandas" else out._lf.collect().to_pandas()
+        ).rename(columns=rename).loc[:, ordered]
+        if id_expand or (unused_fn is not None and unused):
+            pdf = tf.collect(as_="pandas")
+            if id_expand and kept_ids:
+                frame = _expand_ids(tf, pdf, frame, kept_ids, values_fill)
+            if unused_fn is not None and unused:
+                frame = _summarise_unused(pdf, frame, kept_ids, unused, unused_fn)
+        result = tidy(frame.reset_index(drop=True), backend=out._backend)
+        return result
+
+    return Verb(_apply, "pivot_wider_spec")
+
+
 def _warn_not_unique(values: list[str], keys: list[str], temp_id: str | None) -> None:
     """tidyr's warning for values that are not uniquely identified."""
     shown = ", ".join(f"`{name}`" for name in values)
@@ -2560,6 +2810,11 @@ def unpack(column: str) -> Verb:
 
 
 __all__ = [
+    "build_longer_spec",
+    "build_wider_spec",
+    "check_pivot_spec",
+    "pivot_longer_spec",
+    "pivot_wider_spec",
     "chop",
     "separate_longer_position",
     "separate_wider_position",

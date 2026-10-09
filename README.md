@@ -521,7 +521,7 @@ ln -sfn /path/to/plot3 plot3
 | Columns | `mutate`, `transmute`, `select`, `drop`, `rename`, `rename_with`, `relocate`, `pull`, `glimpse` |
 | Groups | `group_by`, `rowwise`, `ungroup`, `with_groups`, `group_split`, `group_map`, `group_modify`, `group_walk`, `group_nest`, `nest_by`, `group_data`, `group_keys`, `group_rows`, `group_size`, `group_indices`, `group_vars`, `groups`, `n_groups`, `group_trim`, `summarise`, `reframe`, `count`, `tally`, `add_count`, `add_tally` |
 | Missing data | `drop_na`, `replace_na`, `fill`, `complete`, `expand`, `nesting`, `crossing`, `expand_grid`, `full_seq`, `uncount` |
-| Reshape | `pivot_longer`, `pivot_wider`, `separate`, `separate_longer_delim`, `separate_wider_delim`, `separate_wider_regex`, `separate_wider_position`, `separate_longer_position`, `unite`, `nest`, `unnest`, `unnest_longer`, `unnest_wider`, `unnest_auto`, `chop`, `unchop`, `hoist`, `pack`, `unpack` |
+| Reshape | `pivot_longer`, `pivot_wider`, `build_longer_spec`, `pivot_longer_spec`, `build_wider_spec`, `pivot_wider_spec`, `check_pivot_spec`, `separate`, `separate_longer_delim`, `separate_wider_delim`, `separate_wider_regex`, `separate_wider_position`, `separate_longer_position`, `unite`, `nest`, `unnest`, `unnest_longer`, `unnest_wider`, `unnest_auto`, `chop`, `unchop`, `hoist`, `pack`, `unpack` |
 | Joins | `left_join`, `right_join`, `inner_join`, `full_join`, `semi_join`, `anti_join`, `cross_join`, `nest_join` |
 | Join specs | `join_by`, `eq`, `ge`, `gt`, `le`, `lt`, `closest`, `between`, `within`, `overlaps` |
 | Bind/set | `bind_rows`, `bind_cols`, `union`, `union_all`, `intersect`, `setdiff`, `symdiff`, `setequal` |
@@ -753,6 +753,18 @@ tidy({"id": [1, 2], "week_1": [5, 6], "week_2": [7, 8]}) >> pivot_longer(
     names_transform={"week": int},                 # "1" -> 1
 )
 ```
+
+For full control, build the pivot's mapping as a table (a "spec"), edit it,
+and pivot with it:
+
+```python
+long = tidy({"id": [1, 1, 2, 2], "key": ["a", "b", "a", "b"], "v": [1, 2, 3, 4]})
+spec = build_wider_spec(long, names_from="key", values_from="v").collect(as_="pandas")
+spec[".name"] = ["first", "second"]          # rename the output columns
+long >> pivot_wider_spec(spec, id_cols="id")  # id, first, second
+```
+
+`build_longer_spec()` / `pivot_longer_spec()` do the same for lengthening.
 
 `names_sep` joins name parts (default `_`), `names_expand=True` / `id_expand=True`
 add a column / row for every possible value (unused factor levels too), and

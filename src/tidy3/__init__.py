@@ -128,6 +128,11 @@ from tidy3.tidyselect import (
     where,
 )
 from tidy3.tidyr import (
+    build_longer_spec,
+    build_wider_spec,
+    check_pivot_spec,
+    pivot_longer_spec,
+    pivot_wider_spec,
     chop,
     separate_longer_position,
     separate_wider_position,
@@ -311,6 +316,11 @@ __all__ = [
     "group_cols",
     "group_vars",
     "crossing",
+    "build_longer_spec",
+    "build_wider_spec",
+    "check_pivot_spec",
+    "pivot_longer_spec",
+    "pivot_wider_spec",
     "chop",
     "separate_longer_position",
     "separate_wider_position",

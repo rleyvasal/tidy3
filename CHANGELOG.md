@@ -17,6 +17,10 @@ under **Changed**.
   `names_sep` and `cols_remove`; `unnest_longer()`'s `indices_include` and
   `transform`; `unnest_wider()`'s `transform`; `hoist()`'s `remove` and
   `transform`; and `nest()`'s `names_sep` (tidyr's `.names_sep`).
+- tidyr's pivot specs: `build_longer_spec()` / `pivot_longer_spec()`,
+  `build_wider_spec()` / `pivot_wider_spec()`, and `check_pivot_spec()`.
+  Build the mapping as a table, edit it (rename columns, drop
+  combinations), and pivot with it.
 
 ### Changed
 
