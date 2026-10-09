@@ -717,20 +717,44 @@ def cur_group_id() -> Expr:
     return _expr_cur_group_id(groups)
 
 
-def group_vars() -> tuple[str, ...]:
-    """Return grouping variable names inside an ``across`` function."""
-    groups = _CURRENT_GROUPS.get()
-    if groups is None:
-        raise RuntimeError("group_vars() can only be used inside across()")
-    return groups
+_NO_DATA = object()
 
 
-def n_groups() -> Expr:
-    """Return the number of groups inside an ``across`` function."""
+def group_vars(data: Any = _NO_DATA) -> Any:
+    """Names of the grouping columns.
+
+    ``group_vars(df)`` or ``df >> group_vars()`` (dplyr); with no frame
+    inside an ``across`` function, the groups being worked on.
+    """
+    if data is not _NO_DATA:
+        from tidy3.groups import groups as _groups
+
+        return _groups(data)
     groups = _CURRENT_GROUPS.get()
-    if groups is None:
-        raise RuntimeError("n_groups() can only be used inside across()")
-    return _expr_n_groups(groups)
+    if groups is not None:
+        return groups
+    from tidy3.eda import _pipeable
+
+    return _pipeable("group_vars", lambda tf: list(tf._groups or []))
+
+
+def n_groups(data: Any = _NO_DATA) -> Any:
+    """Number of groups.
+
+    ``n_groups(df)`` or ``df >> n_groups()`` (dplyr); with no frame inside
+    an ``across`` function, an expression for the number of groups.
+    """
+    if data is not _NO_DATA:
+        from tidy3.groups import group_size
+
+        return len(group_size(data))
+    groups = _CURRENT_GROUPS.get()
+    if groups is not None:
+        return _expr_n_groups(groups)
+    from tidy3.eda import _pipeable
+    from tidy3.groups import group_size
+
+    return _pipeable("n_groups", lambda tf: len(group_size(tf)))
 
 
 def _group_rows_token(rows: tuple[int, ...]):

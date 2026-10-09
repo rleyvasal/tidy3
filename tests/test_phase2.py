@@ -289,8 +289,8 @@ def test_n_groups_is_available_inside_across(backend):
         across(["x"], lambda value: value + n_groups())
     )
     assert result.collect(as_="pandas")["x"].tolist() == [13.0, 23.0, 33.0, 43.0]
-    with pytest.raises(RuntimeError, match="inside across"):
-        n_groups()
+    # Outside across(), n_groups() is dplyr's n_groups(df).
+    assert (data >> group_by("g") >> n_groups()) == 3
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

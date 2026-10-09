@@ -15,8 +15,18 @@ under **Changed**.
   a value has no case.
 - `case_when(unmatched="error")`, as in dplyr 1.2: raises when a row matches
   no case (a missing condition counts as unmatched).
+- dplyr's group functions: `group_data()`, `group_keys()`, `group_rows()`,
+  `group_size()`, `group_indices()`, `groups()`, `group_trim()`,
+  `group_walk()`, and `nest_by()`; `group_vars()` and `n_groups()` now also
+  take a frame (`n_groups(df)`, `df >> n_groups()`). Empty groups for unused
+  factor levels follow dplyr's `.drop = FALSE` rule. Row positions are
+  0-based.
 
 ### Changed
+
+- `group_split()`, `group_map()`, `group_modify()`, and `group_nest()`
+  return groups in dplyr's order, sorted by key with missing last, instead
+  of the order they first appear.
 
 - `summarise()` follows dplyr 1.2: each expression must give one value per
   group, otherwise it raises "`r` must be size 1, not 2 … use reframe()".

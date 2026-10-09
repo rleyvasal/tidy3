@@ -156,13 +156,15 @@ def _type_kind(series: pd.Series) -> str:
     ):
         return "double"
     if len(nonmissing) and all(
-        isinstance(value, (list, tuple, dict)) for value in nonmissing
+        isinstance(value, (list, tuple, dict, np.ndarray)) for value in nonmissing
     ):
         return "list"
     return "character"
 
 
 def _value(value: Any) -> Any:
+    if isinstance(value, np.ndarray):  # a Polars list cell seen through pandas
+        return [_value(item) for item in value.tolist()]
     if value is pd.NA or value is None:
         return None
     if isinstance(value, (float, np.floating)) and np.isnan(value):
@@ -788,6 +790,58 @@ def _dplyr_12_helpers(backend: str):
     }
 
 
+def _group_info(backend: str):
+    import tidy3 as t3
+
+    d = tidy(
+        {"g": ["b", "a", "b", "a", "b"], "h": [1.0, 1.0, 2.0, 1.0, 2.0], "x": [1, 2, 3, 4, 5]},
+        backend=backend,
+    )
+    gd = d >> group_by("g", "h")
+    f = tidy(
+        pd.DataFrame(
+            {
+                "k": pd.Categorical(["x", "x", None], categories=["x", "y"]),
+                "g": ["b", "a", "b"],
+            }
+        ),
+        backend=backend,
+    )
+    fd = f >> group_by("g", "k", drop=False)
+    ungrouped = t3.group_data(d).collect(as_="pandas")
+    ungrouped["n"] = t3.n_groups(d)
+    return {
+        "data": t3.group_data(gd),
+        "keys": gd >> t3.group_keys(),
+        "sizes": pd.DataFrame({"size": t3.group_size(gd)}),
+        "indices": pd.DataFrame({"index": t3.group_indices(gd)}),
+        "counts": pd.DataFrame(
+            {"n": [t3.n_groups(gd)], "vars": [",".join(t3.group_vars(gd))]}
+        ),
+        "ungrouped": ungrouped,
+        "empty": t3.group_data(fd),
+        "trimmed": pd.DataFrame({"size": t3.group_size(fd >> t3.group_trim())}),
+        "split": pd.concat(
+            [part.collect(as_="pandas").head(1) for part in gd >> t3.group_split()],
+            ignore_index=True,
+        ),
+        "modified": gd >> t3.group_modify(lambda part, key: part.collect(as_="pandas").head(1)),
+        "nested": pd.DataFrame(
+            {
+                "g": (n := (d >> t3.nest_by("g")).collect(as_="pandas"))["g"],
+                "rows": [len(cell) for cell in n["data"]],
+            }
+        ),
+        "group_nested": pd.DataFrame(
+            {
+                "g": (m := (gd >> t3.group_nest()).collect(as_="pandas"))["g"],
+                "h": m["h"],
+                "rows": [len(cell) for cell in m["data"]],
+            }
+        ),
+    }
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "filter_missing": _filter_missing,
     "filter_out_missing": _filter_out_missing,
@@ -836,6 +890,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "arrange_by_group": _arrange_by_group,
     "new_helpers": _new_helpers,
     "dplyr_12_helpers": _dplyr_12_helpers,
+    "group_info": _group_info,
 }
 
 
@@ -869,6 +924,7 @@ CASE_VERBS = {
     "unnest_wider": {"unnest_wider"},
     "new_helpers": {"separate_longer_delim", "separate_wider_delim"},
     "dplyr_12_helpers": {"mutate", "filter"},
+    "group_info": {"group_split", "group_modify", "group_nest"},
 }
 
 
@@ -902,10 +958,7 @@ def test_every_public_frame_verb_has_a_parity_classification():
     differential = set().union(*CASE_VERBS.values())
     expected_gap_verbs = {
         "group_by",
-        "group_split",
         "group_map",
-        "group_modify",
-        "group_nest",
         "with_groups",
         "hoist",
         "pack",

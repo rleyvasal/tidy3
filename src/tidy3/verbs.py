@@ -2086,17 +2086,18 @@ def _grouped_parts(
     """Materialize stable group partitions for Python group callbacks."""
     from tidy3.frame import tidy
 
+    from tidy3.groups import _group_table
+
     names = resolve_selection(tf, cols) if cols else list(tf._groups or [])
     if not names:
         raise ValueError("group workflow requires at least one grouping column")
-    pdf = tf.collect(as_="pandas")
+    # dplyr order: groups sorted by key, missing last.
+    names, pdf, table = _group_table(tf, None if not cols else names)
     parts: list[tuple[dict[str, Any], Any, tuple[int, ...]]] = []
-    grouping_key = names[0] if len(names) == 1 else names
-    for key, positions in pdf.groupby(grouping_key, sort=False, dropna=False).groups.items():
-        key_tuple = key if isinstance(key, tuple) else (key,)
-        subset = pdf.loc[positions].reset_index(drop=True)
+    for key_tuple, positions in table:
+        subset = pdf.iloc[positions].reset_index(drop=True)
         key_map = dict(zip(names, key_tuple))
-        row_positions = tuple(int(index) for index in pdf.index.get_indexer(positions))
+        row_positions = tuple(int(index) for index in positions)
         parts.append((key_map, tidy(subset, backend=tf._backend), row_positions))
     return parts
 
@@ -2195,8 +2196,9 @@ def group_nest(*cols: Any, name: str = "data") -> Verb:
             else:
                 body = None
             rows: list[dict[str, Any]] = []
+            # sort=True: dplyr returns groups sorted by key, missing last.
             for key, positions in pdf.groupby(
-                grouping_key, sort=False, dropna=False, observed=True
+                grouping_key, sort=True, dropna=False, observed=True
             ).groups.items():
                 key_tuple = key if isinstance(key, tuple) else (key,)
                 row = dict(zip(keys, key_tuple))
@@ -2224,6 +2226,10 @@ def group_nest(*cols: Any, name: str = "data") -> Verb:
             # Preserve group size with a list of nulls (no non-key columns).
             agg = pl.repeat(None, pl.len()).alias(name)
         lf = tf._lf.group_by(keys, maintain_order=True).agg(agg)
+        # dplyr returns groups sorted by key, missing last.
+        lf = lf.sort(
+            _dplyr_sort_expressions(lf, keys), nulls_last=True, maintain_order=True
+        )
         return tf._with_lf(lf, groups=None, rowwise=False)
 
     return Verb(_apply, "group_nest")

@@ -47,6 +47,17 @@ from tidy3.expr import (
 )
 from tidy3.expr import sum as sum  # noqa: A001
 from tidy3.eda import colnames, describe, dim, dtypes, names, ncol, nrow, summary
+from tidy3.groups import (
+    group_data,
+    group_indices,
+    group_keys,
+    group_rows,
+    group_size,
+    group_trim,
+    group_walk,
+    groups,
+    nest_by,
+)
 from tidy3.frame import TidyFrame, options, tidy
 from tidy3.io import scan_csv, scan_ipc, scan_parquet
 from tidy3.join_spec import (
@@ -283,6 +294,15 @@ __all__ = [
     "group_split",
     "group_cols",
     "group_vars",
+    "group_data",
+    "group_indices",
+    "group_keys",
+    "group_rows",
+    "group_size",
+    "group_trim",
+    "group_walk",
+    "groups",
+    "nest_by",
     "n_groups",
     "gt",
     "head",

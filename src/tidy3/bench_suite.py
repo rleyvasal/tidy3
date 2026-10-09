@@ -468,7 +468,8 @@ def _build_workloads(
 
     def raw_group_callback():
         return (
-            pdf.groupby("segment", sort=False, observed=True, dropna=False)
+            # Groups in dplyr's order (sorted by key), as group_modify returns.
+            pdf.groupby("segment", sort=True, observed=True, dropna=False)
             .agg(rows=("amount", "size"), average=("amount", "mean"))
             .reset_index()
         )
@@ -496,8 +497,9 @@ def _build_workloads(
         # unfairly inflates tidy3 ratios for ML-style nest workflows.
         nested_columns = [column for column in pdf.columns if column != "segment"]
         rows = []
+        # Groups in dplyr's order (sorted by key), as group_nest returns.
         for key, piece in pdf.groupby(
-            "segment", sort=False, observed=True, dropna=False
+            "segment", sort=True, observed=True, dropna=False
         ):
             nested = piece.loc[:, nested_columns].reset_index(drop=True)
             rows.append({"segment": key, "records": nested, "rows": len(nested)})

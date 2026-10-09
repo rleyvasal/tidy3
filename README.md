@@ -513,7 +513,7 @@ ln -sfn /path/to/plot3 plot3
 | Output | `collect`, `to_numpy`, `TidyFrame.write_parquet`, `TidyFrame.write_csv`, `TidyFrame.write_ipc`, `TidyFrame.write_excel` |
 | Rows | `filter`, `filter_out`, `arrange`, `distinct`, `slice`, `slice_head`, `slice_tail`, `slice_min`, `slice_max`, `slice_sample`, `head`, `sample_n`, `sample_frac` |
 | Columns | `mutate`, `transmute`, `select`, `drop`, `rename`, `rename_with`, `relocate`, `pull`, `glimpse` |
-| Groups | `group_by`, `rowwise`, `ungroup`, `with_groups`, `group_split`, `group_map`, `group_modify`, `group_nest`, `summarise`, `reframe`, `count`, `tally`, `add_count`, `add_tally` |
+| Groups | `group_by`, `rowwise`, `ungroup`, `with_groups`, `group_split`, `group_map`, `group_modify`, `group_walk`, `group_nest`, `nest_by`, `group_data`, `group_keys`, `group_rows`, `group_size`, `group_indices`, `group_vars`, `groups`, `n_groups`, `group_trim`, `summarise`, `reframe`, `count`, `tally`, `add_count`, `add_tally` |
 | Missing data | `drop_na`, `replace_na`, `fill`, `complete`, `expand`, `nesting` |
 | Reshape | `pivot_longer`, `pivot_wider`, `separate`, `separate_longer_delim`, `separate_wider_delim`, `unite`, `nest`, `unnest`, `unnest_longer`, `unnest_wider`, `hoist`, `pack`, `unpack` |
 | Joins | `left_join`, `right_join`, `inner_join`, `full_join`, `semi_join`, `anti_join`, `cross_join`, `nest_join` |
@@ -826,6 +826,24 @@ tidy(df)
 >> group_by(add=True, decade=col("year") // 10)
 >> ungroup("decade")
 ```
+
+Ask about the groups with dplyr's group functions, called or piped:
+
+```python
+by_team = tidy(df) >> group_by("team")
+
+group_keys(by_team)        # one row per group, sorted by key
+group_size(by_team)        # [2, 2]
+group_rows(by_team)        # [[2, 3], [0, 1]]: 0-based row positions
+by_team >> group_indices() # each row's 1-based group number
+by_team >> group_walk(lambda part, key: print(key["team"], part.collect().height))
+
+tidy(df) >> nest_by("team")  # one row per team, other columns nested in `data`
+```
+
+Groups come in dplyr's order, sorted by key with missing last, in these
+functions and in `group_split()`, `group_map()`, `group_modify()`, and
+`group_nest()`. Row positions are 0-based for Python; dplyr's are 1-based.
 
 Aggregates accept `na_rm=` and default to `False`, matching dplyr: a missing
 value propagates unless removal is requested explicitly. Use

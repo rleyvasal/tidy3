@@ -280,6 +280,27 @@ result <- switch(
       ))
     )
   },
+  group_info = {
+    d <- tibble(g=c("b", "a", "b", "a", "b"), h=c(1, 1, 2, 1, 2), x=1:5)
+    gd <- group_by(d, g, h)
+    f <- tibble(k=factor(c("x", "x", NA), levels=c("x", "y")), g=c("b", "a", "b"))
+    fd <- group_by(f, g, k, .drop=FALSE)
+    zero_based <- function(info) info |> mutate(.rows=lapply(.rows, function(r) as.integer(r) - 1L))
+    list(
+      data=zero_based(group_data(gd)),
+      keys=group_keys(gd),
+      sizes=tibble(size=group_size(gd)),
+      indices=tibble(index=group_indices(gd)),
+      counts=tibble(n=n_groups(gd), vars=paste(group_vars(gd), collapse=",")),
+      ungrouped=zero_based(group_data(d)) |> mutate(n=n_groups(d)),
+      empty=zero_based(group_data(fd)),
+      trimmed=tibble(size=group_size(group_trim(fd))),
+      split=bind_rows(lapply(group_split(gd), function(part) slice(part, 1))),
+      modified=gd |> group_modify(~ head(.x, 1)) |> ungroup(),
+      nested=nest_by(d, g) |> mutate(rows=nrow(data)) |> ungroup() |> select(g, rows),
+      group_nested=group_nest(gd) |> mutate(rows=vapply(data, nrow, integer(1))) |> select(g, h, rows)
+    )
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 
