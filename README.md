@@ -40,40 +40,146 @@ pip install -e ".[dev,jupyter]"
 python -m pytest -q
 ```
 
+## Quick start
+
+The examples need no downloads: each section builds the small tables it
+uses. `cars` is four columns of R's `mtcars`:
+
+```python
+from tidy3 import tidy, scan_parquet, filter, mutate, group_by, summarise, col, n, mean
+
+cars = tidy({
+    "mpg": [21.0, 21.0, 22.8, 21.4, 18.7, 18.1, 14.3, 24.4, 22.8, 19.2, 17.8,
+            16.4, 17.3, 15.2, 10.4, 10.4, 14.7, 32.4, 30.4, 33.9, 21.5, 15.5,
+            15.2, 13.3, 19.2, 27.3, 26.0, 30.4, 15.8, 19.7, 15.0, 21.4],
+    "cyl": [6, 6, 4, 6, 8, 6, 8, 4, 4, 6, 6, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 8,
+            8, 8, 8, 4, 4, 4, 8, 6, 8, 4],
+    "hp": [110, 110, 93, 110, 175, 105, 245, 62, 95, 123, 123, 180, 180, 180,
+           205, 215, 230, 66, 52, 65, 97, 150, 150, 245, 175, 66, 91, 113, 264,
+           175, 335, 109],
+    "wt": [2.62, 2.875, 2.32, 3.215, 3.44, 3.46, 3.57, 3.19, 3.15, 3.44, 3.44,
+           4.07, 3.73, 3.78, 5.25, 5.424, 5.345, 2.2, 1.615, 1.835, 2.465, 3.52,
+           3.435, 3.84, 3.845, 1.935, 2.14, 1.513, 3.17, 2.77, 3.57, 2.78],
+})
+cars.write_parquet("cars.parquet")      # a file to scan lazily below
+
+result = (
+    scan_parquet("cars.parquet")        # lazy: reads only when needed
+    >> filter(col("mpg") > 20)
+    >> mutate(km=col("mpg") * 1.609)
+    >> group_by("cyl")
+    >> summarise(n=n(), avg=mean("mpg"))
+)
+
+result                              # TidyFrame preview; keep piping if needed
+polars_df = result.collect()        # materialize as Polars
+pandas_df = result.collect(as_="pandas")
+numpy_array = result.collect(as_="numpy")
+```
+
+For in-memory data, start from `tidy(cars)` instead of the scan. Starting from
+`scan_parquet()`, `scan_csv()`, or `scan_ipc()` avoids first building a pandas
+copy and lets Polars push projections and filters into the file scan.
+
+With the Jupyter extension loaded you can omit the outer parentheses — the **kernel** rewrites multi-line `>>` pipes before parse.
+
+## Save results
+
+Write a pipeline directly without first calling `collect()`:
+
+```python
+result.write_parquet("summary.parquet")  # recommended for data pipelines
+result.write_csv("summary.csv")
+result.write_ipc("summary.arrow")        # Arrow IPC / Feather
+```
+
+With the default Polars backend, these execute the lazy plan and stream its
+result to disk, avoiding a second fully materialized DataFrame in memory.
+The same methods also work with `backend="pandas"`. GPU writers execute the
+plan on the GPU, then materialize before serialization because current GPU
+file sinks are not stable across all formats; `auto` and `streaming` retain
+direct lazy sinks.
+
+Choose how Polars executes when the plan is materialized or written:
+
+```python
+result.collect(engine="auto")             # default: let Polars choose
+result.collect(engine="streaming")        # execute in streaming batches
+
+result.write_parquet("summary.parquet", engine="streaming")
+result.write_ipc("summary.arrow", engine="auto")
+```
+
+On an NVIDIA GPU with `pip install cudf-polars`, Polars runs what it can on
+the GPU and falls back to the CPU for the rest:
+
+```python notest
+result.collect(engine="gpu")
+result.write_csv("summary.csv", engine="gpu")
+```
+
+The same `engine=` argument is available on `to_polars()`, `to_pandas()`,
+`to_arrow()`, and `write_excel()`. It applies only to the default Polars
+backend. For a GPU run that must not silently fall back to CPU, pass
+`engine=polars.GPUEngine(raise_on_fail=True)`; the benchmark suite does this
+automatically whenever `--polars-engine gpu` is selected.
+
+Excel output is intended for smaller reporting datasets and must materialize
+the result:
+
+```bash
+pip install "tidy3[excel]"
+```
+
+```python
+result.write_excel(
+    "summary.xlsx",
+    worksheet="Summary",
+    autofit=True,
+    freeze_panes="A2",
+)
+```
+
+You can still collect first when another library needs the result:
+
+```python
+result.collect().write_csv("summary.csv")          # Polars API
+result.collect(as_="pandas").to_csv("summary.csv", index=False)
+```
+
 ## VS Code (local IDE)
 
-tidy3 is a normal editable package. No CRAFT, SolveIt, or remote kernel is
-required.
+tidy3 is a normal package. No CRAFT, SolveIt, or remote kernel is required.
 
 ### One-time setup
 
-1. Open the `tidy3` folder (or a workspace that includes it) in VS Code.
-2. Create/select the project interpreter:
-   - Command Palette → **Python: Select Interpreter** → `./.venv/bin/python`
-3. Install the package into that environment (terminal in VS Code):
+1. Open your project folder in VS Code.
+2. Create a virtual environment and install tidy3 (terminal in VS Code):
 
 ```bash
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev,jupyter]"
+pip install "tidy3[jupyter]"
 ```
 
+3. Select it: Command Palette → **Python: Select Interpreter** →
+   `./.venv/bin/python`.
 4. Recommended extensions: **Python** (includes **Pylance**) and **Jupyter**.
    Optional: **Polars** is a library dependency, not a VS Code extension.
 
 ### Type checker / red squiggles under `>>` pipes
 
 You do **not** need a special tidy3 VS Code extension. Pylance is enough once
-tidy3 is installed editable from this repo (types ship with `py.typed`).
+tidy3 is installed (types ship with `py.typed`).
 
-1. Interpreter = `tidy3/.venv` (Command Palette → **Python: Select Interpreter**).
-2. Workspace settings in `.vscode/settings.json` point analysis at `src/`.
-3. Import the names you use in that cell/file:
+1. Interpreter = your project's `.venv` (Command Palette → **Python: Select Interpreter**).
+2. Import the names you use in that cell/file:
 
 ```python
 from tidy3 import tidy, select, filter, arrange, slice_max, col, desc
 ```
 
-4. Reload the window if squiggles linger: **Developer: Reload Window**.
+3. Reload the window if squiggles linger: **Developer: Reload Window**.
 
 If a name is still underlined, it is usually “not imported in this cell”, not a
 pipe typing bug. Runtime green + import present ⇒ safe to ignore residual noise.
@@ -133,6 +239,8 @@ with `>>` continues the statement above it, even across comment and blank
 lines; a `+` line continues a pipe into plot3 layers:
 
 ```python
+from plot3 import aes, geom_point, ggplot
+
 # Cars with good mileage
 good = tidy(cars)
 >> filter(col("mpg") > 20)   # fast enough
@@ -179,94 +287,11 @@ X = result.to_numpy(columns=["avg"], dtype=np.float32, writable=True, order="c")
 
 | | Local (VS Code) | CRAFT / `%gpu` |
 |--|-----------------|----------------|
-| Install | `pip install -e .` in a venv | Addon seed to remote kernel |
+| Install | `pip install tidy3` in a venv | Addon seed to remote kernel |
 | Paths | Your machine | Paths on the GPU host |
 | Pipes | Parentheses in `.py`; extension optional in notebooks | Same extension after seed |
 | Data size | Laptop RAM / local Polars | Remote GPU box + large files |
 | Default for new users | **Yes** | Optional power path |
-
-## Quick start
-
-```python
-from tidy3 import scan_parquet, filter, mutate, group_by, summarise, col, n, mean
-
-result = (
-    scan_parquet("cars.parquet")        # lazy: reads only when needed
-    >> filter(col("mpg") > 20)
-    >> mutate(km=col("mpg") * 1.609)
-    >> group_by("cyl")
-    >> summarise(n=n(), avg=mean("mpg"))
-)
-
-result                              # TidyFrame preview; keep piping if needed
-polars_df = result.collect()        # materialize as Polars
-pandas_df = result.collect(as_="pandas")
-numpy_array = result.collect(as_="numpy")
-```
-
-For in-memory data, replace the scan with `tidy(cars)`. Starting from
-`scan_parquet()`, `scan_csv()`, or `scan_ipc()` avoids first building a pandas
-copy and lets Polars push projections and filters into the file scan.
-
-With the Jupyter extension loaded you can omit the outer parentheses — the **kernel** rewrites multi-line `>>` pipes before parse.
-
-## Save results
-
-Write a pipeline directly without first calling `collect()`:
-
-```python
-result.write_parquet("summary.parquet")  # recommended for data pipelines
-result.write_csv("summary.csv")
-result.write_ipc("summary.arrow")        # Arrow IPC / Feather
-```
-
-With the default Polars backend, these execute the lazy plan and stream its
-result to disk, avoiding a second fully materialized DataFrame in memory.
-The same methods also work with `backend="pandas"`. GPU writers execute the
-plan on the GPU, then materialize before serialization because current GPU
-file sinks are not stable across all formats; `auto` and `streaming` retain
-direct lazy sinks.
-
-Choose how Polars executes when the plan is materialized or written:
-
-```python
-result.collect(engine="auto")             # default: let Polars choose
-result.collect(engine="streaming")        # execute in streaming batches
-result.collect(engine="gpu")              # GPU where supported; may fall back
-
-result.write_parquet("summary.parquet", engine="streaming")
-result.write_csv("summary.csv", engine="gpu")
-result.write_ipc("summary.arrow", engine="auto")
-```
-
-The same `engine=` argument is available on `to_polars()`, `to_pandas()`,
-`to_arrow()`, and `write_excel()`. It applies only to the default Polars
-backend. For a GPU run that must not silently fall back to CPU, pass
-`engine=polars.GPUEngine(raise_on_fail=True)`; the benchmark suite does this
-automatically whenever `--polars-engine gpu` is selected.
-
-Excel output is intended for smaller reporting datasets and must materialize
-the result:
-
-```bash
-pip install "tidy3[excel]"
-```
-
-```python
-result.write_excel(
-    "summary.xlsx",
-    worksheet="Summary",
-    autofit=True,
-    freeze_panes="A2",
-)
-```
-
-You can still collect first when another library needs the result:
-
-```python
-result.collect().write_csv("summary.csv")          # Polars API
-result.collect(as_="pandas").to_csv("summary.csv", index=False)
-```
 
 ## plot3 (optional)
 
@@ -277,7 +302,18 @@ pip install "tidy3[plot3]"
 ```
 
 ```python
+import numpy as np
 from plot3 import aes, geom_point, ggplot
+
+# A made-up 3D scan: 5,000 points on a hill, with an intensity per point
+rng = np.random.default_rng(0)
+xy = rng.uniform(-3, 3, (2, 5_000))
+big = {
+    "x": xy[0],
+    "y": xy[1],
+    "z": np.exp(-(xy**2).sum(axis=0) / 4),
+    "intensity": rng.uniform(0, 30, 5_000),
+}
 
 tidy(big)
 >> filter(col("intensity") > 10)
@@ -351,7 +387,7 @@ channel (`tidy3.craft` / `plot3.craft`), install polars/pandas if missing, and
 load Jupyter extensions there. Re-seed after kernel surgery with
 `seed_tidy3_remote(force=True)` / `seed_plot3_remote(force=True)`.
 
-```python
+```python notest
 # after %gpu — paths are on the GPU box
 scan_parquet("/home/gpudev/data/huge.parquet")
 >> filter(col("year") >= 2020)
@@ -397,11 +433,12 @@ omit many `col("…")` / quotes:
 
 ```python
 cars >> filter(mpg > 20) >> mutate(z = if_else(cyl > 4, 1, 0))
-cars_space >> mutate(x = `hp new` / cyl) >> select(`hp new`, x)
-cars >> select(~starts_with("tmp_"))   # prefer ~ for negation
-cars >> select(!starts_with("tmp_"))   # optional Jupyter sugar → ~ (tidy3 only)
-ggplot(df, aes(x=wt, y=mpg)) + geom_point()          # with plot3
-ggplot(df, aes(x=`First Name`, y=mpg)) + geom_point()
+cars_space = cars >> rename(`hp new` = hp)             # a name with a space
+cars_space >> mutate(ratio = `hp new` / cyl) >> select(`hp new`, ratio)
+cars >> select(~starts_with("w"))      # prefer ~ for negation
+cars >> select(!starts_with("w"))      # optional Jupyter sugar → ~ (tidy3 only)
+ggplot(cars, aes(x=wt, y=mpg)) + geom_point()          # with plot3
+ggplot(cars_space, aes(x=`hp new`, y=mpg)) + geom_point()
 ```
 
 `!pip install …` and other notebook shell commands are **not** rewritten.
@@ -416,7 +453,7 @@ ggplot(df, aes(x=`First Name`, y=mpg)) + geom_point()
 R-style is the **authoring** form. For automation / CI, export rewrites it to
 stock CPython (nbdev-style build artifact):
 
-```python
+```python notest
 from tidy3 import nb_export
 
 nb_export("analysis.ipynb", "analysis_pipeline.py")
@@ -486,7 +523,7 @@ ln -sfn /path/to/plot3 plot3
 | Partial | `partial_run`, `maybe_rewrite_cell`, `normalize_pipe_source` |
 | Escape | `TidyFrame.with_polars(fn)` |
 
-### API maturity (v0.2)
+### API maturity
 
 tidy3 is alpha. Symbols work today, but not every verb is equally polished for
 production pipelines or R byte-for-byte parity. Prefer the **stable core** when
@@ -514,8 +551,13 @@ against datar, which is pandas-only) the same pipeline also runs on an
 **eager pandas backend**:
 
 ```python
-tidy(df, backend="pandas") >> filter(col("x") > 0) >> ...   # per-frame
-options(backend="pandas")                                    # session default
+import pandas as pd
+
+df = pd.DataFrame({"x": [-1.5, 0.5, 2.0], "y": [10, 20, 30]})
+
+tidy(df, backend="pandas") >> filter(col("x") > 0)   # per frame
+options(backend="pandas")                            # session default
+options(backend="polars")                            # back to the default
 ```
 
 Expressions (`col("x") * 2`, `mean("y")`, comparisons, `cum_sum`, …) are
@@ -531,17 +573,24 @@ or `rename_with`. Combine them with `|` (union), `&` (intersection), `-`
 (difference), or `~` (complement / negation):
 
 ```python
-tidy(df)
->> select("id", starts_with("measure_"), last_col())
->> select(~starts_with("tmp_"))            # preferred: Python-native invert
->> select(where(is_numeric) & ~starts_with("id"))
->> select(cols_between("mpg", "hp"))       # inclusive column range
+df = tidy({
+    "id": [1, 2, 3],
+    "label": ["a", "b", "c"],
+    "measure_1": [0.5, 0.7, 0.2],
+    "measure_2": [1.5, 1.1, 0.9],
+    "mpg": [21.0, 22.8, 18.7],
+    "cyl": [6, 4, 8],
+    "hp": [110, 93, 175],
+    "tmp_flag": [True, False, True],
+    "hp_raw": ["110", "93", "175"],
+})
 
-tidy(df)
->> select(everything() - ends_with("_raw"))
-
-tidy(df)
->> relocate(where(is_numeric), after="label")
+df >> select("id", starts_with("measure_"), last_col())
+df >> select(~starts_with("tmp_"))             # preferred: Python-native invert
+df >> select(where(is_numeric) & ~starts_with("id"))
+df >> select(cols_between("mpg", "hp"))        # inclusive column range
+df >> select(everything() - ends_with("_raw"))
+df >> relocate(where(is_numeric), after="label")
 ```
 
 **Negation: prefer `~`.** It is always valid Python (`Expr` / `Selector`
@@ -563,9 +612,35 @@ both backends:
 
 ```python
 from tidy3 import (
-    drop_na, fill, pivot_longer, pivot_wider, replace_na,
-    separate, starts_with, tidy, unite, unnest_longer,
+    complete, drop_na, fill, nest, pivot_longer, pivot_wider, replace_na,
+    separate, starts_with, tidy, unite, unnest, unnest_longer,
 )
+
+# Weekly readings per visit; the patient id is only on each patient's first row
+measurements = {
+    "patient_id": ["p1", None, "p2", None],
+    "visit": ["baseline", "follow-up", "baseline", "follow-up"],
+    "week_1": [5.1, 4.8, 6.0, None],
+    "week_2": [5.3, None, 6.2, 6.4],
+}
+long_measures = {
+    "store": ["A", "A", "B", "B"],
+    "quarter": ["Q1", "Q2", "Q1", "Q2"],
+    "sales": [100, 120, 90, 95],
+    "cost": [60, 70, 55, 50],
+}
+visits = {"subject": [1, 2], "mean_1": [5.0, 6.1], "mean_2": [5.4, 6.3],
+          "sd_1": [0.4, 0.5], "sd_2": [0.3, 0.6]}
+labels = {"code": ["north-1", "north-2", "south-1"]}
+events = {
+    "team": ["red", "red", "blue", "blue"],
+    "time": [1, 2, 1, 2],
+    "value": [3.5, 4.0, 2.5, 3.0],
+    "score": [95, None, 88, 91],
+    "items": [["a", "b"], ["c"], [], ["d", "e"]],
+}
+values = {"score": [7, None, 9], "required_field": ["x", "y", None]}
+observations = {"subject": ["s1", "s1", "s2"], "visit": [1, 2, 1], "score": [3, None, 4]}
 
 long = (
     tidy(measurements)
@@ -592,14 +667,14 @@ wide_measures = tidy(long_measures) >> pivot_wider(
 )
 
 # .value takes output value-column names from the input column names.
-tidy(measurements) >> pivot_longer(
+tidy(visits) >> pivot_longer(
     starts_with(("mean_", "sd_")),
     names_to=[".value", "visit"],
     names_sep="_",
 )
 
-tidy(labels) >> separate("code", ["region", "id"], sep="-")
-tidy(labels) >> unite("code", "region", "id", sep="-")
+parts = tidy(labels) >> separate("code", ["region", "id"], sep="-")
+parts >> unite("code", "region", "id", sep="-")
 tidy(events) >> unnest_longer("items", indices_to="item_index")
 tidy(values) >> replace_na({"score": 0}) >> drop_na("required_field")
 
@@ -630,6 +705,18 @@ when its calculation depends on the selected column name, and
 `cur_group()["group_name"]` when it depends on a grouped key:
 
 ```python
+df = tidy({
+    "id": [1, 2, 3, 4],
+    "team": ["red", "red", "blue", "blue"],
+    "region": ["north", "north", "south", "south"],
+    "year": [1999, 2004, 2011, 2016],
+    "target": [2.0, 2.0, 1.0, 1.0],
+    "x": [1.234, 2.5, -0.75, 3.0],
+    "x_adj": [1.1, 2.4, -0.7, 2.9],
+    "math_score": [80, -5, 92, 70],
+    "art_score": [-1, -3, 88, 75],
+})
+
 tidy(df)
 >> mutate(across(starts_with("x"), lambda x: x.round(2)))
 >> filter(if_any(ends_with("_score"), lambda x: x > 0))
@@ -646,8 +733,8 @@ tidy(df) >> mutate(
     across(starts_with("x"), lambda x: x + len(cur_column()))
 )
 
-tidy(df) >> group_by("team") >> mutate(
-    across(starts_with("x"), lambda x: x - cur_group()["team"])
+tidy(df) >> group_by("team", "target") >> mutate(
+    across(starts_with("x"), lambda x: x - cur_group()["target"])
 )
 
 tidy(df) >> group_by("team") >> mutate(
@@ -680,8 +767,8 @@ automatically excluded:
 tidy(df)
 >> rowwise("id")
 >> mutate(
-    total=sum(c_across(starts_with("score_"))),
-    average=mean(c_across(starts_with("score_"))),
+    total=sum(c_across(ends_with("_score"))),
+    average=mean(c_across(ends_with("_score"))),
 )
 >> ungroup()
 ```
@@ -690,8 +777,8 @@ tidy(df)
 horizontal reductions without requiring `rowwise`:
 
 ```python
-tidy(df) >> mutate(total=pick(starts_with("score_")).sum())
-tidy(df) >> mutate(scores=pick(starts_with("score_")))
+tidy(df) >> mutate(total=pick(ends_with("_score")).sum())
+tidy(df) >> mutate(scores=pick(ends_with("_score")))
 ```
 
 `reframe` accepts vector-valued expressions, recycles scalar results within
@@ -700,7 +787,7 @@ each group, and always returns an ungrouped frame:
 ```python
 tidy(df)
 >> group_by("team")
->> reframe(score=col("score"), team_mean=mean("score"))
+>> reframe(score=col("math_score"), team_mean=mean("math_score"))
 ```
 
 ### dplyr-compatible evaluation controls
@@ -742,6 +829,12 @@ The SQL-inspired row verbs use `y`'s first column as the key by default, or
 accept explicit `by=` keys. `y` may contain any subset of `x`'s columns:
 
 ```python
+accounts = {"id": [1, 2, 3], "owner": ["Ana", "Ben", None], "balance": [100.0, None, 50.0]}
+new_accounts = {"id": [3, 4], "owner": ["Cy", "Dee"], "balance": [0.0, 75.0]}
+corrections = {"id": [2, 3], "owner": ["Bob", "Cy"], "balance": [20.0, 999.0]}
+latest = {"id": [1, 5], "owner": ["Ana", "Eve"], "balance": [120.0, 10.0]}
+retired = {"id": [4]}
+
 tidy(accounts)
 >> rows_insert(new_accounts, by="id", conflict="ignore")
 >> rows_patch(corrections, by="id")       # only replaces missing values
@@ -758,6 +851,26 @@ when the plan is collected.
 joins:
 
 ```python
+from datetime import date
+
+sales = tidy({
+    "id": [1, 1, 2, 2, 3],
+    "region": ["north", "north", "south", "south", "south"],
+    "year": [2024, 2025, 2024, 2025, 2025],
+    "sale_date": [date(2025, 1, 10), date(2025, 3, 2), date(2025, 1, 5),
+                  date(2025, 2, 20), date(2025, 2, 1)],
+    "amount": [120.0, 80.0, 45.0, 60.0, 30.0],
+})
+promos = tidy({
+    "id": [1, 1, 2],
+    "promo_date": [date(2025, 1, 1), date(2025, 2, 1), date(2025, 2, 15)],
+    "discount": [0.10, 0.15, 0.05],
+})
+points = tidy({"point": [1, 5, 12]})
+ranges = tidy({"lower": [0, 10], "upper": [6, 20], "band": ["low", "high"]})
+segments = tidy({"lo": [0, 8], "hi": [4, 12]})
+regions = tidy({"start": [3, 10], "end": [9, 15], "name": ["A", "B"]})
+
 sales
 >> left_join(
     promos,
@@ -822,6 +935,9 @@ Ranking helpers are `row_number`, `min_rank`, `dense_rank`, `percent_rank`,
 Mutating joins accept dplyr-style safety controls:
 
 ```python
+orders = tidy({"order_id": [1, 2, 3], "customer_id": [10, 11, 10], "total": [25.0, 40.0, 15.0]})
+customers = tidy({"customer_id": [10, 11], "name": ["Ana", "Ben"]})
+
 orders >> left_join(
     customers,
     on="customer_id",
@@ -852,6 +968,8 @@ standard deviation once on both backends; temporary columns never appear in
 the result:
 
 ```python
+features = {"segment": ["a", "a", "a", "b", "b"], "x": [1.0, None, 3.0, 10.0, 14.0]}
+
 tidy(features) >> mutate(
     filled=coalesce(col("x"), mean("x", na_rm=True)),
     z=(
@@ -865,6 +983,15 @@ tidy(features) >> mutate(
 Project before a pandas/Arrow handoff without adding another pipeline verb:
 
 ```python
+# A model-ready table: one row per customer
+result = tidy({
+    "customer_id": [101, 102, 103],
+    "segment": ["a", "b", "a"],
+    "feature_a": [0.1, 0.4, 0.3],
+    "feature_b": [1.0, 0.0, 1.0],
+    "feature_c": [12.5, 9.0, 11.0],
+})
+
 matrix = result.collect(
     as_="pandas",
     columns=["customer_id", starts_with("feature_")],
@@ -915,7 +1042,7 @@ bridge would be needed for a direct device-to-PyTorch handoff.
 
 ## Benchmark vs datar
 
-```python
+```python notest
 from tidy3 import bench
 bench.run(rows=10_000_000)        # full pipeline; pip install datar datar-pandas for the datar row
 bench.run_ops(rows=10_000_000)    # isolated verbs with each output boundary labelled
@@ -1067,7 +1194,7 @@ Releases go to PyPI from a version tag; see [docs/releasing.md](docs/releasing.m
 - **Plotting big remote data**: aggregate remotely, then let plot3's own
   remote path pull the small result: `%plot3 res.to_pandas() x=... y=...`.
 - **API maturity tiers** (stable / growing / experimental) are listed under
-  [API maturity](#api-maturity-v02). Prefer the stable core for adoption and
+  [API maturity](#api-maturity). Prefer the stable core for adoption and
   performance-sensitive work.
 
 ## Why not datar?

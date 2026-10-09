@@ -26,6 +26,9 @@ First release on PyPI: `pip install tidy3`.
   themselves: a cell can hold comments (before, between, and after steps),
   imports and other statements, and several pipes. Error line numbers match
   the cell as typed. `nb_export()` reads these cells too.
+- Every README example runs as written: each section builds the small
+  tables it uses (no downloads), and `tests/test_readme.py` runs them all
+  in order in an IPython shell, computing every table and plot they make.
 - `separate_wider_delim(too_many="drop")`.
 - The `plot3` extra now installs plot3 from PyPI.
 
