@@ -13,9 +13,15 @@ under **Changed**.
   `None` matches missing values), `replace_when()`, and `when_any()` /
   `when_all()` with `na_rm=`. `recode_values(unmatched="error")` raises when
   a value has no case.
+- `case_when(unmatched="error")`, as in dplyr 1.2: raises when a row matches
+  no case (a missing condition counts as unmatched).
 
 ### Changed
 
+- `summarise()` follows dplyr 1.2: each expression must give one value per
+  group, otherwise it raises "`r` must be size 1, not 2 … use reframe()".
+  Polars used to return a list column silently and pandas failed with an
+  unrelated error. `x * 2` still works where every group has one row.
 - `pivot_wider()` handles values that are not uniquely identified like
   tidyr: they become list columns with tidyr's warning and advice, instead
   of a low-level Polars or pandas error. `values_fn="list"` asks for list

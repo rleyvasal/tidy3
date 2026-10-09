@@ -797,6 +797,9 @@ def do_summarise(
                 ).reset_index(drop=True)
             return fast
     vals = {k: eval_expr(v, df, groups, "agg") for k, v in kwargs.items()}
+    vals = {
+        k: _one_per_group(k, v, kwargs[k], df, groups) for k, v in vals.items()
+    }
     if groups:
         series = {k: v for k, v in vals.items() if isinstance(v, pd.Series)}
         if series:
@@ -826,6 +829,37 @@ def do_summarise(
             )
         return out
     return pd.DataFrame({k: [v] for k, v in vals.items()})
+
+
+def summary_size_error(name: str, size: int) -> ValueError:
+    """dplyr's error for a summary that is not one value per group."""
+    return ValueError(
+        f"summarise(): `{name}` must be size 1, not {size}. "
+        "To return more or less than 1 row per group, use reframe()."
+    )
+
+
+def _one_per_group(
+    name: str, value: Any, expr: Any, df: pd.DataFrame, groups: list[str] | None
+) -> Any:
+    """Keep a per-row result only when every group has exactly one row."""
+    if not isinstance(value, pd.Series):
+        return value
+    if groups and list(value.index.names) == list(groups):
+        return value  # one value per group already
+    if not value.index.equals(df.index):
+        # Mixes rows and group summaries (x - mean(x)): evaluate per row,
+        # as mutate() would, then apply the size rule.
+        value = _as_series(eval_expr(expr, df, groups, "window"), df.index)
+    if not groups:
+        if len(value) != 1:
+            raise summary_size_error(name, len(value))
+        return value.iloc[0]
+    sizes = _grouped(pd.Series(1, index=df.index), df, groups).size()
+    wrong = sizes[sizes != 1]
+    if len(wrong):
+        raise summary_size_error(name, int(wrong.iloc[0]))
+    return _grouped(value, df, groups).first()
 
 
 def _reframe_values(value: Any) -> list[Any]:

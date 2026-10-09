@@ -272,7 +272,12 @@ result <- switch(
         all_p=when_all(x, y), all_r=when_all(x, y, na_rm=TRUE)
       ),
       pets=pets |> mutate(type=replace_when(type, type == "dog" & age <= 2 ~ "puppy")),
-      filtered=x |> filter(when_any(state == "CA", score >= 5))
+      filtered=x |> filter(when_any(state == "CA", score >= 5)),
+      oldest=pets |> group_by(type) |> filter(age == max(age)) |> summarise(age_next=age + 1),
+      strict=x |> mutate(band=case_when(
+        score < 3 ~ "low", score >= 3 ~ "high", is.na(score) ~ NA_character_,
+        .unmatched="error"
+      ))
     )
   },
   stop(sprintf("unknown oracle case: %s", case_name))

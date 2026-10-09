@@ -9,7 +9,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from tidy3 import col, mutate, recode_values, replace_values, tidy
+from tidy3 import col, group_by, mean, mutate, recode_values, replace_values, summarise, tidy
 from tidy3.masking import COL_NAME, apply_masking
 
 BACKENDS = ["polars", "pandas"]
@@ -86,3 +86,33 @@ def test_case_match_none_matches_missing_values(backend):
         >> mutate(flag=case_match("state", (None, "missing"), default="ok"))
     ).collect(as_="pandas")
     assert out["flag"].tolist() == ["ok", "ok", "ok", "missing", "ok"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_case_when_unmatched_error_counts_missing_as_unmatched(backend):
+    from tidy3 import case_when
+
+    frame = tidy({"x": [5.0, None, 15.0, 25.0]}, backend=backend)
+    strict = case_when(
+        (col("x") < 10, "ten"), (col("x") < 20, "twenty"), unmatched="error"
+    )
+    with pytest.raises(Exception, match="case_when\\(\\).*2 value\\(s\\) had no match"):
+        (frame >> mutate(band=strict)).collect()
+    with pytest.raises(TypeError, match="default= can only be set"):
+        case_when((col("x") < 10, "ten"), default="other", unmatched="error")
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize(
+    ("label", "pipeline", "size"),
+    [
+        ("grouped", lambda t: t >> group_by("g") >> summarise(r=col("x")), 2),
+        ("mixed", lambda t: t >> group_by("g") >> summarise(r=col("x") - mean("x")), 2),
+        ("by", lambda t: t >> summarise(r=col("x"), by="g"), 2),
+        ("ungrouped", lambda t: t >> summarise(r=col("x")), 3),
+    ],
+)
+def test_summarise_must_give_one_value_per_group(backend, label, pipeline, size):
+    frame = tidy({"g": ["a", "a", "b"], "x": [1.0, 2.0, 3.0]}, backend=backend)
+    with pytest.raises(Exception, match=f"`r` must be size 1, not {size}.*reframe"):
+        pipeline(frame).collect()

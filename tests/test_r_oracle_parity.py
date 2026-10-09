@@ -25,6 +25,7 @@ from tidy3 import (
     col,
     complete,
     case_match,
+    case_when,
     consecutive_id,
     count,
     cross_join,
@@ -772,6 +773,18 @@ def _dplyr_12_helpers(backend: str):
             )
         ),
         "filtered": x >> filter(when_any(col("state") == "CA", col("score") >= 5)),
+        "oldest": pets
+        >> group_by("type")
+        >> filter(col("age") == tidy_max("age"))
+        >> summarise(age_next=col("age") + 1),
+        "strict": x >> mutate(
+            band=case_when(
+                (col("score") < 3, "low"),
+                (col("score") >= 3, "high"),
+                (col("score").is_null(), None),
+                unmatched="error",
+            )
+        ),
     }
 
 

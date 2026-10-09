@@ -2354,16 +2354,26 @@ def summarise(
                 rowwise=result_rowwise,
             )
         named = []
+        sizes: dict[str, str] = {}
+        occupied = [*_frame_columns(tf), *assignments]
         for name, expr in assignments.items():
             e = _plx(expr)
-            if isinstance(e, pl.Expr):
+            if not isinstance(e, pl.Expr):
+                named.append(pl.lit(e).alias(name))
+            elif isinstance(expr, Expr) and _is_aggregate_node(expr.node):
                 named.append(e.alias(name))
             else:
-                named.append(pl.lit(e).alias(name))
+                # Not a known one-value summary (x, x - mean(x)): dplyr
+                # allows it only when it gives one value per group.
+                size = _temp_column([*occupied, *sizes.values()], f"__tidy3_size_{name}")
+                sizes[name] = size
+                named.append(e.first().alias(name))
+                named.append(e.len().alias(size))
         if operation_groups:
             lf = tf._lf.group_by(
                 operation_groups, maintain_order=transient
             ).agg(named)
+            lf = _pl_check_summary_sizes(lf, sizes)
             if not transient and not tf._group_drop:
                 lf = _complete_polars_empty_groups(
                     tf, lf, input_groups, assignments
@@ -2377,12 +2387,30 @@ def summarise(
             return tf._with_lf(
                 lf, groups=result_groups, rowwise=result_rowwise
             )
-        lf = tf._lf.select(named)
+        lf = _pl_check_summary_sizes(tf._lf.select(named), sizes)
         return tf._with_lf(
             lf, groups=result_groups, rowwise=result_rowwise
         )
 
     return Verb(_apply, "summarise")
+
+
+def _pl_check_summary_sizes(lf: pl.LazyFrame, sizes: dict[str, str]) -> pl.LazyFrame:
+    """Raise dplyr's error at collect time if a summary is not size 1."""
+    if not sizes:
+        return lf
+    checks = []
+    for name, size in sizes.items():
+
+        def check(count: int, name: str = name) -> bool:
+            if count != 1:
+                raise _pe().summary_size_error(name, count)
+            return True
+
+        checks.append(
+            pl.col(size).map_elements(check, return_dtype=pl.Boolean, skip_nulls=False)
+        )
+    return lf.filter(pl.all_horizontal(checks)).drop(list(sizes.values()))
 
 
 summarize = summarise

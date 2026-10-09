@@ -357,19 +357,56 @@ def if_else(condition: Any, true: Any, false: Any, *, missing: Any = None) -> Ex
     return _func("if_else", condition, true, false, missing=missing)
 
 
-def case_when(*cases: tuple[Any, Any], default: Any = None) -> Expr:
+def case_when(
+    *cases: tuple[Any, Any], default: Any = None, unmatched: str = "default"
+) -> Expr:
+    """The value of the first ``(condition, value)`` pair whose condition holds.
+
+    Rows where no condition is True (missing counts as False) get
+    ``default``, or raise with ``unmatched="error"`` (dplyr 1.2).
+    """
     if not cases:
         raise TypeError("case_when() requires at least one (condition, value) pair")
     if builtins.any(
         not isinstance(case, tuple) or len(case) != 2 for case in cases
     ):
         raise TypeError("case_when() cases must be (condition, value) pairs")
-    return Expr(
+    _check_unmatched("case_when", unmatched, default)
+    result = Expr(
         (
             "case_when",
             tuple((_node(condition), _node(value)) for condition, value in cases),
             _node(default),
         )
+    )
+    if unmatched == "error":
+        result = _require_match("case_when", result, [c for c, _ in cases])
+    return result
+
+
+def _check_unmatched(name: str, unmatched: str, default: Any) -> None:
+    if unmatched not in {"default", "error"}:
+        raise ValueError("unmatched must be 'default' or 'error'")
+    if unmatched == "error" and default is not None:
+        raise TypeError("default= can only be set when unmatched='default'")
+
+
+def _require_match(name: str, result: Expr, conditions: list[Any]) -> Expr:
+    """Raise at evaluation if some row matched none of *conditions*."""
+    matched = None
+    for condition in conditions:
+        current = (
+            condition.fill_null(False)
+            if isinstance(condition, Expr)
+            else Expr(("lit", bool(condition)))
+        )
+        matched = current if matched is None else matched | current
+    return _func(
+        "must_match",
+        result,
+        matched,
+        f"{name}(): each value must be matched by a case, or set default= "
+        "with unmatched='default'.",
     )
 
 
@@ -455,10 +492,7 @@ def recode_values(
         recode_values("state", ("NC", "North Carolina"), ("CA", "California"))
         recode_values("score", from_=[1, 2, 3], to=["low", "mid", "high"])
     """
-    if unmatched not in {"default", "error"}:
-        raise ValueError("unmatched must be 'default' or 'error'")
-    if unmatched == "error" and default is not None:
-        raise TypeError("default= can only be set when unmatched='default'")
+    _check_unmatched("recode_values", unmatched, default)
     value = col(x) if isinstance(x, str) else x
     conditions = [
         (_matches(value, values), replacement)
@@ -466,16 +500,7 @@ def recode_values(
     ]
     result = case_when(*conditions, default=default)
     if unmatched == "error":
-        matched = conditions[0][0].fill_null(False)
-        for condition, _ in conditions[1:]:
-            matched = matched | condition.fill_null(False)
-        result = _func(
-            "must_match",
-            result,
-            matched,
-            "recode_values(): each value must be matched by a case, or set "
-            "default= with unmatched='default'.",
-        )
+        result = _require_match("recode_values", result, [c for c, _ in conditions])
     return result
 
 
