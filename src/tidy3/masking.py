@@ -532,6 +532,63 @@ class MaskNames(ast.NodeTransformer):
             return self._replacement(node.id, node)
         return node
 
+    def _with_bound(self, names: Iterable[str], visit: Any) -> Any:
+        """Run *visit* with *names* treated as local variables, not columns."""
+        saved = self.known
+        self.known = saved | set(names)
+        try:
+            return visit()
+        finally:
+            self.known = saved
+
+    def visit_Lambda(self, node: ast.Lambda) -> ast.AST:
+        # lambda x: x > 0 — x is the lambda's parameter, not column "x".
+        args = node.args
+        names = [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
+        names += [a.arg for a in (args.vararg, args.kwarg) if a is not None]
+        args.defaults = [self.visit(value) for value in args.defaults]
+        args.kw_defaults = [
+            self.visit(value) if value is not None else None
+            for value in args.kw_defaults
+        ]
+        node.body = self._with_bound(names, lambda: self.visit(node.body))
+        return node
+
+    def _visit_comprehension(self, node: Any, fields: tuple[str, ...]) -> ast.AST:
+        # [v * 2 for v in values] — v is the loop variable, not column "v".
+        names = {
+            name.id
+            for generator in node.generators
+            for name in ast.walk(generator.target)
+            if isinstance(name, ast.Name)
+        }
+        # The first iterable is evaluated outside the comprehension.
+        first = node.generators[0]
+        first.iter = self.visit(first.iter)
+
+        def inner() -> ast.AST:
+            for index, generator in enumerate(node.generators):
+                if index:
+                    generator.iter = self.visit(generator.iter)
+                generator.ifs = [self.visit(test) for test in generator.ifs]
+            for name in fields:
+                setattr(node, name, self.visit(getattr(node, name)))
+            return node
+
+        return self._with_bound(names, inner)
+
+    def visit_ListComp(self, node: ast.ListComp) -> ast.AST:
+        return self._visit_comprehension(node, ("elt",))
+
+    def visit_SetComp(self, node: ast.SetComp) -> ast.AST:
+        return self._visit_comprehension(node, ("elt",))
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> ast.AST:
+        return self._visit_comprehension(node, ("elt",))
+
+    def visit_DictComp(self, node: ast.DictComp) -> ast.AST:
+        return self._visit_comprehension(node, ("key", "value"))
+
     def visit_UnaryOp(self, node: ast.UnaryOp) -> ast.AST:
         # Selector exclusion: -mpg / ~starts_with("x") / !… (after preparser)
         if self.mode == "selector" and isinstance(

@@ -15,7 +15,10 @@ Also used by ``partial_run()`` and ``%%tidy3_run``.
 from __future__ import annotations
 
 import ast
+import io
 import re
+import tokenize
+from dataclasses import dataclass, field
 from typing import Any, Mapping, MutableMapping
 
 
@@ -127,6 +130,151 @@ def _split_assignment(text: str) -> tuple[str, str] | None:
     return f"{indent}{target}", rhs
 
 
+_OPENERS = {"(": ")", "[": "]", "{": "}"}
+_CLOSERS = set(_OPENERS.values())
+_SKIP = {
+    tokenize.COMMENT,
+    tokenize.NL,
+    tokenize.NEWLINE,
+    tokenize.INDENT,
+    tokenize.DEDENT,
+    tokenize.ENDMARKER,
+}
+
+
+@dataclass
+class _Statement:
+    """One logical line: first and last physical rows, and its tokens."""
+
+    first: int
+    last: int
+    tokens: list[tokenize.TokenInfo] = field(default_factory=list)
+
+
+def _statements(text: str) -> list[_Statement] | None:
+    """Split *text* into logical lines; ``None`` if it cannot be tokenized.
+
+    Lines that start with ``>>`` or ``+`` are dedented first, so indented
+    pipe steps (``    >> filter(...)``) never trip indentation checks.
+    """
+    analysed = "\n".join(
+        line.lstrip() if line.lstrip().startswith((">>", "+")) else line
+        for line in text.split("\n")
+    )
+    statements: list[_Statement] = []
+    current: _Statement | None = None
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(analysed).readline):
+            if token.type in _SKIP:
+                if token.type == tokenize.NEWLINE and current is not None:
+                    statements.append(current)
+                    current = None
+                continue
+            if current is None:
+                current = _Statement(token.start[0], token.end[0])
+            current.last = token.end[0]
+            current.tokens.append(token)
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return None
+    if current is not None:
+        statements.append(current)
+    return statements
+
+
+def _has_top_level_pipe(tokens: list[tokenize.TokenInfo]) -> bool:
+    depth = 0
+    for token in tokens:
+        if token.string in _OPENERS:
+            depth += 1
+        elif token.string in _CLOSERS:
+            depth -= 1
+        elif depth == 0 and token.string == ">>":
+            return True
+    return False
+
+
+def _assigned_value(tokens: list[tokenize.TokenInfo]) -> tuple[int, int] | None:
+    """Start of the value after a top-level ``=`` in the statement, if any."""
+    depth = 0
+    for index, token in enumerate(tokens):
+        if token.string in _OPENERS:
+            depth += 1
+        elif token.string in _CLOSERS:
+            depth -= 1
+        elif depth == 0 and token.type == tokenize.OP and token.string == "=":
+            following = tokens[index + 1 : index + 2]
+            return following[0].start if following else None
+    return None
+
+
+def _wrap_pipe_statements(text: str) -> str | None:
+    """Parenthesise each multi-line pipe in *text*; ``None`` if that fails.
+
+    A logical line that starts with ``>>`` continues the statement above it,
+    across blank and comment lines. A line that starts with ``+`` continues
+    it too when the statement already holds a pipe (plot3 layers). Only
+    statements at the top level of the cell are joined. Brackets are added
+    on existing lines, so line numbers in errors match the cell as typed.
+    """
+    statements = _statements(text)
+    if not statements:
+        return None
+    groups: list[list[_Statement]] = []
+    for statement in statements:
+        lead = statement.tokens[0]
+        previous = groups[-1] if groups else None
+        joins = (
+            previous is not None
+            and previous[0].tokens[0].start[1] == 0
+            and lead.type == tokenize.OP
+            and (
+                lead.string == ">>"
+                or (
+                    lead.string == "+"
+                    and _has_top_level_pipe(
+                        [t for s in previous for t in s.tokens]
+                    )
+                )
+            )
+        )
+        if joins:
+            previous.append(statement)
+        else:
+            groups.append([statement])
+
+    lines = text.split("\n")
+    # Columns in tokens are for the dedented text; map them back.
+    shift = [0] + [len(line) - len(line.lstrip()) for line in lines]
+
+    def column(row: int, col: int) -> int:
+        stripped = lines[row - 1].lstrip()
+        return col + shift[row] if stripped.startswith((">>", "+")) else col
+
+    edits: list[tuple[int, int, str]] = []  # (row, column, text), 1-based rows
+    for group in groups:
+        if len(group) == 1:
+            continue
+        head = group[0].tokens
+        if head[0].string in {">>", "+"}:
+            return None
+        opening = _assigned_value(head) or head[0].start
+        closing = group[-1].tokens[-1].end
+        edits.append((opening[0], column(*opening), "("))
+        edits.append((closing[0], column(*closing), ")"))
+    if not edits:
+        return None
+    # Apply right to left so earlier columns stay valid.
+    for row, col, piece in sorted(edits, reverse=True):
+        line = lines[row - 1]
+        lines[row - 1] = line[:col] + piece + line[col:]
+    rewritten = "\n".join(lines)
+    try:
+        ast.parse(rewritten)
+    except SyntaxError:
+        return None
+    return rewritten
+
+
 def maybe_rewrite_cell(source: str) -> str | None:
     """If *source* is invalid Python but a tidy3 pipe, return rewritten source.
 
@@ -167,6 +315,13 @@ def maybe_rewrite_cell(source: str) -> str | None:
 
     if not looks_like_tidy_pipe(text):
         return None
+
+    # A cell may hold comments, other statements, and several pipes: wrap
+    # each pipe on its own and leave every other line as written.
+    statements = _wrap_pipe_statements(text)
+    if statements is not None:
+        leading = source[: len(source) - len(source.lstrip("\n"))]
+        return leading + statements + "\n"
 
     # Assignment form: out = tidy(df)\n>> filter(...)
     split = _split_assignment(text)

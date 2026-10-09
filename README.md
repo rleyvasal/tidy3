@@ -128,6 +128,24 @@ tidy(cars)
 >> mutate(km=col("mpg") * 1.609)
 ```
 
+A cell can mix pipes with comments and other code. Each line that starts
+with `>>` continues the statement above it, even across comment and blank
+lines; a `+` line continues a pipe into plot3 layers:
+
+```python
+# Cars with good mileage
+good = tidy(cars)
+>> filter(col("mpg") > 20)   # fast enough
+# keep what we plot
+>> select("mpg", "hp")
+
+good
+>> ggplot(aes(x="hp", y="mpg"))
++ geom_point()
+```
+
+Inside an indented block (`if`, `for`, `def`), wrap the pipe in parentheses.
+
 Partial pipes for debugging:
 
 ```python

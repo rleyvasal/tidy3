@@ -152,3 +152,21 @@ def test_mutate_backtick_new_column_end_to_end():
     assert "new hp" in out.columns
     vals = out["new hp"].to_list()
     assert abs(vals[0] - 110.0) < 1e-9 and abs(vals[1] - 220.0) < 1e-9
+
+
+def test_lambda_parameters_are_not_columns():
+    out = _norm('filter(if_any(ends_with("_score"), lambda x: x > 0))')
+    assert "lambda x: x > 0" in out
+    # Free names in the body are still columns; defaults are outside.
+    out = _norm("mutate(z=lambda v, k=kk: v + k + mpg)")
+    assert f"lambda v, k={COL_NAME}('kk'): v + k + {COL_NAME}('mpg')" in out
+
+
+def test_comprehension_variables_are_not_columns():
+    out = _norm("mutate(z=[v * w for v in vals if v > cut])")
+    assert (
+        f"[v * {COL_NAME}('w') for v in {COL_NAME}('vals') if v > {COL_NAME}('cut')]"
+        in out
+    )
+    assert f"{COL_NAME}('v')" not in _norm("mutate(z=sum(v for v in [1, 2]))")
+    assert f"{COL_NAME}('k')" not in _norm("mutate(z={k: 1 for k in ['a']})")

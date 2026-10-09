@@ -22,6 +22,10 @@ First release on PyPI: `pip install tidy3`.
 - `nb_export()` and `python -m tidy3 export` / `run`: turn an R-style
   notebook into a plain Python script.
 - A standalone `%run tidy3.py` loader that also works on CRAFT remote kernels.
+- Multi-line `>>` pipes in Jupyter no longer need the whole cell to
+  themselves: a cell can hold comments (before, between, and after steps),
+  imports and other statements, and several pipes. Error line numbers match
+  the cell as typed. `nb_export()` reads these cells too.
 - `separate_wider_delim(too_many="drop")`.
 - The `plot3` extra now installs plot3 from PyPI.
 
@@ -39,6 +43,9 @@ First release on PyPI: `pip install tidy3`.
 - With pandas 2, `where(is_boolean)` and `where(is_categorical)` no longer
   pick text columns.
 - With pandas 2, `fill()` no longer changes the frame it was given.
+- Bare-name masking leaves lambda parameters and comprehension variables
+  alone: `if_any(ends_with("_score"), lambda x: x > 0)` no longer reads a
+  column named `x`.
 - `pivot_longer(cols_vary="slowest")` keeps its row order on Polars 2.
 - Multi-line `>>` pipes work under SolveIt and CRAFT, and Jupyter shell
   escapes (`!pip`, `!whoami`) are never rewritten.
