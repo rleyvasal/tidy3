@@ -2136,10 +2136,16 @@ def _grouped_parts(
     if not names:
         raise ValueError("group workflow requires at least one grouping column")
     # dplyr order: groups sorted by key, missing last.
-    names, pdf, table = _group_table(tf, None if not cols else names)
+    names, table = _group_table(tf, None if not cols else names)
+    # One materialized copy of the frame, in its own backend.
+    frame = tf._pdf.reset_index(drop=True) if tf._backend == "pandas" else tf._lf.collect()
     parts: list[tuple[dict[str, Any], Any, tuple[int, ...]]] = []
     for key_tuple, positions in table:
-        subset = pdf.iloc[positions].reset_index(drop=True)
+        subset = (
+            frame.iloc[positions].reset_index(drop=True)
+            if tf._backend == "pandas"
+            else frame[positions.tolist()]
+        )
         key_map = dict(zip(names, key_tuple))
         row_positions = tuple(int(index) for index in positions)
         parts.append((key_map, tidy(subset, backend=tf._backend), row_positions))
@@ -2173,6 +2179,21 @@ def group_map(fn: Any, *cols: Any) -> Verb:
     return Verb(_apply, "group_map")
 
 
+def _as_polars_frame(value: Any) -> pl.DataFrame:
+    """A group_modify() callback result as a Polars DataFrame."""
+    from tidy3.frame import TidyFrame
+
+    if isinstance(value, TidyFrame):
+        return value._lf.collect() if value._backend == "polars" else pl.from_pandas(value._pdf)
+    if isinstance(value, pl.LazyFrame):
+        return value.collect()
+    if isinstance(value, pl.DataFrame):
+        return value
+    if hasattr(value, "columns") and hasattr(value, "to_dict"):
+        return pl.from_pandas(value)
+    return pl.DataFrame(value, strict=False)
+
+
 def group_modify(fn: Any, *cols: Any) -> Verb:
     """Apply a frame-returning callback per group and bind the results."""
     if not callable(fn):
@@ -2188,17 +2209,20 @@ def group_modify(fn: Any, *cols: Any) -> Verb:
                 result = fn(part, key)
             finally:
                 _reset_group_rows(token)
-            if hasattr(result, "collect"):
-                outputs.append(result.collect(as_="pandas"))
-            else:
-                import pandas as pd
-
-                outputs.append(pd.DataFrame(result))
+            outputs.append(result)
         if not outputs:
             return tidy({}, backend=tf._backend)
-        import pandas as pd
+        if tf._backend == "pandas":
+            import pandas as pd
 
-        return tidy(pd.concat(outputs, ignore_index=True), backend=tf._backend)
+            frames = [
+                r.collect(as_="pandas") if hasattr(r, "collect") else pd.DataFrame(r)
+                for r in outputs
+            ]
+            return tidy(pd.concat(frames, ignore_index=True), backend="pandas")
+        # Polars: bind the callback results without a pandas round trip.
+        frames = [_as_polars_frame(r) for r in outputs]
+        return tidy(pl.concat(frames, how="diagonal_relaxed").lazy())
 
     return Verb(_apply, "group_modify")
 
@@ -2279,23 +2303,17 @@ def group_nest(*cols: Any, name: str = "data") -> Verb:
     return Verb(_apply, "group_nest")
 
 
-def _dplyr_group_keys(tf: Any, observed: Any, groups: list[str]) -> Any:
+def _dplyr_group_keys(tf: Any, observed: list[tuple], groups: list[str]) -> Any:
     """Every group dplyr shows with ``drop = FALSE``, in dplyr's order.
 
-    *observed* holds the key combinations that occur (a pandas frame); unused
-    factor levels add empty groups by dplyr's rule (see tidy3.groups).
+    *observed* lists the key combinations that occur; unused factor levels
+    add empty groups by dplyr's rule (see tidy3.groups). The result is a key
+    frame in *tf*'s backend.
     """
-    from tidy3.frame import TidyFrame
-    from tidy3.groups import _group_table, _keys_frame
+    from tidy3.groups import _key, _keys_frame, _ordered_keys
 
-    keys_only = TidyFrame(
-        observed.loc[:, groups].reset_index(drop=True),
-        groups=groups,
-        group_drop=False,
-        category_levels=tf._category_levels,
-    )
-    names, pdf, table = _group_table(keys_only)
-    return _keys_frame(keys_only, names, pdf, table)
+    keys = _ordered_keys(tf, groups, [_key(tuple(k)) for k in observed], expand=True)
+    return _keys_frame(tf, groups, keys)
 
 
 def _complete_polars_empty_groups(
@@ -2309,9 +2327,8 @@ def _complete_polars_empty_groups(
     Groups with a missing key are kept: the join treats missing keys as equal.
     """
     observed = result.collect()
-    keys = _dplyr_group_keys(tf, observed.select(groups).to_pandas(), groups)
     schema = observed.schema
-    grid = pl.from_pandas(keys.astype(object), nan_to_null=True).with_columns(
+    grid = _dplyr_group_keys(tf, observed.select(groups).rows(), groups).with_columns(
         pl.col(name).cast(schema[name], strict=False) for name in groups
     )
     marker = _temp_column([*observed.columns, *groups], "__tidy3_observed_group")
@@ -2352,7 +2369,9 @@ def _complete_pandas_empty_groups(
 
     *defaults* are the values an empty group gets (``n()`` is 0).
     """
-    keys = _dplyr_group_keys(tf, out, groups)
+    keys = _dplyr_group_keys(
+        tf, list(out.loc[:, groups].itertuples(index=False, name=None)), groups
+    )
     marker = _temp_column([*out.columns, *groups], "__tidy3_observed_group")
     joined = keys.merge(
         out.assign(**{marker: True}), on=groups, how="left", sort=False
@@ -3983,8 +4002,15 @@ def setequal(right: Any) -> Verb:
     def _apply(tf):
         left, other, columns = _set_frames(tf, right)
         if tf._backend != "pandas":
-            left = left.collect().to_pandas()
-            other = other.collect().to_pandas()
+            # Same distinct rows: equal counts and nothing on the left
+            # missing from the right (missing values match each other).
+            mine = left.select(columns).unique()
+            theirs = other.select(columns).unique()
+            sizes = pl.collect_all([mine.select(pl.len()), theirs.select(pl.len())])
+            if sizes[0].item() != sizes[1].item():
+                return False
+            unmatched = mine.join(theirs, on=columns, how="anti", nulls_equal=True)
+            return unmatched.select(pl.len()).collect().item() == 0
         left = left[columns].drop_duplicates(ignore_index=True)
         other = other[columns].drop_duplicates(ignore_index=True)
         if len(left) != len(other):

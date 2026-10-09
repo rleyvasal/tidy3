@@ -9,11 +9,11 @@ if TYPE_CHECKING:
 
 
 def to_ggplot(tf: TidyFrame, mapping=None, **kwargs: Any):
-    """Convert a TidyFrame to a plot3 ggplot (pandas materialization)."""
+    """Hand a TidyFrame to plot3's ggplot (plot3 reads it directly)."""
     try:
         from plot3 import ggplot
     except ImportError as e:
         raise ImportError(
             "plot3 is not installed: pip install plot3"
         ) from e
-    return ggplot(tf.to_pandas(), mapping, **kwargs)
+    return ggplot(tf, mapping, **kwargs)

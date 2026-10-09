@@ -323,7 +323,8 @@ tidy(big)
 ```
 
 The method handoff remains available as ``tidy(df).ggplot(aes(...))``.
-The bridge materializes to pandas for plot3; aggregate large data first.
+plot3 reads tidy3 tables directly; aggregate very large data first, since a
+plot draws every row it is given.
 
 ## CRAFT / gpudev / SolveIt
 

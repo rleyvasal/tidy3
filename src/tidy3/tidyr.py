@@ -72,8 +72,13 @@ def _full_seq_values(values: list[Any], period: float, tol: float) -> list[Any]:
 def _value_list(tf: Any, name: str, spec: Any) -> list[Any]:
     """Unique sorted values for a named ``expand()``/``complete()`` input."""
     if isinstance(spec, FullSeq):
-        column = tf.collect(as_="pandas")[spec.column]
-        return _full_seq_values(column.dropna().tolist(), spec.period, spec.tol)
+        if tf._backend == "pandas":
+            present = tf._pdf[spec.column].dropna().tolist()
+        else:
+            present = (
+                tf._lf.select(pl.col(spec.column).drop_nulls()).collect().to_series().to_list()
+            )
+        return _full_seq_values(present, spec.period, spec.tol)
     values = list(spec.tolist() if hasattr(spec, "tolist") else spec)
     return _unique_sorted(values)
 
@@ -380,45 +385,51 @@ def expand(*cols: Any, **values: Any) -> Verb:
 
 
 def _grid_units(args: tuple[Any, ...], kwargs: dict[str, Any], *, crossing: bool) -> tuple[list[Any], str]:
-    """pandas frames for each expand_grid()/crossing() input, and the backend."""
-    import pandas as pd
+    """A Polars LazyFrame for each expand_grid()/crossing() input, and the backend.
 
-    from tidy3.frame import TidyFrame
+    The result is pandas-backed only when the first table input is.
+    """
+    from tidy3.frame import TidyFrame, tidy
 
     backend = "polars"
     units = []
     for arg in args:
         if isinstance(arg, TidyFrame):
-            backend = arg._backend if not units else backend
-            frame = arg.collect(as_="pandas")
+            if not units:
+                backend = arg._backend
+            unit = arg._lf if arg._backend == "polars" else pl.from_pandas(arg._pdf).lazy()
         elif isinstance(arg, pl.DataFrame):
-            frame = arg.to_pandas()
+            unit = arg.lazy()
+        elif isinstance(arg, pl.LazyFrame):
+            unit = arg
         else:
-            frame = pd.DataFrame(arg)
+            unit = tidy(arg)._lf
         if crossing:
-            frame = frame.drop_duplicates().sort_values(
-                list(frame.columns), kind="stable", na_position="last"
-            )
-        units.append(frame.reset_index(drop=True))
+            names = unit.collect_schema().names()
+            unit = unit.unique(maintain_order=True).sort(names, nulls_last=True, maintain_order=True)
+        units.append(unit)
     for name, values in kwargs.items():
         listed = list(values.tolist() if hasattr(values, "tolist") else values)
         if crossing:
             listed = _unique_sorted(listed)
-        units.append(pd.DataFrame({name: listed}))
+        units.append(pl.LazyFrame({name: listed}, strict=False))
     return units, backend
 
 
 def _cross(units: list[Any], backend: str) -> Any:
-    import pandas as pd
-
-    from tidy3.frame import tidy
+    from tidy3.frame import TidyFrame
 
     if not units:
-        return tidy(pd.DataFrame(), backend=backend)
-    result = units[0]
-    for unit in units[1:]:
-        result = result.merge(unit, how="cross")
-    return tidy(result.reset_index(drop=True), backend=backend)
+        result = pl.LazyFrame()
+    else:
+        result = units[0]
+        for unit in units[1:]:
+            # The first input varies slowest, as in tidyr.
+            result = result.join(unit, how="cross", maintain_order="left")
+    frame = TidyFrame(result)
+    if backend == "pandas":
+        return frame._with_pdf(result.collect().to_pandas(), groups=None)
+    return frame
 
 
 def expand_grid(*frames: Any, **values: Any) -> Any:
@@ -2379,6 +2390,8 @@ def separate_longer_delim(cols: Any, delim: str) -> Verb:
         raise ValueError("separate_longer_delim() delim must be non-empty")
 
     def _apply(tf):
+        if tf._backend == "polars":
+            return _pl_separate_longer_delim(tf, cols, delim)
         import pandas as pd
 
         selected = resolve_selection(tf, [cols])
@@ -2425,6 +2438,8 @@ def separate_wider_delim(
     width = len(names)
 
     def _apply(tf):
+        if tf._backend == "polars":
+            return _pl_separate_wider_delim(tf, column, list(names), delim, too_few, too_many, names_sep, cols_remove)
         import pandas as pd
         from tidy3.frame import tidy
 
@@ -2475,6 +2490,153 @@ def separate_wider_delim(
         return tidy(pdf, backend=tf._backend)
 
     return Verb(_apply, "separate_wider_delim")
+
+
+
+# ── Polars versions of the separate_* verbs (no pandas round trip) ──────
+
+
+def _pl_place(tf: Any, source: str, new: list[pl.Expr], keep_source: bool) -> Any:
+    """Select with *new* columns where *source* was (and *source* after them)."""
+    columns = _columns(tf)
+    out = []
+    for name in columns:
+        if name == source:
+            out.extend(new)
+            if keep_source:
+                out.append(pl.col(source))
+        else:
+            out.append(pl.col(name))
+    lf = tf._lf.select(out)
+    return tf._with_lf(lf, groups=_result_groups(tf, lf.collect_schema().names()))
+
+
+def _pl_count(tf: Any, condition: pl.Expr) -> int:
+    """How many rows meet *condition* (one small query)."""
+    return int(tf._lf.select(condition.sum()).collect().item() or 0)
+
+
+def _pl_separate_longer_delim(tf: Any, cols: Any, delim: str) -> Any:
+    selected = resolve_selection(tf, [cols])
+    if len(selected) != 1:
+        raise ValueError("separate_longer_delim() currently accepts one column")
+    column = selected[0]
+    lf = tf._lf.with_columns(pl.col(column).str.split(delim)).explode(column, **_EXPLODE_OPTIONS)
+    return tf._with_lf(lf, groups=_result_groups(tf, lf.collect_schema().names()))
+
+
+def _pl_separate_wider_delim(tf, column, names, delim, too_few, too_many, names_sep, cols_remove):
+    source = _one_column(tf, column, "separate_wider_delim")
+    width = len(names)
+    parts = pl.col(source).str.split(delim)
+    count = parts.list.len().cast(pl.Int64)  # signed: width - count may be negative
+    too_short = _pl_count(tf, pl.col(source).is_not_null() & (count < width)) if too_few == "error" else 0
+    too_long = _pl_count(tf, pl.col(source).is_not_null() & (count > width)) if too_many == "error" else 0
+    if too_short:
+        raise ValueError(
+            f"separate_wider_delim() expected {width} pieces in each value "
+            f"of {source!r}; {too_short} value(s) had fewer. "
+            'Use too_few="align_start" or "align_end" to fill with missing.'
+        )
+    if too_long:
+        raise ValueError(
+            f"separate_wider_delim() expected {width} pieces in each value "
+            f"of {source!r}; {too_long} value(s) had more. "
+            'Use too_many="drop" or "merge".'
+        )
+    shift = (pl.lit(width) - count).clip(lower_bound=0) if too_few == "align_end" else pl.lit(0)
+    new = []
+    for index, name in enumerate(names):
+        position = pl.lit(index) - shift
+        piece = pl.when(position >= 0).then(parts.list.get(position, null_on_oob=True))
+        if too_many == "merge" and index == width - 1:
+            rest = parts.list.slice(width - 1).list.join(delim)
+            piece = pl.when(count > width).then(rest).otherwise(piece)
+        new.append(piece.alias(_output_name(source, name, names_sep)))
+    return _pl_place(tf, source, new, not cols_remove)
+
+
+def _pl_separate_wider_regex(tf, column, pieces, too_few, names_sep, cols_remove):
+    source = _one_column(tf, column, "separate_wider_regex")
+    names = [name for name, _ in pieces if name is not None]
+
+    def anchored(count: int) -> str:
+        body = "".join(
+            f"({pattern})" if name is not None else f"(?:{pattern})"
+            for name, pattern in pieces[:count]
+        )
+        return f"^(?:{body})$"
+
+    value = pl.col(source)
+    full = anchored(len(pieces))
+    failed = _pl_count(tf, value.is_not_null() & ~value.str.contains(full))
+    if failed and too_few == "error":
+        raise ValueError(
+            f"separate_wider_regex(): each value of {source!r} must match the "
+            f"whole pattern; {failed} value(s) did not. "
+            'Use too_few="align_start" to keep partial matches.'
+        )
+    # Longest leading run of pieces that matches the whole value wins.
+    attempts = [len(pieces)] + list(range(len(pieces) - 1, 0, -1))
+    new = []
+    for slot, name in enumerate(names):
+        expr = None
+        for count in attempts:
+            kept = [n for n, _ in pieces[:count] if n is not None]
+            if slot >= len(kept):
+                continue
+            pattern = anchored(count)
+            piece = value.str.extract(pattern, slot + 1)
+            matched = value.str.contains(pattern)
+            expr = (
+                pl.when(matched).then(piece)
+                if expr is None
+                else expr.when(matched).then(piece)
+            )
+        new.append(
+            (expr.otherwise(None) if expr is not None else pl.lit(None, dtype=pl.String))
+            .alias(_output_name(source, name, names_sep))
+        )
+    return _pl_place(tf, source, new, not cols_remove)
+
+
+def _pl_separate_wider_position(tf, column, pieces, total, too_few, too_many, names_sep, cols_remove):
+    source = _one_column(tf, column, "separate_wider_position")
+    length = pl.col(source).str.len_chars()
+    short = _pl_count(tf, pl.col(source).is_not_null() & (length < total)) if too_few == "error" else 0
+    long = _pl_count(tf, pl.col(source).is_not_null() & (length > total)) if too_many == "error" else 0
+    if short:
+        raise ValueError(
+            f"separate_wider_position(): expected {total} characters in each "
+            f'value of {source!r}; {short} value(s) were shorter. Use too_few="align_start".'
+        )
+    if long:
+        raise ValueError(
+            f"separate_wider_position(): expected {total} characters in each "
+            f'value of {source!r}; {long} value(s) were longer. Use too_many="drop".'
+        )
+    new, start = [], 0
+    for name, width in pieces:
+        if name is not None:
+            part = pl.col(source).str.slice(start, int(width))
+            new.append(
+                pl.when(part.str.len_chars() > 0).then(part).alias(
+                    _output_name(source, name, names_sep)
+                )
+            )
+        start += int(width)
+    return _pl_place(tf, source, new, not cols_remove)
+
+
+def _pl_separate_longer_position(tf, column, width, keep_empty):
+    source = _one_column(tf, column, "separate_longer_position")
+    chunks = pl.col(source).str.extract_all(rf"(?s).{{1,{width}}}")
+    lf = tf._lf.with_columns(chunks.alias(source))
+    if not keep_empty:
+        # Empty strings give no pieces and no row; missing values keep one row.
+        lf = lf.filter(pl.col(source).is_null() | (pl.col(source).list.len() > 0))
+    lf = lf.explode(source, **_EXPLODE_OPTIONS)
+    return tf._with_lf(lf, groups=_result_groups(tf, lf.collect_schema().names()))
 
 
 def _replace_column(pdf: Any, source: str, expanded: Any, remove: bool) -> Any:
@@ -2552,6 +2714,8 @@ def separate_wider_regex(
         return [None] * len(names)
 
     def _apply(tf):
+        if tf._backend == "polars":
+            return _pl_separate_wider_regex(tf, column, pieces, too_few, names_sep, cols_remove)
         import pandas as pd
         from tidy3.frame import tidy
 
@@ -2608,6 +2772,8 @@ def separate_wider_position(
     names = [name for name, _ in pieces if name is not None]
 
     def _apply(tf):
+        if tf._backend == "polars":
+            return _pl_separate_wider_position(tf, column, pieces, total, too_few, too_many, names_sep, cols_remove)
         import pandas as pd
         from tidy3.frame import tidy
 
@@ -2659,6 +2825,8 @@ def separate_longer_position(column: Any, width: int, *, keep_empty: bool = Fals
         raise ValueError("separate_longer_position() width must be positive")
 
     def _apply(tf):
+        if tf._backend == "polars":
+            return _pl_separate_longer_position(tf, column, int(width), keep_empty)
         from tidy3.frame import tidy
 
         source = _one_column(tf, column, "separate_longer_position")
@@ -2793,6 +2961,9 @@ def hoist(
     ``transform`` converts the new columns (``transform={"n": int}``).
     """
     def _apply(tf):
+        if tf._backend == "polars":
+            specs = list(named_paths.items()) or [(str(path), path) for path in paths]
+            return _pl_hoist(tf, column, specs, remove, transform)
         import copy
 
         import pandas as pd
@@ -2837,6 +3008,71 @@ def _drop_path(value: Any, keys: list[Any]) -> None:
         value = value[key]
     if isinstance(value, dict):
         value.pop(keys[-1], None)
+
+
+
+def _pl_path(base: pl.Expr, dtype: Any, keys: list[Any]) -> tuple[pl.Expr | None, Any]:
+    """The expression (and dtype) for *keys* inside a struct/list value."""
+    expr, current = base, dtype
+    for key in keys:
+        if isinstance(current, pl.Struct) and isinstance(key, str):
+            fields = {field.name: field.dtype for field in current.fields}
+            if key not in fields:
+                return None, None
+            expr = expr.struct.field(key)
+            current = fields[key]
+        elif isinstance(current, (pl.List, pl.Array)) and isinstance(key, int):
+            expr = expr.list.get(key, null_on_oob=True)
+            current = current.inner
+        else:
+            return None, None
+    return expr, current
+
+
+def _pl_without(value: pl.Expr, dtype: Any, paths: list[list[Any]]) -> pl.Expr | None:
+    """*value* (a struct) rebuilt without the fields at *paths*; None if empty."""
+    drop_here = {path[0] for path in paths if len(path) == 1}
+    deeper: dict[str, list[list[Any]]] = {}
+    for path in paths:
+        if len(path) > 1 and isinstance(path[0], str):
+            deeper.setdefault(path[0], []).append(path[1:])
+    kept = []
+    for field in dtype.fields:
+        if field.name in drop_here:
+            continue
+        inner = value.struct.field(field.name)
+        if field.name in deeper and isinstance(field.dtype, pl.Struct):
+            inner = _pl_without(inner, field.dtype, deeper[field.name])
+            if inner is None:
+                continue
+        kept.append(inner.alias(field.name))
+    return pl.struct(kept) if kept else None
+
+
+def _pl_hoist(tf: Any, column: str, specs: list[tuple[str, Any]], remove: bool, transform: Any) -> Any:
+    """hoist() on a Polars struct column, without leaving Polars."""
+    dtype = tf._lf.collect_schema()[column]
+    if not isinstance(dtype, (pl.Struct, pl.List)):
+        raise TypeError(f"hoist() needs a struct or list column; {column!r} is {dtype}")
+    hoisted, paths = [], []
+    for name, path in specs:
+        keys = list(path) if isinstance(path, (list, tuple)) else [path]
+        paths.append(keys)
+        expr, _ = _pl_path(pl.col(column), dtype, keys)
+        hoisted.append((expr if expr is not None else pl.lit(None)).alias(name))
+    rest = _pl_without(pl.col(column), dtype, paths) if remove and isinstance(dtype, pl.Struct) else pl.col(column)
+    columns = _columns(tf)
+    out = []
+    for name in columns:
+        if name == column:
+            out.extend(hoisted)
+            if rest is not None:
+                out.append(rest.alias(column))
+        else:
+            out.append(pl.col(name))
+    lf = tf._lf.select(out)
+    result = tf._with_lf(lf, groups=_result_groups(tf, lf.collect_schema().names()))
+    return _transform_columns(result, transform, [name for name, _ in specs], "transform")
 
 
 def _pluck(value: Any, keys: list[Any]) -> Any:

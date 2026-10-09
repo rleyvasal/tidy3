@@ -1212,14 +1212,15 @@ class TidyFrame:
 
     # ── plot3 bridge ────────────────────────────────────────────────────
     def ggplot(self, mapping=None, **kwargs: Any):
-        """Hand off to plot3.ggplot (pandas). Optional dependency."""
+        """Hand off to plot3.ggplot. Optional dependency."""
         try:
             from plot3 import ggplot
         except ImportError as e:
             raise ImportError(
                 "plot3 is not installed: pip install plot3"
             ) from e
-        return ggplot(self.to_pandas(), mapping, **kwargs)
+        # plot3 reads tidy3 tables directly (no pandas copy).
+        return ggplot(self, mapping, **kwargs)
 
     # ── display (match Polars table formatting) ─────────────────────────
     def _preview_df(self) -> Any:

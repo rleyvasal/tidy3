@@ -43,6 +43,15 @@ under **Changed**.
 
 ### Fixed
 
+- On the Polars backend, these verbs now work in Polars instead of
+  converting to pandas and back: the `separate_wider_*` and
+  `separate_longer_*` verbs, `hoist()`, `expand_grid()`, `crossing()`,
+  `full_seq()` in `expand()`/`complete()`, the group functions
+  (`group_data()`, `group_keys()`, `group_rows()`, `group_size()`,
+  `group_indices()`, `group_trim()`), the group callbacks
+  (`group_split()`, `group_map()`, `group_modify()`, `group_walk()`),
+  `nest_by()`, `drop = FALSE` empty groups in `summarise()`/`count()`, and
+  `setequal()`. `tf.ggplot()` hands the table to plot3 directly.
 - pandas backend: a right-table whole-number column stays whole numbers when
   a join leaves some rows unmatched (it became decimals).
 

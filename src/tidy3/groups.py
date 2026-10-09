@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
+import polars as pl
 
 from tidy3.eda import _MISSING, _pipeable
 
@@ -39,113 +40,135 @@ def _frame(data: Any) -> Any:
     return data if isinstance(data, TidyFrame) else tidy(data)
 
 
-def _levels(tf: Any, pdf: pd.DataFrame, name: str) -> list[Any] | None:
+def _levels(tf: Any, name: str) -> list[Any] | None:
+    """Factor levels of a key column, or None when it is not a factor."""
     levels = tf._category_levels.get(name)
     if levels is not None:
         return list(levels)
-    if isinstance(pdf[name].dtype, pd.CategoricalDtype):
-        return list(pdf[name].cat.categories)
-    return None
+    if tf._backend == "pandas":
+        column = tf._pdf[name]
+        return list(column.cat.categories) if isinstance(column.dtype, pd.CategoricalDtype) else None
+    dtype = tf._lf.collect_schema()[name]
+    return dtype.categories.to_list() if isinstance(dtype, pl.Enum) else None
 
 
-def _positions_by_value(
-    values: pd.Series, positions: np.ndarray
-) -> tuple[dict[Any, np.ndarray], np.ndarray]:
-    """Row positions for each distinct value, and for missing values.
+def _missing(value: Any) -> bool:
+    return value is None or value is pd.NA or (isinstance(value, float) and value != value)
 
-    One factorize and one sort, so many groups stay O(n log n).
+
+def _key(values: Any) -> tuple:
+    """A group key as a tuple of plain values, missing as None."""
+    values = values if isinstance(values, tuple) else (values,)
+    return tuple(
+        None if _missing(v) else (v.item() if isinstance(v, np.generic) else v)
+        for v in values
+    )
+
+
+def _row_count(tf: Any) -> int:
+    if tf._backend == "pandas":
+        return len(tf._pdf)
+    return int(tf._lf.select(pl.len()).collect().item())
+
+
+def _observed(tf: Any, names: list[str]) -> dict[tuple, np.ndarray]:
+    """Row positions of each key combination that occurs (backend-native)."""
+    if tf._backend == "pandas":
+        frame = tf._pdf.reset_index(drop=True)
+        grouped = frame.groupby(names if len(names) > 1 else names[0], sort=False, dropna=False, observed=True)
+        return {_key(k): np.asarray(v) for k, v in grouped.indices.items()}
+    index = "__tidy3_position"
+    while index in names:
+        index += "_"
+    found = (
+        tf._lf.with_row_index(index)
+        .group_by(names)
+        .agg(pl.col(index))
+        .collect()
+    )
+    return {
+        _key(tuple(row[:-1])): np.asarray(row[-1], dtype=np.int64)
+        for row in found.iter_rows()
+    }
+
+
+def _ordered_keys(tf: Any, names: list[str], keys: list[tuple], expand: bool) -> list[tuple]:
+    """*keys* in dplyr's order: sorted (factor keys by level), missing last.
+
+    With ``expand`` (dplyr's ``drop = FALSE``), an unused level of a factor
+    key adds one empty group with the later keys missing. Only the key
+    combinations are looked at, never the rows.
     """
-    codes, uniques = pd.factorize(values, use_na_sentinel=True)
-    uniques = list(uniques)
-    order = np.argsort(codes, kind="stable")
-    sorted_codes = codes[order]
-    chunks = np.split(order, np.flatnonzero(np.diff(sorted_codes)) + 1)
-    found: dict[Any, np.ndarray] = {}
-    missing = positions[:0]
-    for chunk in chunks:
-        if not len(chunk):
-            continue
-        code = codes[chunk[0]]
-        if code < 0:
-            missing = positions[chunk]
-        else:
-            found[uniques[code]] = positions[chunk]
-    return found, missing
+    out: list[tuple] = []
+
+    def split(subset: list[tuple], depth: int, prefix: tuple) -> None:
+        if depth == len(names):
+            out.append(prefix)
+            return
+        levels = _levels(tf, names[depth])
+        present = {k[depth] for k in subset}
+        order = list(levels) if levels is not None else sorted(v for v in present if v is not None)
+        if None in present:
+            order.append(None)
+        for value in order:
+            inner = [k for k in subset if k[depth] == value]
+            if inner:
+                split(inner, depth + 1, (*prefix, value))
+            elif expand and levels is not None:
+                out.append((*prefix, value, *([None] * (len(names) - depth - 1))))
+
+    split(keys, 0, ())
+    return out
 
 
-def _group_table(
-    tf: Any, names: list[str] | None = None
-) -> tuple[list[str], pd.DataFrame, list[tuple[tuple, np.ndarray]]]:
-    """Keys, the materialized frame, and (key, row positions) per group.
+def _group_table(tf: Any, names: list[str] | None = None) -> tuple[list[str], list[tuple[tuple, np.ndarray]]]:
+    """Each group's key and row positions, in dplyr's order.
 
     ``names`` groups by other columns than the frame's own groups.
     """
-    pdf = tf.collect(as_="pandas").reset_index(drop=True)
     own = names is None
     names = list(tf._groups or []) if own else list(names)
-    every_row = np.arange(len(pdf))
     if own and tf._rowwise:
-        rows = [
-            (tuple(pdf.iloc[i][name] for name in names), np.array([i]))
-            for i in every_row
-        ]
-        return names, pdf, rows
-    if not names:
-        return names, pdf, [((), every_row)]
-
-    expand = own and not tf._group_drop
-    table: list[tuple[tuple, np.ndarray]] = []
-
-    def split(positions: np.ndarray, depth: int, prefix: tuple) -> None:
-        if depth == len(names):
-            table.append((prefix, positions))
-            return
-        name = names[depth]
-        values = pdf[name].iloc[positions]
-        found, missing = _positions_by_value(values, positions)
-        levels = _levels(tf, pdf, name)
-        if levels is not None:
-            # Factor keys sort by level. dplyr's drop=False keeps every
-            # level, plus missing if present; an unused level is one empty
-            # group with the later keys missing.
-            keys = list(levels)
+        if tf._backend == "pandas":
+            rows = tf._pdf.loc[:, names].itertuples(index=False, name=None)
         else:
-            keys = sorted(found)
-        if len(missing):
-            keys.append(None)
-        for key in keys:
-            subset = missing if key is None else found.get(key, positions[:0])
-            if len(subset) == 0 and expand and levels is not None:
-                rest = (None,) * (len(names) - depth - 1)
-                table.append(((*prefix, key, *rest), subset))
-            elif len(subset):
-                split(subset, depth + 1, (*prefix, key))
-
-    split(every_row, 0, ())
-    return names, pdf, table
+            rows = tf._lf.select(names).collect().iter_rows()
+        return names, [(_key(tuple(r)), np.array([i])) for i, r in enumerate(rows)]
+    if not names:
+        return names, [((), np.arange(_row_count(tf)))]
+    observed = _observed(tf, names)
+    empty = np.array([], dtype=np.int64)
+    ordered = _ordered_keys(tf, names, list(observed), expand=own and not tf._group_drop)
+    return names, [(key, observed.get(key, empty)) for key in ordered]
 
 
-def _keys_frame(tf: Any, names: list[str], pdf: pd.DataFrame, table: list) -> pd.DataFrame:
-    keys = pd.DataFrame(
-        {name: [key[index] for key, _ in table] for index, name in enumerate(names)}
-    )
-    for name in names:
-        levels = _levels(tf, pdf, name)
-        if levels is not None:
-            # Keep unused levels (empty groups) that the data never shows.
-            keys[name] = pd.Categorical(keys[name], categories=levels)
-            continue
-        try:
-            keys[name] = keys[name].astype(pdf[name].dtype)
-        except (TypeError, ValueError):
-            pass
-    return keys
+def _keys_frame(tf: Any, names: list[str], keys: list[tuple]) -> Any:
+    """The key columns for *keys*, in the frame's backend and column types."""
+    if tf._backend == "pandas":
+        frame = pd.DataFrame({name: [k[i] for k in keys] for i, name in enumerate(names)})
+        for name in names:
+            levels = _levels(tf, name)
+            if levels is not None:
+                # Keep unused levels (empty groups) that the data never shows.
+                frame[name] = pd.Categorical(frame[name], categories=levels)
+                continue
+            try:
+                frame[name] = frame[name].astype(tf._pdf[name].dtype)
+            except (TypeError, ValueError):
+                pass
+        return frame
+    schema = tf._lf.collect_schema()
+    return pl.DataFrame(
+        {name: [k[i] for k in keys] for i, name in enumerate(names)}, strict=False
+    ).with_columns(pl.col(name).cast(schema[name], strict=False) for name in names)
 
 
-def _result(tf: Any, pdf: pd.DataFrame) -> Any:
-    from tidy3.frame import tidy
+def _result(tf: Any, frame: Any) -> Any:
+    from tidy3.frame import TidyFrame
 
-    return tidy(pdf, backend=tf._backend)
+    if isinstance(frame, pl.DataFrame):
+        frame = frame.lazy()
+    return TidyFrame(frame, category_levels=tf._category_levels)
 
 
 def group_data(data: Any = _MISSING):
@@ -153,9 +176,16 @@ def group_data(data: Any = _MISSING):
     if data is _MISSING:
         return _pipeable("group_data", group_data)
     tf = _frame(data)
-    names, pdf, table = _group_table(tf)
-    out = _keys_frame(tf, names, pdf, table)
-    out[".rows"] = [(positions + 1).tolist() for _, positions in table]
+    names, table = _group_table(tf)
+    out = _keys_frame(tf, names, [key for key, _ in table])
+    rows = [(positions + 1).tolist() for _, positions in table]
+    if tf._backend == "pandas":
+        out[".rows"] = rows
+    elif not names:
+        # Ungrouped: one group, no key columns to attach to.
+        out = pl.DataFrame({".rows": pl.Series(rows, dtype=pl.List(pl.Int64))})
+    else:
+        out = out.with_columns(pl.Series(".rows", rows, dtype=pl.List(pl.Int64)))
     return _result(tf, out)
 
 
@@ -164,15 +194,15 @@ def group_keys(data: Any = _MISSING):
     if data is _MISSING:
         return _pipeable("group_keys", group_keys)
     tf = _frame(data)
-    names, pdf, table = _group_table(tf)
-    return _result(tf, _keys_frame(tf, names, pdf, table))
+    names, table = _group_table(tf)
+    return _result(tf, _keys_frame(tf, names, [key for key, _ in table]))
 
 
 def group_rows(data: Any = _MISSING):
     """List of each group's 1-based row positions (as in dplyr)."""
     if data is _MISSING:
         return _pipeable("group_rows", group_rows)
-    _, _, table = _group_table(_frame(data))
+    _, table = _group_table(_frame(data))
     return [(positions + 1).tolist() for _, positions in table]
 
 
@@ -180,7 +210,7 @@ def group_size(data: Any = _MISSING):
     """Number of rows in each group."""
     if data is _MISSING:
         return _pipeable("group_size", group_size)
-    _, _, table = _group_table(_frame(data))
+    _, table = _group_table(_frame(data))
     return [len(positions) for _, positions in table]
 
 
@@ -188,8 +218,9 @@ def group_indices(data: Any = _MISSING):
     """The 1-based group number of every row (dplyr ``group_indices()``)."""
     if data is _MISSING:
         return _pipeable("group_indices", group_indices)
-    _, pdf, table = _group_table(_frame(data))
-    numbers = np.zeros(len(pdf), dtype=int)
+    tf = _frame(data)
+    _, table = _group_table(tf)
+    numbers = np.zeros(_row_count(tf), dtype=int)
     for number, (_, positions) in enumerate(table, start=1):
         numbers[positions] = number
     return numbers.tolist()
@@ -210,17 +241,20 @@ def group_trim(data: Any = _MISSING):
     names = list(tf._groups or [])
     if not names:
         return tf
-    pdf = tf.collect(as_="pandas")
     levels = dict(tf._category_levels)
+    pdf = tf._pdf if tf._backend == "pandas" else None
     for name in names:
-        current = _levels(tf, pdf, name)
+        current = _levels(tf, name)
         if current is None:
             continue
-        used = set(pdf[name].dropna().tolist())
+        if pdf is not None:
+            used = set(pdf[name].dropna().tolist())
+            if isinstance(pdf[name].dtype, pd.CategoricalDtype):
+                pdf = pdf.assign(**{name: pdf[name].cat.remove_unused_categories()})
+        else:
+            used = set(tf._lf.select(pl.col(name).drop_nulls().unique()).collect().to_series().to_list())
         levels[name] = [level for level in current if level in used]
-        if isinstance(pdf[name].dtype, pd.CategoricalDtype) and tf._backend == "pandas":
-            pdf = pdf.assign(**{name: pdf[name].cat.remove_unused_categories()})
-    if tf._backend == "pandas":
+    if pdf is not None:
         return tf._with_pdf(pdf, groups=names, category_levels=levels)
     return tf._with_lf(tf._lf, groups=names, category_levels=levels)
 
