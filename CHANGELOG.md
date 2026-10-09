@@ -46,6 +46,7 @@ First release on PyPI: `pip install tidy3`.
 - With pandas 2, `where(is_boolean)` and `where(is_categorical)` no longer
   pick text columns.
 - With pandas 2, `fill()` no longer changes the frame it was given.
+- `aes()` bare names work in the same notebook cell that imports plot3.
 - Bare-name masking leaves lambda parameters and comprehension variables
   alone: `if_any(ends_with("_score"), lambda x: x > 0)` no longer reads a
   column named `x`.
