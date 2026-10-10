@@ -265,6 +265,18 @@ def transform_source(
         if text.endswith("\n"):
             text = text[:-1]
 
+    if with_plot3:
+        # ggplot(...) then "+ geom_point()" lines, as plot3's notebook
+        # support joins them (plot3 0.6.6 and newer).
+        try:
+            from plot3.masking import join_layer_lines
+
+            joined = join_layer_lines(text)
+            if joined is not None:
+                text = joined
+        except ImportError:
+            pass
+
     from tidy3.masking import apply_masking, default_known_names
 
     kn = set(known) if known is not None else default_known_names()

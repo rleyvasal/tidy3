@@ -14,6 +14,11 @@ under **Changed**.
   cell before running any of it. The README test no longer loads the
   extension itself, so it catches this.
 
+### Changed
+
+- `nb_export` and `python -m tidy3 run` join a plot's `+ geom_*()` lines to
+  the `ggplot(...)` above them, as plot3 0.6.6 does in notebooks.
+
 ## 0.7.1 — 2026-10-09
 
 A plain `pip install tidy3`, plotting and Excel included.

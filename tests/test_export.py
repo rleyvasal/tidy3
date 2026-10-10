@@ -246,3 +246,23 @@ def test_cli_run_with_explicit_imports(tmp_path: Path):
 
     rc = main(["run", str(script), "--no-inject"])
     assert rc == 0
+
+
+def test_export_joins_plus_lines_of_a_ggplot():
+    # A notebook's "ggplot(...)" then "+ geom_point()" lines become one
+    # expression in the exported script, as plot3 joins them in notebooks.
+    import ast
+
+    import pytest
+
+    try:
+        from plot3.masking import join_layer_lines  # noqa: F401
+    except ImportError:
+        pytest.skip("needs plot3 0.6.6 or newer")
+
+    from tidy3.export import transform_source
+
+    out = transform_source('p = ggplot(df, aes(x=a, y=b))\n + geom_point()\n + theme_bw()')
+    tree = ast.parse(out)
+    assert len(tree.body) == 1 and isinstance(tree.body[0], ast.Assign)
+    assert "'a'" in out or '"a"' in out
