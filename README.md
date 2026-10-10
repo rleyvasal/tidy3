@@ -148,10 +148,16 @@ long
 >> ggplot(aes(x = species, y = mm, fill = species))
 + geom_boxplot()
 + facet_wrap("measure", scales = "free_y")   # one panel per measurement
++ scale_fill_hue()                           # ggplot2's default colours
++ theme_grey()                               # and its grey panel
 + theme(legend_position = "none")
 ```
 
-<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/facets_dark.png" alt="Boxplots of bill depth, bill length, and flipper length by species, one panel each">
+<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/facets_ggplot.png" alt="Boxplots of bill depth, bill length, and flipper length by species, one panel each, in ggplot2's grey theme and default colours">
+
+plot3 has ggplot2's themes and scales, so a figure can look exactly like
+one from R. The other figures here use `theme_dark()`, the look of plot3's
+interactive viewer.
 
 `pivot_wider`, `separate`, `unite`, `nest`/`unnest`, `complete`, and the
 rest of tidyr are in the [reference](docs/reference.md#reshape-and-missing-data).
