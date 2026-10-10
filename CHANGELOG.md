@@ -4,6 +4,46 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.7.0 — 2026-10-09
+
+`compute()`, notebook masking fixes, R's `head()`, and a README that shows
+notebook pipes, plots, and a scikit-learn handoff.
+
+### Added
+
+- `compute()` runs the plan so far and keeps piping from the in-memory
+  result, as dplyr's `compute()` does. `scan_csv(url) >> drop_na() >>
+  compute()` downloads and cleans once; later collects, plots, and
+  `to_numpy()` calls reuse it instead of re-running the scan. Groups and
+  rowwise state carry over. Also a method: `frame.compute()`.
+- `examples/cluster_penguins.py`: tidy3 prepares the Palmer penguins,
+  `to_numpy()` hands them to scikit-learn's k-means, and the labels come
+  back into the pipe for counting and plot3 figures.
+
+### Fixed
+
+- In notebooks, a variable made earlier in the same cell stays a variable
+  inside a verb. `kmeans = KMeans(...).fit(X)` followed by
+  `mutate(cluster = kmeans.labels_)` in one cell used to read `kmeans` as a
+  column. Scripts run with `python -m tidy3 run` already worked this way.
+- In notebooks, `all_of(features)` and `any_of(features)` read the variable
+  `features`, as in tidyselect, instead of treating its name as a column.
+- On the Polars backend, `mutate(c = [0, 1, 0])` gives one value per row,
+  as in dplyr and on the pandas backend. A Python list or tuple used to put
+  the whole list in every row.
+
+### Changed
+
+- `head()` returns 6 rows by default, as R's `head()` does (it was 10).
+- The `plot3` extra needs plot3 0.6.0 or newer, for the README's plots
+  (`scales="free_y"`, `aes(colour = factor(cluster))` in notebooks).
+- `glimpse(penguins)` works as in dplyr: it prints the frame and returns
+  it. `penguins >> glimpse()` and `glimpse(5)` work as before.
+- The README leads with a penguins pipeline, its typed table, plot3
+  figures, and a scikit-learn handoff, with every dataset read from the
+  web. The notebook, CRAFT, reference, and benchmark material moved to
+  `docs/`, and the README test runs those pages' examples too.
+
 ## 0.6.0 — 2026-10-09
 
 dplyr-style join and column naming in Python spelling, the rest of tidyr's

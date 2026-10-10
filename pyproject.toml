@@ -26,9 +26,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "plot3>=0.4.0", "ipython>=8.0", "xlsxwriter>=3.0"]
+dev = ["pytest>=7.0", "plot3>=0.6.0", "ipython>=8.0", "xlsxwriter>=3.0"]
 jupyter = ["ipython>=8.0"]
-plot3 = ["plot3>=0.4.0"]
+plot3 = ["plot3>=0.6.0"]
 excel = ["xlsxwriter>=3.0"]
 
 [project.urls]
