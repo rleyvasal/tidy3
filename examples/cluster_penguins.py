@@ -50,7 +50,7 @@ flat = (
     clustered
     >> ggplot(aes(x="flipper_length_mm", y="bill_length_mm", colour="factor(cluster)"))
     + geom_point(aes(shape="species"), alpha=0.75)
-    + geom_point(data=centres, size=16, shape="cross", colour="black")
+    + geom_point(data=centres, size=16, shape="cross", colour="grey70")
     + labs(title="k-means on bill and flipper size", colour="cluster",
            x="Flipper length (mm)", y="Bill length (mm)")
 )

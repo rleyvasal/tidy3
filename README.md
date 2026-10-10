@@ -5,7 +5,7 @@ verb per line with comments in between, see every column's type, and hand
 the result to [plot3](https://github.com/rleyvasal/plot3), scikit-learn,
 NumPy, or pandas without leaving the pipe.
 
-<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/hero.png" alt="A notebook: multi-line tidy3 pipes with comments summarise the penguins into a table that shows each column's type under its name, then flow into a plot3 scatter with trend lines">
+<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/notebook_dark.png" alt="A notebook: multi-line tidy3 pipes with comments summarise the penguins into a table that shows each column's type under its name, then flow into a plot3 scatter with trend lines">
 
 ```bash
 pip install "tidy3[jupyter,plot3]"
@@ -151,7 +151,7 @@ long
 + theme(legend_position = "none")
 ```
 
-<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/facets.png" alt="Boxplots of bill depth, bill length, and flipper length by species, one panel each">
+<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/facets_dark.png" alt="Boxplots of bill depth, bill length, and flipper length by species, one panel each">
 
 `pivot_wider`, `separate`, `unite`, `nest`/`unnest`, `complete`, and the
 rest of tidyr are in the [reference](docs/reference.md#reshape-and-missing-data).
@@ -159,7 +159,7 @@ rest of tidyr are in the [reference](docs/reference.md#reshape-and-missing-data)
 ## Plot with plot3
 
 One scatter shows Simpson's paradox: over all penguins, longer bills are
-shallower (black), but within each species they are deeper:
+shallower (grey), but within each species they are deeper:
 
 ```python
 penguins
@@ -167,10 +167,10 @@ penguins
 >> ggplot(aes(x = bill_length_mm, y = bill_depth_mm, colour = species))
 + geom_point(alpha = 0.6)
 + geom_smooth(method = "lm")                     # one trend per species
-+ geom_smooth(method = "lm", colour = "black")   # and one for all penguins
++ geom_smooth(method = "lm", colour = "grey70")  # and one for all penguins
 ```
 
-<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/simpson.png" alt="Bill depth against bill length: each species trends upward, all penguins together trend downward">
+<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/simpson_dark.png" alt="Bill depth against bill length: each species trends upward, all penguins together trend downward">
 
 Figures are interactive (zoom, hover, orbit in 3D) and save for papers with
 `ggsave("fig.pdf", p)`. plot3's animations work the same way, here
@@ -189,7 +189,7 @@ gapminder
 + labs(title = "{frame_time}", x = "GDP per capita", y = "Life expectancy")
 ```
 
-<img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/gapminder.gif" width="60%" alt="Gapminder bubbles moving from 1952 to 2007">
+<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/gapminder_dark.gif" width="60%" alt="Gapminder bubbles moving from 1952 to 2007">
 
 ## Hand off to scikit-learn, NumPy, and pandas
 
@@ -236,12 +236,12 @@ centres = clustered >> group_by(cluster) >> summarise(across(all_of(features), m
 clustered
 >> ggplot(aes(x = flipper_length_mm, y = bill_length_mm, colour = factor(cluster)))
 + geom_point(aes(shape = species), alpha = 0.75)
-+ geom_point(data = centres, size = 16, shape = "cross", colour = "black")
++ geom_point(data = centres, size = 16, shape = "cross", colour = "grey70")
 ```
 
 <p>
-<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/clusters.png" width="54%" alt="Penguins coloured by k-means cluster, shaped by species, with black crosses at the cluster centres">
-<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/clusters_3d.png" width="44%" alt="The three features in 3D, coloured by cluster">
+<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/clusters_dark.png" width="54%" alt="Penguins coloured by k-means cluster, shaped by species, with grey crosses at the cluster centres">
+<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/clusters_3d_dark.png" width="44%" alt="The three features in 3D, coloured by cluster">
 </p>
 
 The whole example, as a script, is
