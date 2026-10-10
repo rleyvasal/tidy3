@@ -5,7 +5,7 @@ verb per line with comments in between, see every column's type, and hand
 the result to [plot3](https://github.com/rleyvasal/plot3), scikit-learn,
 NumPy, or pandas without leaving the pipe.
 
-<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/hero.png" alt="A VS Code notebook: a multi-line tidy3 pipe with comments summarises the penguins, and the result shows each column's type under its name">
+<img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/hero.png" alt="A notebook: multi-line tidy3 pipes with comments summarise the penguins into a table that shows each column's type under its name, then flow into a plot3 scatter with trend lines">
 
 ```bash
 pip install "tidy3[jupyter,plot3]"
