@@ -1,10 +1,14 @@
-"""Every ```python block in README.md runs, in order, like notebook cells.
+"""Every ```python block in README.md and the docs pages runs, in order,
+like notebook cells, one fresh shell per file.
 
 The blocks run in one IPython shell with ``%load_ext tidy3.jupyter``, so
 multi-line ``>>`` pipes, bare column names, and ``%%tidy3_run`` work exactly
 as a reader would type them. Blocks tagged ```python notest are skipped:
 they need a GPU, CRAFT ``%gpu``, a long benchmark, or files the reader
 supplies. Files the examples write land in a temporary directory.
+
+The examples read their datasets (penguins, mtcars, gapminder) from the
+web. Without a network connection the run is skipped, not failed.
 """
 
 from __future__ import annotations
@@ -17,11 +21,29 @@ import pytest
 pytest.importorskip("IPython")
 pytest.importorskip("plot3")
 
-README = Path(__file__).resolve().parents[1] / "README.md"
+ROOT = Path(__file__).resolve().parents[1]
+DOCS = [
+    ROOT / "README.md",
+    ROOT / "docs" / "notebooks.md",
+    ROOT / "docs" / "reference.md",
+    ROOT / "docs" / "craft.md",
+    ROOT / "docs" / "benchmarks.md",
+]
+DATA_URL = "https://raw.githubusercontent.com/allisonhorst/palmerpenguins/main/inst/extdata/penguins.csv"
 
 
-def _blocks() -> list[tuple[int, str]]:
-    text = README.read_text(encoding="utf-8")
+def _online() -> bool:
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(DATA_URL, timeout=10):
+            return True
+    except OSError:
+        return False
+
+
+def _blocks(doc: Path = DOCS[0]) -> list[tuple[int, str]]:
+    text = doc.read_text(encoding="utf-8")
     out = []
     for match in re.finditer(r"^```(python[^\n]*)\n(.*?)^```", text, re.M | re.S):
         info, body = match.group(1), match.group(2)
@@ -33,7 +55,8 @@ def _blocks() -> list[tuple[int, str]]:
 
 
 def test_readme_has_examples():
-    assert len(_blocks()) >= 30
+    assert len(_blocks()) >= 6
+    assert len(_blocks(ROOT / "docs" / "reference.md")) >= 20
 
 
 def _materialize(value) -> None:
@@ -46,8 +69,12 @@ def _materialize(value) -> None:
         value.html()
 
 
-def test_readme_examples_run(tmp_path, monkeypatch):
+@pytest.mark.parametrize("doc", DOCS, ids=lambda d: d.name)
+def test_readme_examples_run(doc, tmp_path, monkeypatch):
     from IPython.core.interactiveshell import InteractiveShell
+
+    if not _online():
+        pytest.skip("examples read their data from the web; no network")
 
     monkeypatch.chdir(tmp_path)
     shell = InteractiveShell.instance()
@@ -61,7 +88,7 @@ def test_readme_examples_run(tmp_path, monkeypatch):
         import plot3
 
         plot3.register_plot3(quiet=True)
-        for line, body in _blocks():
+        for line, body in _blocks(doc):
             before = {name: id(value) for name, value in shell.user_ns.items()}
             result = shell.run_cell(body, store_history=False)
             error = result.error_before_exec or result.error_in_exec
@@ -75,7 +102,7 @@ def test_readme_examples_run(tmp_path, monkeypatch):
                     error = exc
             if error is not None:
                 pytest.fail(
-                    f"README.md block at line {line} failed: "
+                    f"{doc.name} block at line {line} failed: "
                     f"{type(error).__name__}: {error}\n\n{body}"
                 )
     finally:
