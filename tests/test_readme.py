@@ -1,7 +1,8 @@
 """Every ```python block in README.md and the docs pages runs, in order,
 like notebook cells, one fresh shell per file.
 
-The blocks run in one IPython shell with ``%load_ext tidy3.jupyter``, so
+The blocks run in one IPython shell, which loads ``tidy3.jupyter`` only
+when a block does (as a reader's notebook must), so
 multi-line ``>>`` pipes, bare column names, and ``%%tidy3_run`` work exactly
 as a reader would type them. Blocks tagged ```python notest are skipped:
 they need a GPU, CRAFT ``%gpu``, a long benchmark, or files the reader
@@ -82,7 +83,9 @@ def test_readme_examples_run(doc, tmp_path, monkeypatch):
     shell.ast_node_interactivity = "all"
     shell.display_trap.hook = lambda value: _materialize(value)
     try:
-        shell.run_line_magic("load_ext", "tidy3.jupyter")
+        # No %load_ext here: each document loads the extension in its own
+        # cell, as a reader's fresh notebook must. A cell that loads it and
+        # uses multi-line pipes in the same cell fails, as it would there.
         # plot3 sets up its notebook support when first imported inside
         # IPython. Other tests may have imported it already, so do that here.
         import plot3

@@ -106,7 +106,9 @@ from tidy3 import tidy, filter, col
 %load_ext tidy3.jupyter
 ```
 
-With the extension loaded:
+Run that first cell on its own. From the next cell on, with the extension
+loaded (a cell that loads it can't use multi-line pipes yet, because IPython
+reads a whole cell before running any of it):
 
 ```python
 tidy(cars)

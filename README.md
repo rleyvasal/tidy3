@@ -18,14 +18,19 @@ Contents: [In a notebook](#in-a-notebook) · [From R](#if-you-know-dplyr) ·
 
 ## In a notebook
 
-Load the extension once. After that, a pipe runs over as many lines as you
-like, each line starting with `>>`, comments and blank lines included, and
-column names go bare, as in R:
+Load the extension once, in a cell of its own:
 
 ```python
 %load_ext tidy3.jupyter
 from tidy3 import *
+```
 
+From the next cell on, a pipe runs over as many lines as you like, each
+line starting with `>>`, comments and blank lines included, and column
+names go bare, as in R. (The cell that loads the extension can't use them
+yet: IPython reads a whole cell before running any of it.)
+
+```python
 penguins = scan_csv(
     "https://raw.githubusercontent.com/allisonhorst/palmerpenguins/main/inst/extdata/penguins.csv",
     null_values="NA",

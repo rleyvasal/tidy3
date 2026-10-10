@@ -4,6 +4,16 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- The README loads `%load_ext tidy3.jupyter` in a cell of its own. Its first
+  example loaded the extension and used multi-line pipes in the same cell,
+  which fails with a SyntaxError in a fresh notebook: IPython reads a whole
+  cell before running any of it. The README test no longer loads the
+  extension itself, so it catches this.
+
 ## 0.7.1 — 2026-10-09
 
 A plain `pip install tidy3`, plotting and Excel included.
