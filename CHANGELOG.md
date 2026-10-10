@@ -4,7 +4,10 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.7.2 — 2026-10-10
+
+Plot layers on their own lines in exported notebooks, and a README that
+loads the extension in a cell of its own.
 
 ### Fixed
 
@@ -17,7 +20,8 @@ under **Changed**.
 ### Changed
 
 - `nb_export` and `python -m tidy3 run` join a plot's `+ geom_*()` lines to
-  the `ggplot(...)` above them, as plot3 0.6.6 does in notebooks.
+  the `ggplot(...)` above them, as plot3 0.6.6 does in notebooks. tidy3
+  needs plot3 0.6.6 or newer.
 
 ## 0.7.1 — 2026-10-09
 

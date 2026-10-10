@@ -23,7 +23,7 @@ dependencies = [
   "polars>=1.39",
   "pandas>=2.0",
   "pyarrow>=14.0",
-  "plot3>=0.6.2",
+  "plot3>=0.6.6",
   "xlsxwriter>=3.0",
 ]
 
