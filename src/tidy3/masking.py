@@ -179,6 +179,10 @@ _FIRST_COLUMN_ARG = frozenset(
         "replace_when", "any", "all", "abs", "round", "order_by", "with_order",
     }
 )
+# tidyselect helpers whose arguments are vectors of names from the
+# environment (all_of(vars)), never bare columns.
+_ENV_ARGS = frozenset({"all_of", "any_of"})
+
 _ALL_COLUMN_ARGS = frozenset(
     {
         "coalesce", "if_else", "near", "na_if", "n_distinct", "between",
@@ -724,6 +728,10 @@ class MaskNames(ast.NodeTransformer):
             )
         # Do not treat helper names as columns; leave Name funcs alone.
         helper = node.func.id if isinstance(node.func, ast.Name) else None
+        if helper in _ENV_ARGS:
+            # all_of(features): a variable holding names, never a column,
+            # as in tidyselect. Rewriting it would make "features" a name.
+            return node
         if helper in _ALL_COLUMN_ARGS:
             node.args = [self._operand(arg) for arg in node.args]
         elif helper in _FIRST_COLUMN_ARG and node.args:
@@ -738,6 +746,48 @@ class MaskNames(ast.NodeTransformer):
             for kw in node.keywords
         ]
         return node
+
+
+def bound_names(tree: ast.AST) -> set[str]:
+    """Names *tree* binds: assignments, imports, function and class names.
+
+    These are variables, never columns, even where the same code then
+    uses them bare in a verb (``kmeans = KMeans(...)`` then
+    ``mutate(cluster = kmeans.labels_)`` in one cell or script).
+    """
+    names: set[str] = set()
+
+    def add(target: ast.AST) -> None:
+        if isinstance(target, ast.Name):
+            names.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                add(elt)
+        elif isinstance(target, ast.Starred):
+            add(target.value)
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                add(target)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.target is not None:
+            add(node.target)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            add(node.target)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    add(item.optional_vars)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    names.add(alias.asname or alias.name)
+    return names
 
 
 def default_known_names(extra: Iterable[str] | None = None) -> set[str]:
@@ -894,11 +944,12 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
         self._known_static = known
         self._soft: set[str] = set()
         self._variables: dict[str, Any] = {}
+        self._cell_names: set[str] = set()
 
     def _known(self) -> set[str]:
         if self._known_static is not None:
             return set(self._known_static)
-        extra: set[str] = set()
+        extra: set[str] = set(self._cell_names)
         namespace = self._namespace()
         if namespace is not None:
             extra.update(namespace.keys())
@@ -926,6 +977,15 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
         if self._known_static is not None:
             self._soft &= self._known_static
         self._variables = _notebook_variables(namespace, self._soft)
+        if self._known_static is None:
+            # Variables this cell creates do not exist yet: the mask runs
+            # before the cell. Treat them as variables, as a script does,
+            # and drop any stale value from an earlier cell.
+            self._cell_names = bound_names(node)
+            self._soft -= self._cell_names
+            self._variables = {
+                k: v for k, v in self._variables.items() if k not in self._cell_names
+            }
         node = self.generic_visit(node)
         return _plot3_masking_for_importing_cell(node)
 

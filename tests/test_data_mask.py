@@ -85,3 +85,46 @@ def test_local_names_and_function_arguments_are_untouched(shell, backend):
     out = run(shell, "d >> filter(if_any(starts_with('x'), lambda score: score > 2))")
     assert out["x"] == [3.0]
     assert run(shell, "d >> mutate(r = (x / 3).round(digits))")["r"] == [0.0, 1.0, 1.0]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_all_of_takes_a_variable_of_names(shell, backend):
+    # tidyselect: all_of(vars) reads the variable, even one the same cell
+    # defines (the mask runs before the cell, so it cannot see it yet).
+    shell.run_cell(
+        f'df = tidy({{"a": [1.0, 3.0], "b": [2.0, 4.0], "c": ["x", "y"]}}, backend="{backend}")',
+        silent=True,
+    )
+    result = shell.run_cell(
+        'features = ["a", "b"]\n'
+        "picked = df >> select(all_of(features))\n"
+        "scaled = df >> mutate(across(all_of(features), lambda x: x * 10))\n"
+        "kept = df >> select(-any_of(features))",
+        silent=True,
+    )
+    assert result.error_in_exec is None and result.error_before_exec is None
+    ns = shell.user_ns
+    assert list(ns["picked"].columns) == ["a", "b"]
+    assert ns["scaled"].collect(as_="pandas")["b"].tolist() == [20.0, 40.0]
+    assert list(ns["kept"].columns) == ["c"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_a_variable_made_earlier_in_the_cell_stays_a_variable(shell, backend):
+    # kmeans = KMeans(...).fit(X) then mutate(cluster = kmeans.labels_ + 1)
+    # in one cell: the mask runs before the cell, so it must read the cell's
+    # own assignments, as a script's export does.
+    shell.run_cell(
+        f'df = tidy({{"x": [1.0, 2.0, 3.0]}}, backend="{backend}")', silent=True
+    )
+    result = shell.run_cell(
+        "import types, numpy as np\n"
+        "model = types.SimpleNamespace(labels_=np.array([0, 1, 0]))\n"
+        "limit = 1.5\n"
+        "out = df >> mutate(cluster = model.labels_) >> filter(x > limit)",
+        silent=True,
+    )
+    assert result.error_in_exec is None and result.error_before_exec is None
+    out = shell.user_ns["out"].collect(as_="pandas")
+    assert out["cluster"].tolist() == [1, 0]
+    assert out["x"].tolist() == [2.0, 3.0]

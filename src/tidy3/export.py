@@ -93,7 +93,7 @@ def _parse_directives(source: str) -> tuple[set[str], dict[str, str], str]:
 
 def collect_known_names(sources: Iterable[str]) -> set[str]:
     """Names that must not become column refs (imports, assigns, defs)."""
-    from tidy3.masking import default_known_names
+    from tidy3.masking import bound_names, default_known_names
 
     known = default_known_names()
     for src in sources:
@@ -109,31 +109,8 @@ def collect_known_names(sources: Iterable[str]) -> set[str]:
             tree = ast.parse(text)
         except SyntaxError:
             continue
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                known.add(node.name)
-            elif isinstance(node, ast.Assign):
-                for t in node.targets:
-                    _add_target_names(t, known)
-            elif isinstance(node, ast.AnnAssign) and node.target is not None:
-                _add_target_names(node.target, known)
-            elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    known.add(alias.asname or alias.name.split(".")[0])
-            elif isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    if alias.name == "*":
-                        continue
-                    known.add(alias.asname or alias.name)
+        known |= bound_names(tree)
     return known
-
-
-def _add_target_names(target: ast.AST, known: set[str]) -> None:
-    if isinstance(target, ast.Name):
-        known.add(target.id)
-    elif isinstance(target, (ast.Tuple, ast.List)):
-        for elt in target.elts:
-            _add_target_names(elt, known)
 
 
 def _try_rewrite_plot3_magic(line: str) -> str | None:
