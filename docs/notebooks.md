@@ -39,7 +39,7 @@ tidy3 is a normal package. No CRAFT, SolveIt, or remote kernel is required.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install "tidy3[jupyter]"
+pip install tidy3
 ```
 
 3. Select it: Command Palette → **Python: Select Interpreter** →
@@ -158,7 +158,7 @@ import numpy as np
 X = result.to_numpy(columns=["avg"], dtype=np.float32, writable=True, order="c")
 # t = torch.from_numpy(X)
 
-# plot3 (optional; install plot3 separately)
+# plot3 (installed with tidy3)
 # from plot3 import aes, geom_point, ggplot
 # result >> ggplot(aes(x="cyl", y="avg")) + geom_point()
 ```

@@ -5,8 +5,7 @@ Setup (once, in the tidy3 venv)::
 
     cd /Users/admin/tidy3
     source .venv/bin/activate
-    pip install -e ".[dev,jupyter]"
-    pip install -e /Users/admin/plot3
+    pip install -e ".[dev]"
 
 VS Code::
 

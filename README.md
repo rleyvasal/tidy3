@@ -8,7 +8,7 @@ NumPy, or pandas without leaving the pipe.
 <img src="https://raw.githubusercontent.com/rleyvasal/tidy3/main/docs/img/notebook_dark.png" alt="A notebook: multi-line tidy3 pipes with comments summarise the penguins into a table that shows each column's type under its name, then flow into a plot3 scatter with trend lines">
 
 ```bash
-pip install "tidy3[jupyter,plot3]"
+pip install tidy3
 ```
 
 Contents: [In a notebook](#in-a-notebook) · [From R](#if-you-know-dplyr) ·
@@ -298,7 +298,7 @@ kernel under CRAFT or SolveIt: [docs/craft.md](docs/craft.md).
 ```bash
 git clone https://github.com/rleyvasal/tidy3 && cd tidy3
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,jupyter]"
+pip install -e ".[dev]"
 python -m pytest -q            # includes every example in this README and docs/
 ```
 

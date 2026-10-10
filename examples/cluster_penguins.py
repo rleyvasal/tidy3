@@ -5,7 +5,7 @@ tidy3 does the pandas-style work (load, clean, scale), ``to_numpy()`` hands
 the matrix to scikit-learn, and the cluster labels come straight back into
 the pipe for counting and plotting. Needs network access for the data::
 
-    pip install "tidy3[plot3]" scikit-learn
+    pip install tidy3 scikit-learn
     python examples/cluster_penguins.py
 
 Figures are written to examples/output/ as interactive HTML and PNG.

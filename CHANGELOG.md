@@ -4,6 +4,15 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- `pip install tidy3` is the whole install: plot3 (for `>> ggplot()`) and
+  XlsxWriter (for `write_excel`) are regular dependencies, and the
+  `jupyter`, `plot3`, and `excel` extras are gone. Notebooks already have
+  IPython.
+
 ## 0.7.0 — 2026-10-09
 
 `compute()`, notebook masking fixes, R's `head()`, and a README that shows

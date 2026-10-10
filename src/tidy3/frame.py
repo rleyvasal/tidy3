@@ -1203,7 +1203,7 @@ class TidyFrame:
         except ModuleNotFoundError as error:
             if error.name == "xlsxwriter" or "xlsxwriter" in str(error).lower():
                 raise ImportError(
-                    "Excel output requires XlsxWriter; install tidy3[excel]"
+                    "Excel output requires XlsxWriter: pip install xlsxwriter"
                 ) from error
             raise
 

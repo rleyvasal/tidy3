@@ -23,13 +23,12 @@ dependencies = [
   "polars>=1.39",
   "pandas>=2.0",
   "pyarrow>=14.0",
+  "plot3>=0.6.2",
+  "xlsxwriter>=3.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "plot3>=0.6.0", "ipython>=8.0", "xlsxwriter>=3.0"]
-jupyter = ["ipython>=8.0"]
-plot3 = ["plot3>=0.6.0"]
-excel = ["xlsxwriter>=3.0"]
+dev = ["pytest>=7.0", "ipython>=8.0"]
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/tidy3"

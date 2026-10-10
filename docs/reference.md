@@ -71,10 +71,6 @@ automatically whenever `--polars-engine gpu` is selected.
 Excel output is intended for smaller reporting datasets and must materialize
 the result:
 
-```bash
-pip install "tidy3[excel]"
-```
-
 ```python
 result.write_excel(
     "summary.xlsx",
