@@ -892,6 +892,14 @@ def mutate(
         assignments = {
             name: value for name, value in assignments.items() if value is not None
         }
+        if tf._backend != "pandas":
+            # mutate(cluster = [0, 1, 0]): a vector, one value per row, as in
+            # dplyr and the pandas backend (pl.lit would repeat the whole list
+            # in every row). NumPy arrays already arrive as a column.
+            assignments = {
+                name: pl.Series(name, list(value)) if isinstance(value, (list, tuple)) else value
+                for name, value in assignments.items()
+            }
         input_columns = [name for name in input_columns if name not in deletions]
         stages = _assignment_stages(assignments)
         if tf._backend == "pandas":
@@ -1521,10 +1529,22 @@ def pull(var: str | int = -1, *, name: str | int | None = None) -> Verb:
     return Verb(_apply, "pull")
 
 
-def glimpse(n: int = 10) -> Verb:
-    """Print a compact column-oriented preview and pass the frame through."""
+def glimpse(data: Any = None, n: int = 10) -> Any:
+    """Print a compact column-oriented preview and pass the frame through.
+
+    Called on a frame, as in dplyr (``glimpse(penguins)``), it prints and
+    returns the frame. Piped (``penguins >> glimpse()``), it does the same
+    mid-pipe. ``glimpse(5)`` still means five values per column.
+    """
+    if isinstance(data, int) and not isinstance(data, bool):
+        data, n = None, data
     if not isinstance(n, int) or isinstance(n, bool) or n < 0:
         raise ValueError("glimpse() n must be a non-negative integer")
+    if data is not None:
+        from tidy3.frame import TidyFrame, tidy
+
+        frame = data if isinstance(data, TidyFrame) else tidy(data)
+        return frame >> glimpse(n)
 
     def _apply(tf):
         preview = tf.preview(n)
@@ -2787,8 +2807,8 @@ def add_tally(
     return Verb(_apply, "add_tally")
 
 
-def head(n: int = 10) -> Verb:
-    """First *n* rows — per group when grouped (dplyr ``slice_head``)."""
+def head(n: int = 6) -> Verb:
+    """First *n* rows, 6 by default as in R — per group when grouped (dplyr ``slice_head``)."""
     verb = slice_head(n=n)
     verb.name = "head"
     return verb
@@ -4326,6 +4346,19 @@ def collect(
         )
 
     return Verb(_apply, "collect")
+
+
+def compute(*, engine: Any = "auto") -> Verb:
+    """Run the plan so far and keep piping from the in-memory result.
+
+    ``scan_csv(url) >> drop_na() >> compute()`` downloads and cleans once;
+    every later collect, plot, or ``to_numpy()`` reuses that result.
+    """
+
+    def _apply(tf):
+        return tf.compute(engine=engine)
+
+    return Verb(_apply, "compute")
 
 
 def to_numpy(

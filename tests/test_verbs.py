@@ -208,3 +208,18 @@ def test_select_keeps_groups(cars):
         >> summarise(avg=mean("mpg"))
     ).collect()
     assert "cyl" in out.columns
+
+
+@pytest.mark.parametrize("backend", ["polars", "pandas"])
+def test_mutate_list_is_one_value_per_row(backend):
+    # dplyr: mutate(c = c(0, 1, 0)) is a column. Polars used to repeat the
+    # whole list in every row; NumPy arrays already worked.
+    import numpy as np
+
+    from tidy3 import mutate, tidy
+
+    df = tidy({"x": [1.0, 2.0, 3.0]}, backend=backend)
+    out = (df >> mutate(c=[0, 1, 0], d=(5, 6, 7), e=np.array([1, 1, 2]))).collect(as_="pandas")
+    assert out["c"].tolist() == [0, 1, 0]
+    assert out["d"].tolist() == [5, 6, 7]
+    assert out["e"].tolist() == [1, 1, 2]

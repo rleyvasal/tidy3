@@ -1150,6 +1150,7 @@ INVARIANT_ONLY = {
     "sample_frac",
     "slice_sample",
     "collect",
+    "compute",
     "to_numpy",
     "glimpse",
     "peek",

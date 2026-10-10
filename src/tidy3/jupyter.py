@@ -330,6 +330,7 @@ _FORCE_NS_NAMES = frozenset(
         "arrange",
         "col",
         "collect",
+        "compute",
         "count",
         "desc",
         "distinct",

@@ -218,3 +218,27 @@ def test_pipe_colnames_and_describe_like_tidyverse():
     # Bare function (no call) also works: cars >> colnames  → colnames(cars)
     cn2 = cars >> colnames
     assert list(cn2) == list(cn)
+
+
+def test_glimpse_takes_a_frame_like_dplyr(capsys):
+    from tidy3 import glimpse, tidy
+
+    frame = tidy({"x": [1, 2, 3], "name": ["a", "b", "c"]})
+    assert glimpse(frame) is frame
+    first = capsys.readouterr().out
+    assert "Rows: 3" in first and "$ name <String>" in first
+    assert (frame >> glimpse()) is frame
+    assert capsys.readouterr().out == first
+    glimpse(frame, n=1)
+    assert "1, 2" not in capsys.readouterr().out
+    glimpse({"y": [1.5]})
+    assert "$ y <Float64> 1.5" in capsys.readouterr().out
+
+
+def test_head_returns_six_rows_by_default_as_in_r():
+    from tidy3 import head, tidy
+
+    frame = tidy({"x": list(range(20))})
+    assert (frame >> head()).collect().height == 6
+    assert frame.head().collect().height == 6
+    assert (frame >> head(3)).collect().height == 3

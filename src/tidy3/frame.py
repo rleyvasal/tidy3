@@ -459,7 +459,7 @@ class TidyFrame:
 
         return self >> add_tally_verb(wt=wt, sort=sort, name=name)
 
-    def head(self, n: int = 10) -> TidyFrame:
+    def head(self, n: int = 6) -> TidyFrame:
         from tidy3.verbs import head as head_verb
 
         return self >> head_verb(n)
@@ -903,6 +903,21 @@ class TidyFrame:
         return self._with_lf(out, groups=self._groups)
 
     # ── materialize ─────────────────────────────────────────────────────
+    def compute(self, *, engine: Any = "auto") -> TidyFrame:
+        """Run the plan now and keep piping from the result (dplyr's ``compute()``).
+
+        A lazy frame re-runs its whole plan each time it is materialized,
+        so a pipe that starts with ``scan_csv(url)`` downloads the file again
+        for every ``collect()``, plot, or ``to_numpy()``. Computing once keeps
+        the result in memory; later verbs build on it. Groups, rowwise
+        state, and the backend carry over. The pandas backend is already
+        eager, so it returns the frame unchanged.
+        """
+        _validate_execution_engine(engine, backend=self.backend)
+        if self.backend == "pandas":
+            return self
+        return self._with_lf(self._lf.collect(engine=engine).lazy(), groups=self._groups)
+
     def collect(
         self,
         as_: Literal["polars", "pandas", "arrow", "numpy"] = "polars",
