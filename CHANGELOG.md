@@ -4,6 +4,19 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.7.4 — 2026-10-14
+
+Clearer errors from broken pipes in notebooks.
+
+### Fixed
+
+- A multi-line `>>` pipe with a mistake in it (a missing argument, an extra
+  closing bracket) used to fail with `IndentationError: unexpected indent` at
+  its first `>>` line. The notebook transformers now join the pipe's lines so
+  Python reports the real error at the right line. A bracket left open at the
+  end of a cell gives Python's own `incomplete input`, as in any cell.
+  `nb_export` leaves broken cells as written.
+
 ## 0.7.3 — 2026-10-14
 
 Scaling helpers for handing features to scikit-learn.
