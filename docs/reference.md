@@ -623,7 +623,9 @@ supersede `case_match()` and `recode()`, which still work.
 Ranking helpers are `row_number`, `min_rank`, `dense_rank`, `percent_rank`,
 `cume_dist`, and `ntile`. Window and value helpers include `lead`, `lag`,
 `cummean`, `cumall`, `cumany`, `n_distinct`, `coalesce`, `if_else`, and
-`case_when`. `lead`, `lag`, `first`, `last`, and `nth` accept `order_by=`.
+`case_when`. `scale(x, center=True, scale=True)` standardises like R's
+`scale()` and `rescale(x, to=(0, 1))` min-max scales like `scales::rescale()`;
+both skip missing values and return a plain column. `lead`, `lag`, `first`, `last`, and `nth` accept `order_by=`.
 For any other window expression, `order_by()` computes it as if the rows were
 sorted, then returns results in the original row order:
 

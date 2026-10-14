@@ -18,7 +18,7 @@ from pathlib import Path
 from sklearn.cluster import KMeans
 
 from plot3 import aes, coord_3d, geom_point, geom_point3d, ggplot, ggsave, labs
-from tidy3 import across, compute, count, drop_na, group_by, mean, mutate, scan_csv, sd, summarise
+from tidy3 import across, compute, count, drop_na, group_by, mean, mutate, scale, scan_csv, summarise
 
 URL = "https://raw.githubusercontent.com/allisonhorst/palmerpenguins/main/inst/extdata/penguins.csv"
 FEATURES = ["bill_length_mm", "bill_depth_mm", "flipper_length_mm"]
@@ -31,7 +31,7 @@ penguins = scan_csv(URL, null_values="NA") >> drop_na(*FEATURES) >> compute()
 # 2. Scale each feature to mean 0, sd 1 (R's scale()), then hand off to NumPy.
 X = (
     penguins
-    >> mutate(across(FEATURES, lambda x: (x - mean(x)) / sd(x)))
+    >> mutate(across(FEATURES, scale))
 ).to_numpy(columns=FEATURES)
 
 # 3. scikit-learn sees an ordinary (n, 3) float array.

@@ -27,7 +27,7 @@ __all__ = [
     "nth", "near", "na_if", "between_values", "consecutive_id",
     "row_number", "min_rank",
     "dense_rank", "percent_rank", "cume_dist", "ntile", "lead", "lag",
-    "cummean", "cumall", "cumany", "n_distinct", "coalesce", "if_else",
+    "cummean", "cumall", "cumany", "scale", "rescale", "n_distinct", "coalesce", "if_else",
     "case_when", "case_match", "recode", "recode_values", "replace_values",
     "replace_when", "when_any", "when_all", "order_by", "with_order",
     "cur_group_id", "n_groups", "to_polars", "env",
@@ -355,6 +355,50 @@ def cumall(x: Any) -> Expr:
 
 def cumany(x: Any) -> Expr:
     return _func("cumany", col(x) if isinstance(x, str) else x)
+
+
+def scale(x: Any, center: bool = True, scale: bool = True) -> Expr:
+    """Standardise *x*, ignoring missing values (R's ``scale()``).
+
+    ``center`` subtracts the mean; ``scale`` then divides by the standard
+    deviation, or by the root mean square when not centring, as R does.
+    Returns a plain column, not R's one-column matrix. A constant column
+    gives NaN, as in R.
+    """
+    for name, value in (("center", center), ("scale", scale)):
+        if not isinstance(value, bool):
+            raise TypeError(f"scale() {name} must be a boolean")
+    x = col(x) if isinstance(x, str) else Expr(_node(x))
+    out = x - mean(x, na_rm=True) if center else x
+    if scale and center:
+        out = out / sd(x, na_rm=True)
+    elif scale:
+        count = sum(x * 0 + 1, na_rm=True)
+        out = out / (sum(x ** 2, na_rm=True) / (count - 1)) ** 0.5
+    return out
+
+
+def rescale(x: Any, to: tuple[float, float] = (0, 1)) -> Expr:
+    """Min-max scale *x* onto *to*, ignoring missing values (``scales::rescale()``).
+
+    A constant column maps to the middle of *to*, as in R.
+    """
+    if (
+        not isinstance(to, (tuple, list))
+        or len(to) != 2
+        or not builtins.all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in to
+        )
+    ):
+        raise TypeError("rescale() to must be a pair of numbers, like (0, 1)")
+    low, high = to
+    x = col(x) if isinstance(x, str) else Expr(_node(x))
+    smallest, spread = min(x, na_rm=True), max(x, na_rm=True) - min(x, na_rm=True)
+    return if_else(
+        spread == 0,
+        x * 0 + (low + high) / 2,
+        low + (x - smallest) / spread * (high - low),
+    )
 
 
 def n_distinct(*values: Any, na_rm: bool = False) -> Expr:

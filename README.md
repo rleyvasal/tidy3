@@ -205,7 +205,9 @@ gapminder
 ## Hand off to scikit-learn, NumPy, and pandas
 
 tidy3 does the cleaning and scaling, `to_numpy()` hands scikit-learn a plain
-matrix, and the model's output comes straight back as a column. Here k-means
+matrix, and the model's output comes straight back as a column. `scale()` is
+R's z-score and `rescale(to=(0, 1))` is min-max scaling; both skip missing
+values and work by group. Here k-means
 finds three groups in the penguins' bill and flipper sizes:
 
 ```python notest
@@ -215,7 +217,7 @@ features = ["bill_length_mm", "bill_depth_mm", "flipper_length_mm"]
 complete = penguins >> drop_na(all_of(features)) >> compute()
 
 X = complete
->> mutate(across(all_of(features), lambda x: (x - mean(x)) / sd(x)))   # R's scale()
+>> mutate(across(all_of(features), scale))
 >> to_numpy(columns = features)
 
 kmeans = KMeans(n_clusters=3, n_init=10, random_state=1).fit(X)
@@ -236,6 +238,13 @@ clustered >> count(species, cluster)
 │ Chinstrap ┆ 3       ┆ 63  │
 │ Gentoo    ┆ 2       ┆ 123 │
 └───────────┴─────────┴─────┘
+```
+
+Note: Use custom normalizations as follows
+
+```python notest
+z_score = lambda x: (x - mean(x)) / sd(x)
+complete >> mutate(across(all_of(features), z_score))
 ```
 
 The clusters match the species for 332 of 342 penguins. The centres, in
