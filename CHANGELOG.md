@@ -4,6 +4,18 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.7.3 — 2026-10-14
+
+Scaling helpers for handing features to scikit-learn.
+
+### Added
+
+- `scale(x, center=True, scale=True)` standardises a column like R's
+  `scale()`, and `rescale(x, to=(0, 1))` min-max scales it like
+  `scales::rescale()`. Both skip missing values, work by group, and return a
+  plain column. A constant column gives NaN from `scale()` and the middle of
+  `to` from `rescale()`, as in R. The README's k-means example uses `scale`.
+
 ## 0.7.2 — 2026-10-10
 
 Plot layers on their own lines in exported notebooks, and a README that
