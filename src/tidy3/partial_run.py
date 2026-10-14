@@ -275,6 +275,99 @@ def _wrap_pipe_statements(text: str) -> str | None:
     return rewritten
 
 
+def join_broken_pipe(source: str) -> str | None:
+    """Join a broken pipe's lines with ``\\`` so Python reports the real error.
+
+    :func:`maybe_rewrite_cell` will not wrap a pipe that holds a mistake (an
+    unclosed bracket, a missing argument), so Python would stop at the first
+    indented ``>>`` with ``IndentationError: unexpected indent``. Joined
+    with backslashes, the pipe reaches Python as one statement and the error
+    names the real line and column. Comments on the joined lines are dropped,
+    since nothing may follow a backslash. Line numbers are unchanged.
+
+    Returns ``None`` when *source* parses, is not a pipe, or has nothing to
+    join. Like :func:`_wrap_pipe_statements`, only top-level pipes are joined.
+    """
+    if not source or ">>" not in source:
+        return None
+    text = source.strip("\n")
+    stripped = text.lstrip()
+    if stripped.startswith(("%", "!", "?")) or not looks_like_tidy_pipe(text):
+        return None
+    try:
+        ast.parse(text)
+        return None
+    except SyntaxError:
+        pass
+
+    lines = text.split("\n")
+    shift = [
+        len(line) - len(line.lstrip())
+        if line.lstrip().startswith((">>", "+"))
+        else 0
+        for line in lines
+    ]
+    analysed = "\n".join(line[cut:] for line, cut in zip(lines, shift))
+    # Per 0-based row: bracket depth after the row, and where its comment
+    # starts. Rows the tokenizer never reached stay unknown.
+    end_depth: dict[int, int] = {}
+    comment: dict[int, int] = {}
+    in_string: set[int] = set()  # rows a multi-line string runs past
+    depth = 0
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(analysed).readline):
+            row = token.start[0] - 1
+            if token.string in _OPENERS:
+                depth += 1
+            elif token.string in _CLOSERS:
+                depth = max(depth - 1, 0)  # Python reports the stray closer
+            elif token.type == tokenize.COMMENT:
+                comment[row] = token.start[1] + shift[row]
+            in_string.update(range(row, token.end[0] - 1))
+            end_depth[token.end[0] - 1] = depth
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        pass
+
+    joins: list[int] = []  # rows that get a trailing backslash
+    previous: int | None = None  # last code row
+    top = piped = False
+    start_depth = 0
+    for row, line in enumerate(lines):
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        continues = start_depth == 0 and (
+            stripped.startswith(">>") or (stripped.startswith("+") and piped)
+        )
+        if continues and top and previous is not None:
+            joins.extend(range(previous, row))
+        elif start_depth == 0 and not continues:
+            top, piped = line == stripped, False
+        piped = piped or ">>" in line
+        if row not in end_depth or row in in_string:
+            break
+        previous, start_depth = row, end_depth[row]
+
+    # IPython runs transformers twice (cleanup and post), so skip rows a
+    # first pass already joined.
+    joins = [
+        row
+        for row in joins
+        if not lines[row][: comment.get(row, len(lines[row]))].rstrip().endswith("\\")
+    ]
+    if not joins:
+        return None
+    for row in joins:
+        line = lines[row]
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            lines[row] = "\\"
+        else:
+            lines[row] = line[: comment.get(row, len(line))].rstrip() + " \\"
+    leading = source[: len(source) - len(source.lstrip("\n"))]
+    return leading + "\n".join(lines) + "\n"
+
+
 def maybe_rewrite_cell(source: str) -> str | None:
     """If *source* is invalid Python but a tidy3 pipe, return rewritten source.
 

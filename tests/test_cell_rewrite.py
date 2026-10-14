@@ -168,3 +168,42 @@ def test_rewrite_leaves_pipes_inside_blocks_alone():
 def test_rewrite_ignores_pipe_text_inside_strings():
     out = maybe_rewrite_cell('s = """\n>> not code\n"""\ntidy(cars)\n>> select("mpg")\n')
     assert out.splitlines()[:3] == ['s = """', ">> not code", '"""']
+
+
+def _syntax_error(source: str) -> SyntaxError:
+    with pytest.raises(SyntaxError) as info:
+        ast.parse("".join(tidy3_input_transformer(source.splitlines(keepends=True))))
+    return info.value
+
+
+def test_broken_pipe_reports_the_real_error_not_indentation():
+    error = _syntax_error(
+        "frame\n"
+        "    >> mutate(x = 1)\n"
+        "    >> mutate(across(cols, )   # R's scale()\n"
+        '    >> select("x")\n'
+    )
+    assert not isinstance(error, IndentationError)
+    assert (error.lineno, error.offset) == (3, 14)  # the unclosed "mutate("
+    assert "never closed" in error.msg
+
+
+def test_broken_pipe_points_inside_multiline_arguments():
+    error = _syntax_error(
+        "out = frame\n    >> mutate(\n        x = ,\n    )  # done\n\n    >> f()\n"
+    )
+    assert not isinstance(error, IndentationError)
+    assert error.lineno == 3
+
+
+def test_broken_pipe_join_is_idempotent():
+    # IPython applies the transformer as both a cleanup and a post transform.
+    once = tidy3_input_transformer(["frame\n", "    >> f(x = )  # c\n", "\n", "    >> g()\n"])
+    assert tidy3_input_transformer(once) == once
+
+
+def test_broken_pipe_inside_a_block_is_left_alone():
+    from tidy3.partial_run import join_broken_pipe
+
+    assert join_broken_pipe("if True:\n    frame\n    >> f(\n") is None
+    assert join_broken_pipe("x = 1 +\n") is None

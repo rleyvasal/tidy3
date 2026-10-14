@@ -99,10 +99,14 @@ def tidy3_input_transformer(lines: list[str]) -> list[str]:
     """Rewrite multi-line tidy3 ``>>`` pipes (cells *and* run-selection)."""
     if not lines:
         return lines
-    from tidy3.partial_run import maybe_rewrite_cell
+    from tidy3.partial_run import join_broken_pipe, maybe_rewrite_cell
 
     text = _lines_to_text(lines)
     rewritten = maybe_rewrite_cell(text)
+    if rewritten is None:
+        # A broken pipe: join it anyway so Python's error names the real
+        # mistake, not an IndentationError at the first ``>>``.
+        rewritten = join_broken_pipe(text)
     if rewritten is None:
         return lines
     return _text_to_lines(rewritten)
@@ -133,9 +137,11 @@ def tidy3_craft_transform(source: str) -> str:
         from tidy3.masking import rewrite_backticks
 
         text = rewrite_backticks(text)
-    from tidy3.partial_run import maybe_rewrite_cell
+    from tidy3.partial_run import join_broken_pipe, maybe_rewrite_cell
 
     rewritten = maybe_rewrite_cell(text)
+    if rewritten is None:
+        rewritten = join_broken_pipe(text)
     return rewritten if rewritten is not None else text
 
 
