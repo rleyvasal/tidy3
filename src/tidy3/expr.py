@@ -862,6 +862,10 @@ def _compile_pl(node: tuple) -> Any:
             key: value[1] if value[0] == "lit" else kwargs[key]
             for key, value in raw_kwargs.items()
         }
+        if name.startswith("str_"):
+            from tidy3.stringr import compile_polars
+
+            return compile_polars(name, args, literal_kwargs)
         if name == "row_number":
             return (
                 args[0].rank(method="ordinal", descending=descending)

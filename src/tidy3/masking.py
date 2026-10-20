@@ -177,6 +177,15 @@ _FIRST_COLUMN_ARG = frozenset(
         "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist",
         "ntile", "case_match", "recode", "recode_values", "replace_values",
         "replace_when", "any", "all", "abs", "round", "order_by", "with_order",
+        "str_detect", "str_starts", "str_ends", "str_count", "str_length",
+        "str_sub", "str_trunc", "str_replace", "str_replace_all", "str_remove",
+        "str_remove_all", "str_replace_na", "str_to_upper", "str_to_lower",
+        "str_to_title", "str_to_sentence", "str_trim", "str_squish", "str_pad",
+        "str_dup", "str_extract", "str_split", "str_split_i", "str_flatten",
+        "str_like", "str_ilike", "str_equal", "str_locate", "str_locate_all",
+        "str_width", "str_sub_all", "word", "str_wrap", "str_extract_all",
+        "str_match", "str_match_all", "str_split_fixed", "str_flatten_comma",
+        "str_escape", "str_conv",
     }
 )
 # tidyselect helpers whose arguments are vectors of names from the
@@ -186,7 +195,7 @@ _ENV_ARGS = frozenset({"all_of", "any_of"})
 _ALL_COLUMN_ARGS = frozenset(
     {
         "coalesce", "if_else", "near", "na_if", "n_distinct", "between",
-        "consecutive_id", "when_any", "when_all",
+        "consecutive_id", "when_any", "when_all", "str_c",
     }
 )
 

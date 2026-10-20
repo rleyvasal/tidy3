@@ -677,6 +677,70 @@ small metadata query as described above. `slice_sample(weight_by=...)`,
 including `replace=True`, is supported on both backends. Group-context helpers
 and additional vector helpers remain future phases.
 
+### Strings (stringr)
+
+All of stringr's functions are here, and they run inside any verb on either
+backend. Patterns are regular expressions; wrap one in `fixed()` (or
+`coll()`) to match text as written, use `regex(..., ignore_case=True,
+multiline=, dotall=, comments=)` for flags, and `boundary("word")` or
+`boundary("character")` to work in words or characters. Missing values stay
+missing, as in R.
+
+```python
+cars
+>> filter(str_starts(model, "Merc"))
+>> mutate(
+    make = word(model, 1),
+    short = str_trunc(model, 10),
+    label = str_glue("{make} gets {mpg} mpg"),
+)
+```
+
+| Task | Helpers |
+|---|---|
+| Detect | `str_detect`, `str_starts`, `str_ends` (each takes `negate=`), `str_count`, `str_like`, `str_ilike` (SQL `LIKE`), `str_equal` |
+| Locate | `str_locate` (a `{start, end}` struct), `str_locate_all` (a list of them), `invert_match` |
+| Length and pieces | `str_length`, `str_width`, `str_sub` (1-based, negatives count from the end), `str_sub_all`, `str_trunc`, `word` |
+| Replace | `str_replace`, `str_replace_all` (`\\1` for a capture group; a dict `{pattern: replacement}` applies several), `str_remove`, `str_remove_all`, `str_replace_na` |
+| Case | `str_to_upper`, `str_to_lower`, `str_to_title`, `str_to_sentence` |
+| Whitespace and layout | `str_trim`, `str_squish`, `str_pad`, `str_dup`, `str_wrap` |
+| Extract and match | `str_extract` (`group=`), `str_extract_all`, `str_match` (a struct of `match` and each group), `str_match_all` |
+| Split | `str_split` (a list column, `n=`), `str_split_fixed` (exactly `n` pieces), `str_split_i`, `str_split_1` |
+| Combine | `str_c` (row by row, `sep=`), `str_glue` (`{column}` templates), `str_glue_data`, and the aggregates `str_flatten` (`collapse=`, `last=`, `na_rm=`) and `str_flatten_comma` |
+| Other | `str_escape`, `str_conv` (decode bytes) |
+
+Struct results spread into columns with `unnest_wider()`:
+`mutate(loc = str_locate(x, "an")) >> unnest_wider(loc)` gives `start` and
+`end`.
+
+Given a list or Series instead of a column, every helper runs at once and
+returns a list, as stringr does on a character vector:
+`str_detect(["apple", "banana"], "an")` is `[False, True]`. The helpers that
+only make sense on a vector work that way only: `str_subset`, `str_which`,
+`str_sort`, `str_order` (`numeric=True` puts `"x9"` before `"x10"`),
+`str_unique`, and `str_view`, which prints matches in `<>`. In a pipe, use
+`filter(str_detect(...))`, `arrange()`, and `distinct()` instead.
+`str_which` and `str_order` return 1-based positions, as in R.
+
+How this differs from R:
+
+- In `str_c`, a quoted string is text, not a column: name columns bare in a
+  notebook or with `col()` in a script. In `str_equal`, a quoted second
+  argument is text. Elsewhere a quoted first argument is a column name, as
+  in `mean("x")`.
+- `str_glue` fills in names only (`{price}`, not `{price * 2}`); a column
+  wins over a notebook variable of the same name, as in dplyr.
+- `str_split_fixed` returns a list column of `n` pieces rather than a matrix.
+- `coll()` matches literal text without locale rules; `boundary()` supports
+  `"character"` and `"word"` only.
+- On Polars, regular expressions use Rust's syntax, which has no
+  look-around. `str_locate_all`, `str_match_all`, `str_width`, `str_wrap`,
+  `str_conv`, `word` with a regex separator, and `str_split` with both a regex
+  and `n=` run row by row in Python, so they are slower on large frames.
+- `str_to_title("don't")` gives `"Don'T"` on both backends (R: `"Don't"`).
+- There is no `str_sub<-`; build the new string with `str_c()` and
+  `str_sub()`. `str_interp` (deprecated in stringr) is not included.
+
 ### Performance controls
 
 Grouped `mutate()` expressions automatically reuse embedded or repeated

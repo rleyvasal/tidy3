@@ -4,6 +4,19 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- stringr: every `str_*` function, plus `word`, `invert_match`, and the
+  pattern modifiers `fixed()`, `regex()`, `coll()`, and `boundary()`. They
+  work in any verb on both backends, so `cars >> filter(str_starts(name,
+  "chev"))` reads as in R. Given a list or Series, a helper runs at once and
+  returns a list; `str_subset`, `str_which`, `str_sort`, `str_order`,
+  `str_unique`, and `str_view` work on lists only. `str_locate` and
+  `str_match` return struct columns for `unnest_wider()`. The reference lists
+  where tidy3 differs from R.
+
 ## 0.7.4 — 2026-10-14
 
 Clearer errors from broken pipes in notebooks.

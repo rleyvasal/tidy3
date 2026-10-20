@@ -242,6 +242,11 @@ def _ev_func(
     args = tuple(_ev(arg, df, groups, mode) for arg in raw_args)
     kwargs = {key: _ev(value, df, groups, mode) for key, value in raw_kwargs.items()}
 
+    if name.startswith("str_"):
+        from tidy3.stringr import eval_pandas
+
+        return eval_pandas(name, args, kwargs, df, groups, mode)
+
     if name == "cur_group_id":
         group_names = tuple(kwargs.get("groups", ()))
         if not group_names:
@@ -722,7 +727,7 @@ def _has_agg(x) -> bool:
     if (
         x[0] == "n"
         or (x[0] == "call" and x[1] in _AGG)
-        or (x[0] == "func" and x[1] in {"n_distinct", "nth"})
+        or (x[0] == "func" and x[1] in {"n_distinct", "nth", "str_flatten"})
     ):
         return True
     if x[0] == "call":
