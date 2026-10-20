@@ -826,6 +826,21 @@ bridge would be needed for a direct device-to-PyTorch handoff.
 - **Grouped semantics are dplyr's**: after `group_by`, `mutate`/`filter`/
   `slice_*`/`sample_n`/`head` evaluate **per group** (Polars window `.over`).
   `summarise` aggregates per group.
+- **Missing columns fail at the verb**: a verb that uses a column the frame
+  lacks raises `ColumnNotFoundError` as soon as the pipe is built, even on a
+  lazy frame (only the schema is resolved; no rows are read). The message
+  names the verb, suggests close names, and lists the columns:
+
+  ```text
+  mutate(): column 'bill_length' does not exist.
+  Did you mean 'bill_length_mm'?
+  Columns: 'species', 'island', 'bill_length_mm', 'bill_depth_mm', 'flipper_length_mm', 'body_mass_g', 'sex', 'year'
+  ```
+
+  It is also a `KeyError` and a Polars `ColumnNotFoundError`. Other errors
+  keep their own type and message; on Python 3.11+ a note names the verb.
+  A preview that fails while computing rows shows the error's first line,
+  with the full error and query plan under **Technical details**.
 - **Display is self-contained**: tables carry inline styles (no `<style>`
   block), so they render identically in local cells, republished `%gpu`
   output, and sslive exports. Under `%gpu`, bare polars DataFrames are

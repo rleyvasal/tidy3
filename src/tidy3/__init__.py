@@ -51,6 +51,7 @@ from tidy3.expr import (
     var,
 )
 from tidy3.expr import sum as sum  # noqa: A001
+from tidy3.errors import ColumnNotFoundError
 from tidy3.eda import colnames, describe, dim, dtypes, names, ncol, nrow, summary
 from tidy3.groups import (
     group_data,
@@ -295,6 +296,7 @@ from tidy3.__version__ import __version__
 
 __all__ = [
     "TidyFrame",
+    "ColumnNotFoundError",
     "JoinCondition",
     "JoinSpec",
     "Selector",

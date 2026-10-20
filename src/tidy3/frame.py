@@ -1283,15 +1283,25 @@ class TidyFrame:
     def __repr__(self) -> str:
         try:
             return self._preview_text()
-        except Exception as e:  # pragma: no cover
-            return f"<TidyFrame groups={self._groups!r} (preview failed: {e})>"
+        except Exception as e:
+            from tidy3.errors import preview_error_text
+
+            return preview_error_text(e)
 
     def _repr_html_(self) -> str:
         """Inline-styled table — survives CRAFT's remote republish (no <style>)."""
         try:
             pdf, total = self._preview_parts()
-        except Exception as e:  # pragma: no cover
-            return f"<pre>TidyFrame preview failed: {e}</pre>"
+        except Exception as e:
+            from tidy3.errors import preview_error_html
+
+            plan = None
+            if self.backend != "pandas":
+                try:
+                    plan = self._lf.explain(optimized=False)
+                except Exception:
+                    plan = None
+            return preview_error_html(e, plan)
         from tidy3.display import df_to_html
 
         return df_to_html(

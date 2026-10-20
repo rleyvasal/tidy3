@@ -119,7 +119,18 @@ class Verb:
 
         token = _FRAME_COLUMNS.set(columns)
         try:
-            return self._fn(other)
+            result = self._fn(other)
+            if isinstance(result, TidyFrame) and result._backend != "pandas":
+                # Resolve the lazy plan's schema (no rows are read) so a
+                # missing column fails here, naming this verb, not at display.
+                result._lf.collect_schema()
+            return result
+        except Exception as error:
+            translated = _column_error(self.name, error, other)
+            if translated is None:
+                _note_verb(error, self.name)
+                raise
+            raise translated from None
         finally:
             _FRAME_COLUMNS.reset(token)
 
@@ -129,6 +140,29 @@ class Verb:
 
     def __repr__(self) -> str:
         return f"<tidy3.Verb {self.name}>"
+
+
+def _note_verb(error: Exception, verb: str) -> None:
+    """Name the verb under a Polars error, keeping its type and message (3.11+)."""
+    if not isinstance(error, pl.exceptions.PolarsError) or not hasattr(error, "add_note"):
+        return
+    # A verb built on others (count() runs summarise()) re-raises last, so
+    # the verb the user wrote replaces any inner verb's note.
+    notes = [n for n in getattr(error, "__notes__", []) if not n.startswith("tidy3: raised in ")]
+    error.__notes__ = [*notes, f"tidy3: raised in {verb}()"]
+
+
+def _column_error(verb: str, error: Exception, frame: Any) -> Any:
+    """*error* as tidy3's ColumnNotFoundError for *verb*, or None to re-raise it."""
+    from tidy3.errors import column_error
+
+    if not isinstance(error, (KeyError, pl.exceptions.ColumnNotFoundError)):
+        return None
+    try:
+        columns = _frame_columns(frame)
+    except Exception:
+        return None
+    return column_error(verb, error, columns)
 
 
 def _windowed(expr: Any, groups: list[str] | None) -> Any:

@@ -4,6 +4,27 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- A verb that uses a missing column raises `tidy3.ColumnNotFoundError` when
+  the pipe is built, on both backends, naming the verb, suggesting close
+  names, and listing the frame's columns. On Polars, `mutate`, `filter`, and
+  `summarise` used to accept the name and fail only at display with Polars'
+  internal plan text; on pandas the error was a bare `KeyError`. The new
+  error is still a `KeyError` and a Polars `ColumnNotFoundError`. Checking
+  resolves the lazy plan's schema only; no rows are read.
+- Other errors from a verb keep their type and message; on Python 3.11+ a
+  note names the verb (`tidy3: raised in mutate()`).
+
+### Fixed
+
+- A preview that fails while computing rows shows the error's type and first
+  line instead of the whole message; the HTML table folds the full error and
+  query plan under "Technical details". The error text is now escaped in
+  HTML, where Polars' `<---` markers and `<` in data could garble it.
+
 ## 0.7.6 — 2026-10-20
 
 Previews show the whole frame's shape.
