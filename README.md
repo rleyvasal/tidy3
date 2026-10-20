@@ -98,7 +98,9 @@ A pipe is a plan, not a computation. Polars optimises the whole plan, reads
 only the columns it uses, and pushes filters into the file scan. Rows are
 computed when something needs them:
 
-- a preview (a notebook table shows its first rows only),
+- a preview: a notebook table shows its first rows, and its shape counts
+  all of them, as a tibble does (`… 20 more rows`). On a very large query,
+  `options(preview_count=False)` skips the count and shows `?`,
 - a plot, `to_numpy()`, or `write_parquet()` / `write_csv()`,
 - `collect()`, which returns a Polars, pandas, Arrow, or NumPy result,
 - `compute()`, which runs the plan so far and keeps piping from the

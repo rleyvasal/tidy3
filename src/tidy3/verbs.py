@@ -4397,7 +4397,7 @@ def peek(n: int | None = None) -> Verb:
         from tidy3.options import get_options
 
         rows = get_options().preview_rows if n is None else n
-        print(tf.preview(rows))
+        print(tf._preview_text(rows))
         return tf
 
     return Verb(_apply, "peek")

@@ -60,9 +60,16 @@ def df_to_html(
     caption: str | None = None,
     max_rows: int = 25,
     max_cols: int = 20,
+    total_rows: int | None = None,
+    rows_unknown: bool = False,
 ) -> str:
-    """Render a polars or pandas frame as an HTML table, all styling inline."""
+    """Render a polars or pandas frame as an HTML table, all styling inline.
+
+    *df* may be the first rows of a larger frame: *total_rows* is then the
+    whole frame's row count for the shape, or *rows_unknown* shows ``?``.
+    """
     height, width, names, dtypes, rows_fn = _adapt(df)
+    total = height if total_rows is None else total_rows
     cols = list(range(width))
     col_gap = None
     if width > max_cols:
@@ -85,7 +92,8 @@ def df_to_html(
     head_tr = _tr([f"<b>{_fmt(names[i])}</b>" for i in cols], f"{_CELL};{_RULE}")
     dtype_tr = _tr([_fmt(dtypes[i]) for i in cols], f"{_CELL};opacity:.55;{_RULE}")
     body = [_tr([_fmt(r[i]) for i in cols], _CELL) for r in rows]
-    if height > n_rows:
+    more = None if rows_unknown else total - n_rows
+    if rows_unknown or more > 0:
         body.append(_tr(["…"] * len(cols), f"{_CELL};opacity:.55"))
 
     cap = ""
@@ -95,8 +103,15 @@ def df_to_html(
             f"{_html.escape(caption)}</div>"
         )
     shape = (
-        f"<small style='font:{_MONO};opacity:.65'>shape: ({height}, {width})</small>"
+        f"<small style='font:{_MONO};opacity:.65'>"
+        f"shape: ({'?' if rows_unknown else total}, {width})</small>"
     )
+    footer = ""
+    if rows_unknown or more > 0:
+        label = "more rows" if more is None else f"{more:,} more row" + ("s" if more != 1 else "")
+        footer = (
+            f"<small style='font:{_MONO};opacity:.65'>… {label}</small>"
+        )
     return (
         "<div style='overflow-x:auto'>"
         + cap
@@ -105,7 +120,9 @@ def df_to_html(
         + head_tr
         + dtype_tr
         + "".join(body)
-        + "</table></div>"
+        + "</table>"
+        + footer
+        + "</div>"
     )
 
 

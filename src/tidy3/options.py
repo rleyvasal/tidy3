@@ -9,6 +9,9 @@ from dataclasses import dataclass, replace
 class Options:
     preview_rows: int = 10
     preview: bool = True
+    # Count all rows for the shape shown above a preview. Off: "?" and no
+    # full pass over a lazy query (as dbplyr shows "??" for database tables).
+    preview_count: bool = True
     backend: str = "polars"  # default engine for tidy(): "polars" | "pandas"
 
 

@@ -40,3 +40,38 @@ def test_partial_run_preview_on_large(tmp_path=None):
     prev = tf.preview(5)
     assert prev.height == 5
     assert (prev["mpg"] > 100).all()
+
+
+def test_preview_shape_is_the_whole_frame_like_a_tibble():
+    # A filtered lazy frame shows 10 rows, but its shape is all 30 matches.
+    data = {"name": [f"chevrolet {i}" for i in range(30)] + ["ford"] * 5}
+    for backend in ("polars", "pandas"):
+        tf = tidy(data, backend=backend) >> filter(col("name") != "ford")
+        text = repr(tf)
+        assert "shape: (30, 1)" in text
+        assert text.endswith("… 20 more rows")
+        html = tf._repr_html_()
+        assert "shape: (30, 1)" in html
+        assert "… 20 more rows" in html
+
+
+def test_preview_without_more_rows_has_no_footer():
+    tf = tidy({"x": [1, 2, 3]})
+    assert "shape: (3, 1)" in repr(tf)
+    assert "more row" not in repr(tf)
+    assert "more row" not in tf._repr_html_()
+    tf = tidy({"x": list(range(11))})
+    assert repr(tf).endswith("… 1 more row")
+
+
+def test_preview_count_off_shows_unknown_rows():
+    tf = tidy({"x": list(range(30))}) >> filter(col("x") >= 0)
+    options(preview_count=False)
+    try:
+        assert "shape: (?, 1)" in repr(tf)
+        assert repr(tf).endswith("… more rows")
+        assert "shape: (?, 1)" in tf._repr_html_()
+        # Few enough rows to see them all: the count is known without a pass.
+        assert "shape: (3, 1)" in repr(tidy({"x": [1, 2, 3]}))
+    finally:
+        options(preview_count=True)

@@ -1239,11 +1239,40 @@ class TidyFrame:
 
     # ── display (match Polars table formatting) ─────────────────────────
     def _preview_df(self) -> Any:
+        return self._preview_parts()[0]
+
+    def _preview_parts(self, n: int | None = None) -> tuple[Any, int | None]:
+        """The first *n* rows and the total row count (None when not counted).
+
+        Like a tibble, the shape is the whole frame's, not the preview's.
+        With ``options(preview_count=False)`` a lazy frame is not counted.
+        """
         opts = get_options()
-        n = opts.preview_rows if opts.preview else 10
+        if n is None:
+            n = opts.preview_rows if opts.preview else 10
         if self.backend == "pandas":
-            return self._data.head(n)
-        return self._lf.head(n).collect()
+            return self._data.head(n), len(self._data)
+        if opts.preview_count:
+            head, count = pl.collect_all([self._lf.head(n), self._lf.select(pl.len())])
+            return head, int(count.item())
+        # One extra row tells whether more rows follow.
+        head = self._lf.head(n + 1).collect()
+        return head.head(n), (head.height if head.height <= n else None)
+
+    def _preview_text(self, n: int | None = None) -> str:
+        pdf, total = self._preview_parts(n)
+        shown = len(pdf)
+        lines = repr(pdf).splitlines()
+        if lines and lines[0].startswith("shape:"):
+            lines = lines[1:]
+        rows = "?" if total is None else f"{total}"
+        out = [self._caption(), f"shape: ({rows}, {pdf.shape[1]})", *lines]
+        if total is None:
+            out.append("… more rows")
+        elif total > shown:
+            more = total - shown
+            out.append(f"… {more:,} more row{'s' if more != 1 else ''}")
+        return "\n".join(out)
 
     def _caption(self) -> str:
         be = ", pandas" if self.backend == "pandas" else ""
@@ -1253,21 +1282,24 @@ class TidyFrame:
 
     def __repr__(self) -> str:
         try:
-            pdf = self._preview_df()
+            return self._preview_text()
         except Exception as e:  # pragma: no cover
             return f"<TidyFrame groups={self._groups!r} (preview failed: {e})>"
-        # Same text table style as a bare polars/pandas DataFrame
-        return f"{self._caption()}\n{pdf!r}"
 
     def _repr_html_(self) -> str:
         """Inline-styled table — survives CRAFT's remote republish (no <style>)."""
         try:
-            pdf = self._preview_df()
+            pdf, total = self._preview_parts()
         except Exception as e:  # pragma: no cover
             return f"<pre>TidyFrame preview failed: {e}</pre>"
         from tidy3.display import df_to_html
 
-        return df_to_html(pdf, caption=self._caption())
+        return df_to_html(
+            pdf,
+            caption=self._caption(),
+            total_rows=total,
+            rows_unknown=total is None,
+        )
 
     # NOTE: no _repr_mimebundle_ — SolveIt renders text/plain when a
     # mimebundle is present; separate __repr__/_repr_html_ (like polars

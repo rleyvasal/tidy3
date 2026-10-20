@@ -4,6 +4,18 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.7.6 — 2026-10-20
+
+Previews show the whole frame's shape.
+
+### Fixed
+
+- A preview's shape is the whole frame's, not the preview's: a filter that
+  keeps 30 rows shows `shape: (30, 2)` above its first 10 and ends with
+  `… 20 more rows`, as a tibble does. It used to say `(10, 2)`. Counting
+  runs the query to the end; `options(preview_count=False)` skips it and
+  shows `?` for the rows. `peek()` shows the same shape.
+
 ## 0.7.5 — 2026-10-20
 
 String functions from R's stringr.
