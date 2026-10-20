@@ -1117,6 +1117,7 @@ def compile_polars(name: str, args: tuple, kw: dict) -> pl.Expr:
 # ── pandas ──────────────────────────────────────────────────────────────
 
 _NA = pd.NA
+_PANDAS_3 = int(pd.__version__.split(".")[0]) >= 3
 
 
 def _missing(value: Any) -> bool:
@@ -1135,7 +1136,12 @@ def _map_object(series: Any, fn: Any) -> Any:
 
 def _to_str(series: Any) -> Any:
     """A string result in pandas' default string dtype, missing as missing."""
-    return series.astype("str")
+    if _PANDAS_3:
+        return series.astype("str")
+    # pandas 2 has no missing-aware "str" dtype (it would write "<NA>"):
+    # keep text in an object column with None for missing, as pandas 2 does.
+    series = series.astype("string")
+    return series.astype(object).where(series.notna(), None)
 
 
 def _text(value: Any, index: Any) -> Any:
