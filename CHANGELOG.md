@@ -4,7 +4,9 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.7.12 — 2026-10-21
+
+Grouped work no longer runs a Python step per group: tens of thousands of groups take milliseconds instead of seconds, with results unchanged.
 
 ### Changed
 
