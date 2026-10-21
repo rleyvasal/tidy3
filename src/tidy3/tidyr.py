@@ -8,6 +8,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+import numpy as np
 import polars as pl
 
 from tidy3.tidyselect import resolve_selection
@@ -152,17 +153,41 @@ def _pandas_nested_frames(
     if not identifiers:
         return pd.DataFrame({column: [pdf.loc[:, nested].reset_index(drop=True)]})
 
-    body = pdf.loc[:, nested]
-    grouping_key = identifiers[0] if len(identifiers) == 1 else identifiers
-    rows: list[dict[str, Any]] = []
-    for key, positions in pdf.groupby(
-        grouping_key, sort=False, dropna=False, observed=True
-    ).groups.items():
-        key_tuple = key if isinstance(key, tuple) else (key,)
-        row = dict(zip(identifiers, key_tuple))
-        row[column] = body.loc[positions].reset_index(drop=True)
-        rows.append(row)
-    return pd.DataFrame(rows, columns=[*identifiers, column])
+    if not len(pdf):
+        return pd.DataFrame([], columns=[*identifiers, column])
+    keys, frames = nested_frames(pdf, identifiers, nested, sort=False)
+    return pd.DataFrame({**keys, column: frames}, columns=[*identifiers, column])
+
+
+def nested_frames(
+    pdf: Any, keys: list[str], nested: list[str] | None, *, sort: bool
+) -> tuple[dict[str, list[Any]], list[Any]]:
+    """Group keys and one DataFrame per group, built from one sorted copy.
+
+    Rows are sorted by group once and each group's frame is a slice of that
+    copy with a fresh index; copy-on-write keeps the frames independent.
+    Groups come in first-appearance order, or sorted (missing last) when
+    *sort* is true, as ``groupby`` orders them. Key values are each group's
+    first row; a group with no nested columns gets an empty frame of its size.
+    """
+    import pandas as pd
+
+    grouping_key = keys[0] if len(keys) == 1 else keys
+    gid = pdf.groupby(grouping_key, sort=sort, dropna=False, observed=True).ngroup().to_numpy()
+    order = np.argsort(gid, kind="stable")
+    bounds = np.concatenate([[0], np.cumsum(np.bincount(gid))])
+    first = order[bounds[:-1]]
+    key_values = {key: pdf[key].iloc[first].tolist() for key in keys}
+    frames = []
+    if nested:
+        body = pdf.loc[:, nested].iloc[order]
+        for start, stop in zip(bounds[:-1].tolist(), bounds[1:].tolist()):
+            frame = body.iloc[start:stop]
+            frame.index = pd.RangeIndex(stop - start)
+            frames.append(frame)
+    else:
+        frames = [pd.DataFrame(index=range(stop - start)) for start, stop in zip(bounds[:-1].tolist(), bounds[1:].tolist())]
+    return key_values, frames
 
 
 def _is_float_dtype(dtype: Any) -> bool:

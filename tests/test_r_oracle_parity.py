@@ -2115,6 +2115,49 @@ def _right_join_order(backend: str):
     }
 
 
+def _many_groups(backend: str):
+    import tidy3 as t3
+
+    ids = np.arange(1, 901)
+    species = np.array(["Adelie", "Gentoo", "Chinstrap", "Emperor", "King"])[(ids * 3) % 5]
+    mass = (((ids * 13) % 50) * 100).astype(float)
+    p = tidy(
+        pl.DataFrame({
+            "id": ids, "g": (ids * 7) % 97, "species": species,
+            "mass": pl.Series(mass).set(pl.Series(ids % 23 == 0), None), "bill": (ids * 17) % 41 + 0.5,
+        }) if backend == "polars" else pd.DataFrame({
+            "id": ids, "g": (ids * 7) % 97, "species": species,
+            "mass": np.where(ids % 23 == 0, np.nan, mass), "bill": (ids * 17) % 41 + 0.5,
+        }),
+        backend=backend,
+    )
+
+    def levels_of(frame: Any) -> dict[str, Any]:
+        column = frame.collect(as_="pandas")["s"]
+        return {
+            "values": pl.Series([str(v) for v in column.tolist()]),
+            "levels": pl.Series([str(level) for level in column.cat.categories]),
+        }
+
+    grouped = p >> t3.group_by("g")
+    return {
+        "slice_max": grouped >> t3.slice_max("mass", n=1, na_rm=True) >> t3.ungroup() >> t3.arrange("id"),
+        "slice_max_no_ties": grouped >> t3.slice_max("mass", n=2, with_ties=False, na_rm=True) >> t3.ungroup() >> t3.arrange("id"),
+        "slice_min_prop": grouped >> t3.slice_min("bill", prop=0.3) >> t3.ungroup() >> t3.arrange("id"),
+        "slice_head": grouped >> t3.slice_head(n=2) >> t3.ungroup() >> t3.arrange("id"),
+        "slice_tail": grouped >> t3.slice_tail(n=1) >> t3.ungroup() >> t3.arrange("id"),
+        "slice_positions": grouped >> t3.slice(1, 3) >> t3.ungroup() >> t3.arrange("id"),
+        "reframe": p >> t3.reframe(q=t3.median("mass", na_rm=True), k=t3.n(), by="g") >> t3.arrange("g"),
+        "nth": grouped >> t3.summarise(a=t3.nth("mass", 2), b=t3.nth("bill", -1), c=t3.nth("species", 2, order_by="bill")) >> t3.ungroup(),
+        "filter": grouped >> t3.filter(t3.col("bill") > t3.mean("bill")) >> t3.ungroup(),
+        "reorder": levels_of(grouped >> t3.mutate(s=t3.fct_reorder("species", "bill")) >> t3.ungroup()),
+        "reorder_desc": levels_of(grouped >> t3.mutate(s=t3.fct_reorder("species", "bill", desc=True)) >> t3.ungroup()),
+        "infreq": levels_of(grouped >> t3.mutate(s=t3.fct_infreq("species")) >> t3.ungroup()),
+        "relevel": levels_of(grouped >> t3.mutate(s=t3.fct_relevel("species", "King", after=1)) >> t3.ungroup()),
+        "rev": levels_of(grouped >> t3.mutate(s=t3.fct_rev("species")) >> t3.ungroup()),
+    }
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "reshape_metadata": _reshape_metadata,
     "janitor_dupes": _janitor_dupes,
@@ -2202,6 +2245,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "round_grid": _round_grid,
     "factor_combine": _factor_combine,
     "right_join_order": _right_join_order,
+    "many_groups": _many_groups,
     "round_extremes": _round_extremes,
     "string_summaries": _string_summaries,
     "inferred_csv_failures": _inferred_csv_failures,

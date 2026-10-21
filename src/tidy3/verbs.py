@@ -2482,31 +2482,18 @@ def group_nest(*cols: Any, name: str = "data") -> Verb:
         if tf._backend == "pandas":
             import pandas as pd
 
+            from tidy3.tidyr import nested_frames
+
             pdf = tf._pdf
-            grouping_key = keys[0] if len(keys) == 1 else keys
-            # Pre-slice nested columns once; avoid per-group drop(columns=keys).
-            if nested_cols:
-                body = pdf.loc[:, nested_cols]
-            else:
-                body = None
-            rows: list[dict[str, Any]] = []
-            # sort=True: dplyr returns groups sorted by key, missing last.
-            for key, positions in pdf.groupby(
-                grouping_key, sort=True, dropna=False, observed=True
-            ).groups.items():
-                key_tuple = key if isinstance(key, tuple) else (key,)
-                row = dict(zip(keys, key_tuple))
-                if body is None:
-                    row[name] = pd.DataFrame(index=range(len(positions)))
-                else:
-                    # positions is an Index into the original frame.
-                    row[name] = body.loc[positions].reset_index(drop=True)
-                rows.append(row)
+            rows = len(pdf)
+            if rows:
+                # sort=True: dplyr returns groups sorted by key, missing last.
+                values, frames = nested_frames(pdf, keys, nested_cols, sort=True)
             if not rows:
                 empty = {key: pd.Series(dtype=pdf[key].dtype) for key in keys}
                 empty[name] = pd.Series(dtype=object)
                 return tidy(pd.DataFrame(empty), backend="pandas")
-            return tidy(pd.DataFrame(rows), backend="pandas")
+            return tidy(pd.DataFrame({**values, name: frames}), backend="pandas")
 
         if nested_cols:
             # exclude() keeps the plan free of a Python column list rebuild

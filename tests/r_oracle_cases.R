@@ -1184,6 +1184,43 @@ result <- switch(
       swapped=q(right_join(y, x, by="island"))
     )
   },
+  many_groups = {
+    if (!requireNamespace("forcats", quietly=TRUE)) {
+      list(skip=TRUE, reason="forcats is not installed")
+    } else {
+      suppressPackageStartupMessages(library(forcats))
+      q <- function(x) suppressMessages(suppressWarnings(x))
+      # Arithmetic data, identical in R and Python: ~100 groups, ties, NAs.
+      id <- 1:900
+      p <- tibble(
+        id=id,
+        g=(id * 7L) %% 97L,
+        species=c("Adelie", "Gentoo", "Chinstrap", "Emperor", "King")[(id * 3) %% 5 + 1],
+        mass=ifelse(id %% 23 == 0, NA, ((id * 13) %% 50) * 100),
+        bill=(id * 17) %% 41 + 0.5
+      )
+      levels_of <- function(x) list(values=I(as.character(x)), levels=I(levels(x)))
+      # tidy3 lists grouped slice rows in first-appearance group order and
+      # dplyr in sorted group order; compare which rows, ordered by id.
+      by_id <- function(x) x |> ungroup() |> arrange(id)
+      list(
+        slice_max=by_id(q(p |> group_by(g) |> slice_max(mass, n=1, na_rm=TRUE))),
+        slice_max_no_ties=by_id(q(p |> group_by(g) |> slice_max(mass, n=2, with_ties=FALSE, na_rm=TRUE))),
+        slice_min_prop=by_id(q(p |> group_by(g) |> slice_min(bill, prop=0.3))),
+        slice_head=by_id(q(p |> group_by(g) |> slice_head(n=2))),
+        slice_tail=by_id(q(p |> group_by(g) |> slice_tail(n=1))),
+        slice_positions=by_id(q(p |> group_by(g) |> slice(c(1, 3)))),
+        reframe=q(p |> reframe(q=median(mass, na.rm=TRUE), k=n(), .by=g) |> arrange(g)),
+        nth=q(p |> group_by(g) |> summarise(a=nth(mass, 2), b=nth(bill, -1), c=nth(species, 2, order_by=bill)) |> ungroup()),
+        filter=q(p |> group_by(g) |> filter(bill > mean(bill)) |> ungroup()),
+        reorder=levels_of(q(p |> group_by(g) |> mutate(s=fct_reorder(species, bill)) |> ungroup())$s),
+        reorder_desc=levels_of(q(p |> group_by(g) |> mutate(s=fct_reorder(species, bill, .desc=TRUE)) |> ungroup())$s),
+        infreq=levels_of(q(p |> group_by(g) |> mutate(s=fct_infreq(species)) |> ungroup())$s),
+        relevel=levels_of(q(p |> group_by(g) |> mutate(s=fct_relevel(species, "King", after=1)) |> ungroup())$s),
+        rev=levels_of(q(p |> group_by(g) |> mutate(s=fct_rev(species)) |> ungroup())$s)
+      )
+    }
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 

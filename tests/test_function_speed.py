@@ -165,3 +165,121 @@ def test_factor_on_a_lazy_scan_builds_quickly(tmp_path):
     read = _best(lambda: pl.scan_csv(path).collect())
     budget = max(RATIO * read, FLOOR)
     assert build <= budget, f"fct_infreq() build took {build * 1000:.0f} ms; budget {budget * 1000:.0f} ms"
+
+
+# ── many groups ─────────────────────────────────────────────────────────
+# Real tables have tens of thousands of customers, stores, or ids. Per-group
+# Python loops cost about 0.1-0.3 ms a group, so 20,000 groups took seconds
+# where a native pass takes milliseconds.
+
+GROUP_ROWS = 100_000
+GROUPS = 20_000
+
+
+@pytest.fixture(scope="module")
+def grouped_data() -> pl.DataFrame:
+    rng = np.random.default_rng(1)
+    index = np.arange(GROUP_ROWS)
+    return pl.DataFrame(
+        {
+            "g": index % GROUPS,
+            "species": np.array(["Adelie", "Gentoo", "Chinstrap"])[index % 3],
+            "mass": rng.normal(4200, 800, GROUP_ROWS).round(-1),
+            "bill": rng.normal(44, 5, GROUP_ROWS),
+        }
+    )
+
+
+def _grouped_frame(data: pl.DataFrame, backend: str):
+    return tidy(data if backend == "polars" else data.to_pandas(), backend=backend)
+
+
+VECTORIZED_SLICES: list[tuple[str, Callable[[], Any]]] = [
+    ("slice_max", lambda: t3.slice_max("mass", n=1)),
+    ("slice_min", lambda: t3.slice_min("mass", prop=0.5)),
+    ("slice_head", lambda: t3.slice_head(n=2)),
+    ("slice_tail", lambda: t3.slice_tail(n=1)),
+    ("slice", lambda: t3.slice(1, 3)),
+    ("slice_sample", lambda: t3.slice_sample(n=1, seed=1)),
+    ("sample_n", lambda: t3.sample_n(1, seed=1)),
+]
+
+
+@pytest.mark.parametrize("name, verb", VECTORIZED_SLICES, ids=[case[0] for case in VECTORIZED_SLICES])
+def test_pandas_grouped_slices_skip_the_per_group_loop(monkeypatch, name, verb):
+    from tidy3 import pandas_engine
+
+    def per_group(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError(f"{name}() split the frame group by group")
+
+    monkeypatch.setattr(pandas_engine, "_group_pieces", per_group)
+    frame = tidy({"g": [1, 1, 2, 2, 2], "mass": [3.0, 5.0, 4.0, 4.0, 1.0]}, backend="pandas")
+    (frame >> t3.group_by("g") >> verb()).collect()
+
+
+def test_pandas_one_value_reframe_skips_the_per_group_loop(monkeypatch):
+    from tidy3 import pandas_engine
+
+    monkeypatch.setattr(pandas_engine, "_group_pieces", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+    frame = tidy({"g": [1, 1, 2], "mass": [3.0, 5.0, 4.0]}, backend="pandas")
+    (frame >> t3.reframe(m=t3.median("mass"), k=t3.n(), by="g")).collect()
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda f: f >> t3.group_by("g") >> t3.summarise(m=t3.mean("mass"), s=t3.sum("mass", na_rm=True, min_count=2)),
+        lambda f: f >> t3.group_by("g") >> t3.summarise(a=t3.first("mass"), z=t3.last("mass")),
+        lambda f: f >> t3.group_by("g") >> mutate(m=t3.mean("mass"), s=t3.sum("mass", na_rm=True, min_count=2)),
+        lambda f: f >> t3.group_by("g") >> t3.filter(t3.col("mass") > t3.mean("mass")),
+    ],
+    ids=["summarise", "first_last", "window", "filter"],
+)
+def test_pandas_grouped_aggregates_skip_python_apply(monkeypatch, build):
+    from pandas.core.groupby import SeriesGroupBy
+
+    def per_group(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a grouped aggregate called a Python function per group")
+
+    monkeypatch.setattr(SeriesGroupBy, "apply", per_group)
+    frame = tidy({"g": [1, 1, 2, 2], "mass": [3.0, None, 4.0, 6.0]}, backend="pandas")
+    build(frame).collect()
+
+
+GROUPED_TIMED: list[tuple[str, Callable[[Any], Any], float]] = [
+    ("fct_reorder", lambda f: f >> t3.group_by("g") >> mutate(s=t3.fct_reorder("species", "mass")), FLOOR),
+    ("fct_infreq", lambda f: f >> t3.group_by("g") >> mutate(s=t3.fct_infreq("species")), FLOOR),
+    ("fct_relevel", lambda f: f >> t3.group_by("g") >> mutate(s=t3.fct_relevel("species", "Gentoo")), FLOOR),
+    ("fct_rev", lambda f: f >> t3.group_by("g") >> mutate(s=t3.fct_rev("species")), FLOOR),
+    ("slice_max", lambda f: f >> t3.group_by("g") >> t3.slice_max("mass", n=1), FLOOR),
+    ("slice_head", lambda f: f >> t3.group_by("g") >> t3.slice_head(n=2), FLOOR),
+    ("slice_sample", lambda f: f >> t3.group_by("g") >> t3.slice_sample(n=1, seed=1), FLOOR),
+    ("reframe", lambda f: f >> t3.reframe(q=t3.median("mass"), by="g"), FLOOR),
+    ("summarise_mean", lambda f: f >> t3.group_by("g") >> t3.summarise(m=t3.mean("mass")), FLOOR),
+    ("summarise_nth", lambda f: f >> t3.group_by("g") >> t3.summarise(m=t3.nth("mass", 2)), FLOOR),
+    ("filter", lambda f: f >> t3.group_by("g") >> t3.filter(t3.col("mass") > t3.mean("mass")), FLOOR),
+    # One pandas DataFrame per group is the nested format, so these keep a
+    # per-group cost; the budget still fails the old label-lookup loop.
+    ("group_nest", lambda f: f >> t3.group_by("g") >> t3.group_nest(), 1.0),
+    ("nest_by", lambda f: f >> t3.nest(by="g"), 1.0),
+]
+
+
+@timing
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("name, build, floor", GROUPED_TIMED, ids=[case[0] for case in GROUPED_TIMED])
+def test_many_groups_speed(grouped_data, backend, name, build, floor):
+    frame = _grouped_frame(grouped_data, backend)
+
+    def run() -> Any:
+        result = build(frame)
+        return result.collect(as_="pandas") if backend == "pandas" else result.collect()
+
+    elapsed = _best(run)
+    pdf = grouped_data.to_pandas()
+    baseline = _best(lambda: pdf.groupby("g")["mass"].max())
+    budget = max(RATIO * baseline, floor)
+    assert elapsed <= budget, (
+        f"{name} on {backend} with {GROUPS:,} groups took {elapsed * 1000:.0f} ms; "
+        f"budget {budget * 1000:.0f} ms"
+    )

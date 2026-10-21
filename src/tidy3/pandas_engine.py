@@ -282,6 +282,39 @@ def _eval_column_function(
     return _eval_helper(name, args, kwargs, df)
 
 
+def _nth_per_group(
+    value: pd.Series, order: Any, grouped: Any, position: int, default: Any, na_rm: bool
+) -> list[Any]:
+    """nth() for every group at once: the same choice as choose() per group.
+
+    Rows are sorted by group (then by order_by, missing last, ties in row
+    order); missing values are dropped when na_rm; the row at the requested
+    rank is picked, or the default when the group is too short.
+    """
+    gid = grouped.ngroup().to_numpy()
+    groups = len(grouped.size())
+    work = pd.DataFrame({"gid": gid, "row": np.arange(len(value))})
+    keys = ["gid", "row"]
+    if isinstance(order, pd.Series):
+        work["order"] = order.to_numpy()
+        keys = ["gid", "order", "row"]
+    work = work.sort_values(keys, na_position="last", kind="stable")
+    if na_rm:
+        work = work[value.iloc[work["row"].to_numpy()].notna().to_numpy()]
+    rank = work.groupby("gid", sort=False).cumcount().to_numpy()
+    length = np.bincount(work["gid"].to_numpy(), minlength=groups)
+    index = position - 1 if position > 0 else position
+    target = np.full(groups, index) if index >= 0 else length + index
+    valid = (position != 0) & ((index < length) if index >= 0 else (-index <= length))
+    member = work["gid"].to_numpy()
+    hit = valid[member] & (rank == target[member])
+    out = [default] * groups
+    picked = value.iloc[work["row"].to_numpy()[hit]]
+    for group, item in zip(member[hit].tolist(), picked.tolist()):
+        out[group] = item
+    return out
+
+
 def _ev_func(
     node: tuple,
     df: pd.DataFrame,
@@ -417,7 +450,7 @@ def _ev_func(
 
         if groups:
             grouped = df.groupby(list(groups), sort=False, **_GB_KW)
-            values = [choose(pos) for pos in grouped.indices.values()]
+            values = _nth_per_group(value, order, grouped, position, default, na_rm)
             result = pd.Series(values, index=grouped.size().index)
             if mode == "agg":
                 return result
@@ -640,21 +673,27 @@ def _ev_call(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str)
         if not isinstance(b, pd.Series):
             b = pd.Series(b, index=df.index)
 
-        def _observed(series: pd.Series) -> float:
+        def _finite(series: pd.Series) -> pd.Series:
             numeric = pd.to_numeric(series, errors="coerce")
-            return float(np.isfinite(numeric.to_numpy(dtype=float, na_value=np.nan)).sum())
+            return pd.Series(
+                np.isfinite(numeric.to_numpy(dtype=float, na_value=np.nan)), index=series.index
+            )
+
+        def _observed(series: pd.Series) -> float:
+            return float(_finite(series).sum())
 
         if groups:
+            # Native group reductions throughout: a Python call per group
+            # costs seconds with tens of thousands of groups.
             g = _grouped(b, df, groups)
             if pdname in {"first", "last"} and not na_rm:
-                index = 0 if pdname == "first" else -1
                 if mode == "window":
-                    return g.transform(lambda series: series.iloc[index])
-                return g.apply(lambda series: series.iloc[index])
+                    return g.transform(pdname, skipna=False)
+                return getattr(g, pdname)(skipna=False)
             if mode == "window":
                 result = g.transform(pdname)
                 if not na_rm:
-                    missing = g.transform(lambda series: series.isna().any())
+                    missing = _grouped(b.isna(), df, groups).transform("any")
                     if pdname == "any":
                         result = result.mask(~result.astype(bool) & missing)
                     elif pdname == "all":
@@ -662,12 +701,12 @@ def _ev_call(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str)
                     else:
                         result = result.mask(missing)
                 if min_count is not None:
-                    counts = g.transform(_observed)
+                    counts = _grouped(_finite(b), df, groups).transform("sum").astype(float)
                     result = result.mask(counts < min_count)
                 return result
             result = getattr(g, pdname)()
             if not na_rm:
-                missing = g.apply(lambda series: series.isna().any())
+                missing = _grouped(b.isna(), df, groups).any()
                 if pdname == "any":
                     result = result.mask(~result.astype(bool) & missing)
                 elif pdname == "all":
@@ -675,7 +714,7 @@ def _ev_call(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str)
                 else:
                     result = result.mask(missing)
             if min_count is not None:
-                counts = g.apply(_observed)
+                counts = _grouped(_finite(b), df, groups).sum().astype(float)
                 result = result.mask(counts < min_count)
             return result
         # ungrouped → scalar (broadcasts in window mode, one row in agg mode)
@@ -1015,6 +1054,44 @@ def _reframe_values(value: Any) -> list[Any]:
     return [value]
 
 
+def _reframe_one_row_per_group(
+    df: pd.DataFrame, kwargs: dict, groups: list[str], sort_groups: bool
+) -> pd.DataFrame | None:
+    """reframe() when every output is one value per group, without a loop.
+
+    Each expression is evaluated once with the grouped aggregation that
+    summarise() uses. Any output that is not exactly one value per group
+    (a vector, say) returns None and the per-group loop runs instead.
+    """
+    grouped = df.groupby(groups, sort=False, **_GB_KW)
+    first = grouped.indices
+    order = np.array([positions[0] for positions in first.values()], dtype=np.int64)
+    keys = df[groups].iloc[order]
+    index = pd.MultiIndex.from_frame(keys) if len(groups) > 1 else pd.Index(keys[groups[0]])
+    columns: dict[str, list[Any]] = {
+        group: df[group].iloc[order].tolist() for group in groups
+    }
+    for name, expr in kwargs.items():
+        value = eval_expr(expr, df, groups, "agg")
+        if isinstance(value, pd.Series):
+            if list(value.index.names) != groups or not value.index.is_unique or len(value) != len(order):
+                return None
+            # Each group's value by position; a key that does not match (a
+            # missing key a MultiIndex cannot look up, say) takes the loop.
+            positions = value.index.get_indexer(index)
+            if (positions < 0).any():
+                return None
+            columns[name] = value.iloc[positions].tolist()
+        elif pd.api.types.is_scalar(value):
+            columns[name] = [value] * len(order)
+        else:
+            return None
+    output = pd.DataFrame(columns)
+    if sort_groups:
+        output = output.sort_values(groups, kind="stable", na_position="last").reset_index(drop=True)
+    return output
+
+
 def do_reframe(
     df: pd.DataFrame,
     kwargs: dict,
@@ -1023,6 +1100,10 @@ def do_reframe(
     sort_groups: bool = True,
 ) -> pd.DataFrame:
     """Return an arbitrary number of rows per group, always ungrouped."""
+    if groups and len(df):
+        fast = _reframe_one_row_per_group(df, kwargs, list(groups), sort_groups)
+        if fast is not None:
+            return fast
     pieces = []
     for piece in _group_pieces(df, groups):
         values = {
@@ -1108,6 +1189,37 @@ def do_head(df: pd.DataFrame, n: int, groups: list[str] | None) -> pd.DataFrame:
     return df.head(n).reset_index(drop=True)
 
 
+def _group_layout(df: pd.DataFrame, groups: list[str] | None):
+    """Each row's group number, in the order _group_pieces visits groups
+    (first appearance), its position within the group, and group lengths.
+
+    The vectorized verbs below use these instead of a Python step per group,
+    which costs seconds with tens of thousands of groups.
+    """
+    if groups:
+        gid = df.groupby(list(groups), sort=False, **_GB_KW).ngroup().to_numpy()
+    else:
+        gid = np.zeros(len(df), dtype=np.int64)
+    position = pd.Series(gid).groupby(gid, sort=False).cumcount().to_numpy()
+    lengths = np.bincount(gid, minlength=int(gid.max()) + 1 if len(gid) else 0)
+    return gid, position, lengths
+
+
+def _sizes(lengths: np.ndarray, value: int | float, *, fraction: bool) -> np.ndarray:
+    """:func:`_sample_size` for every group at once."""
+    if fraction:
+        size = (lengths * (value if value >= 0 else 1 + value)).astype(np.int64)
+    else:
+        size = np.full(len(lengths), int(value), dtype=np.int64) if value >= 0 else lengths + int(value)
+    return np.minimum(lengths, np.maximum(0, size))
+
+
+def _rows_in_order(df: pd.DataFrame, rows: np.ndarray) -> pd.DataFrame:
+    if not len(rows):
+        return df.iloc[0:0].copy().reset_index(drop=True)
+    return df.iloc[rows].reset_index(drop=True)
+
+
 def _group_pieces(df: pd.DataFrame, groups: list[str] | None):
     if not groups:
         return [df]
@@ -1118,21 +1230,20 @@ def _group_pieces(df: pd.DataFrame, groups: list[str] | None):
 def do_slice(
     df: pd.DataFrame, positions: tuple[int, ...], groups: list[str] | None
 ) -> pd.DataFrame:
-    if not any(positions):
+    if not any(positions) or not len(df):
         return df.iloc[0:0].copy().reset_index(drop=True)
-    positive = [position - 1 for position in positions if position > 0]
-    excluded = {abs(position) - 1 for position in positions if position < 0}
-    pieces = []
-    for group in _group_pieces(df, groups):
-        if positive:
-            valid = [position for position in positive if position < len(group)]
-            pieces.append(group.iloc[valid])
-        else:
-            keep = [position for position in range(len(group)) if position not in excluded]
-            pieces.append(group.iloc[keep])
-    if not pieces:
-        return df.iloc[0:0].copy().reset_index(drop=True)
-    return pd.concat(pieces, ignore_index=True)
+    gid, position, _lengths = _group_layout(df, groups)
+    positive = [position_ - 1 for position_ in positions if position_ > 0]
+    if positive:
+        # Requested positions in the order given, repeats included.
+        rows = [np.flatnonzero(position == wanted) for wanted in positive]
+        picks = np.concatenate(rows)
+        request = np.concatenate([np.full(len(found), k) for k, found in enumerate(rows)])
+        order = np.lexsort((request, gid[picks]))
+        return _rows_in_order(df, picks[order])
+    excluded = np.array(sorted({abs(position_) - 1 for position_ in positions if position_ < 0}))
+    keep = np.flatnonzero(~np.isin(position, excluded))
+    return _rows_in_order(df, keep[np.lexsort((position[keep], gid[keep]))])
 
 
 def do_slice_size(
@@ -1143,14 +1254,14 @@ def do_slice_size(
     *,
     tail: bool,
 ) -> pd.DataFrame:
-    pieces = []
-    for group in _group_pieces(df, groups):
-        value = n if n is not None else prop
-        size = _sample_size(len(group), value, fraction=prop is not None)
-        pieces.append(group.tail(size) if tail and size else group.head(size))
-    if not pieces:
+    if not len(df):
         return df.iloc[0:0].copy().reset_index(drop=True)
-    return pd.concat(pieces, ignore_index=True)
+    gid, position, lengths = _group_layout(df, groups)
+    value = n if n is not None else prop
+    size = _sizes(lengths, value, fraction=prop is not None)[gid]
+    keep = position >= lengths[gid] - size if tail else position < size
+    rows = np.flatnonzero(keep & (size > 0))
+    return _rows_in_order(df, rows[np.lexsort((position[rows], gid[rows]))])
 
 
 def do_slice_extreme(
@@ -1169,36 +1280,35 @@ def do_slice_extreme(
     )
     if not isinstance(order, pd.Series):
         order = pd.Series(order, index=df.index)
-    marker = "__tidy3_order"
-    while marker in df.columns:
-        marker += "_"
-    work = df.assign(**{marker: order})
-    pieces = []
-    for group in _group_pieces(work, groups):
-        if na_rm:
-            group = group[group[marker].notna()]
-        group = group.sort_values(
-            marker, ascending=not largest, na_position="last", kind="stable"
-        )
-        value = n if n is not None else prop
-        size = _sample_size(len(group), value, fraction=prop is not None)
-        if size == 0:
-            pieces.append(group.head(0))
-            continue
-        if with_ties and size < len(group):
-            threshold = group[marker].iloc[size - 1]
-            if pd.isna(threshold):
-                chosen = group
-            elif largest:
-                chosen = group[group[marker] >= threshold]
-            else:
-                chosen = group[group[marker] <= threshold]
-            pieces.append(chosen)
-        else:
-            pieces.append(group.head(size))
-    if not pieces:
+    if not len(df):
         return df.iloc[0:0].copy().reset_index(drop=True)
-    return pd.concat(pieces, ignore_index=True).drop(columns=marker)
+    gid, position, _lengths = _group_layout(df, groups)
+    work = pd.DataFrame(
+        {"gid": gid, "value": order.to_numpy(), "position": position, "row": np.arange(len(df))}
+    )
+    if na_rm:
+        work = work[work["value"].notna()]
+    # Each group sorted by value (missing last, ties in row order), as one sort.
+    work = work.sort_values(
+        ["gid", "value", "position"],
+        ascending=[True, not largest, True],
+        na_position="last",
+        kind="stable",
+    ).reset_index(drop=True)
+    rank = work.groupby("gid", sort=False).cumcount().to_numpy()
+    length = work.groupby("gid", sort=False)["gid"].transform("size").to_numpy()
+    value = n if n is not None else prop
+    size = _sizes(length, value, fraction=prop is not None)
+    keep = rank < size
+    if with_ties:
+        tied = (size > 0) & (size < length)
+        cutoff = work["value"].where(rank == size - 1)
+        threshold = cutoff.groupby(work["gid"], sort=False).transform("first")
+        missing = tied & threshold.isna().to_numpy()
+        values = work["value"]
+        reach = (values >= threshold) if largest else (values <= threshold)
+        keep = np.where(tied, missing | reach.fillna(False).to_numpy(dtype=bool), keep)
+    return _rows_in_order(df, work["row"].to_numpy()[keep])
 
 
 def _sample_size(length: int, value: int | float, *, fraction: bool) -> int:
@@ -1217,14 +1327,55 @@ def _sample_groups(
     seed: int | None,
 ) -> pd.DataFrame:
     """Sample each group by positional index without losing group columns."""
-    pieces = []
-    grouped = df.groupby(list(groups), sort=False, **_GB_KW)
-    for positions in grouped.indices.values():
-        group = df.iloc[positions]
-        pieces.append(group.sample(n=size(len(group)), random_state=seed))
-    if not pieces:
+    if not len(df):
         return df.iloc[0:0].copy().reset_index(drop=True)
-    return pd.concat(pieces, ignore_index=True)
+    gid, position, lengths = _group_layout(df, groups)
+    sizes = np.array([size(int(length)) for length in lengths], dtype=np.int64)
+    return _rows_in_order(df, _sampled_rows(gid, position, lengths, sizes, replace=False, seed=seed))
+
+
+def _sampled_rows(
+    gid: np.ndarray,
+    position: np.ndarray,
+    lengths: np.ndarray,
+    sizes: np.ndarray,
+    *,
+    replace: bool,
+    seed: int | None,
+) -> np.ndarray:
+    """Rows of a per-group sample, groups in order, each in its draw order.
+
+    With a seed, pandas samples every group from a generator seeded the same
+    way, so the positions drawn depend only on the group's length and sample
+    size: draw once per distinct (length, size) with pandas' own sample(),
+    which reproduces the per-group results exactly. Without a seed, groups
+    are drawn independently from NumPy's global generator.
+    """
+    members = np.lexsort((position, gid))
+    starts = np.concatenate([[0], np.cumsum(lengths)[:-1]])
+    blocks_gid, blocks_rows = [], []
+    if seed is not None:
+        pairs = pd.DataFrame({"length": lengths, "size": sizes})
+        for (length, size), frame in pairs.groupby(["length", "size"], sort=False):
+            if size == 0:
+                continue
+            offsets = (
+                pd.Series(np.arange(length))
+                .sample(n=int(size), replace=replace, random_state=seed)
+                .to_numpy()
+            )
+            chosen = frame.index.to_numpy()
+            blocks_gid.append(np.repeat(chosen, size))
+            blocks_rows.append(members[(starts[chosen][:, None] + offsets[None, :]).ravel()])
+    else:
+        for group in np.flatnonzero(sizes > 0):
+            offsets = np.random.choice(lengths[group], size=int(sizes[group]), replace=replace)
+            blocks_gid.append(np.full(len(offsets), group))
+            blocks_rows.append(members[starts[group] + offsets])
+    if not blocks_rows:
+        return np.array([], dtype=np.int64)
+    block_gid = np.concatenate(blocks_gid)
+    return np.concatenate(blocks_rows)[np.argsort(block_gid, kind="stable")]
 
 
 def do_sample_n(df: pd.DataFrame, n: int, seed: int | None, groups: list[str] | None) -> pd.DataFrame:
@@ -1269,6 +1420,19 @@ def do_slice_sample(
         )
         if not isinstance(weights, pd.Series):
             weights = pd.Series(weights, index=df.index)
+    if weights is None and len(df):
+        gid, position, lengths = _group_layout(df, groups)
+        if replace:
+            if n is not None:
+                sizes = np.maximum(0, np.full(len(lengths), n) if n >= 0 else lengths + n)
+            else:
+                factor = prop if prop >= 0 else 1.0 + prop
+                sizes = np.maximum(0, (lengths * factor).astype(np.int64))
+        else:
+            value = n if n is not None else prop
+            sizes = _sizes(lengths, value, fraction=prop is not None)
+        rows = _sampled_rows(gid, position, lengths, sizes, replace=replace, seed=seed)
+        return _rows_in_order(df, rows)
     pieces = []
     for group in _group_pieces(df, groups):
         value = n if n is not None else prop

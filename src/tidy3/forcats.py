@@ -11,6 +11,7 @@ import math
 from typing import Any
 import warnings
 
+import numpy as np
 import pandas as pd
 import polars as pl
 
@@ -177,7 +178,21 @@ def eval_pandas(name: str, args: tuple[Any, ...], kw: dict[str, Any]) -> pd.Seri
 def evaluate_grouped(node: tuple, df: pd.DataFrame, groups: list[str], mode: str) -> pd.Series:
     from tidy3.pandas_engine import eval_expr
 
-    parts = df.groupby(groups, sort=SORT_GROUPS.get(), dropna=False, observed=True).indices.values()
+    grouped = df.groupby(groups, sort=SORT_GROUPS.get(), dropna=False, observed=True)
+    if len(df) and _columns_only(node):
+        name, raw_args, raw_kwargs = node[1], node[2], node[3]
+        args = tuple(eval_expr(Expr(arg), df, None, mode) for arg in raw_args)
+        kw = {key: eval_expr(Expr(value), df, None, mode) for key, value in raw_kwargs.items()}
+        if not (name == "fct_relevel" and len(kw["levels"]) == 1 and callable(kw["levels"][0])):
+            source = _factor(args[0])
+            # ngroup numbers groups in the order the loop below visits them.
+            group_ids = grouped.ngroup().to_numpy()
+            levels, ordered = _reordered_levels(
+                name, source, args[1:], kw, group_ids, text=not _is_factor(args[0])
+            )
+            categorical = pd.Categorical(source.astype(object), categories=levels, ordered=ordered)
+            return pd.Series(categorical, index=df.index)
+    parts = grouped.indices.values()
     levels: list[str] = []
     values = pd.Series(index=pd.RangeIndex(len(df)), dtype=object)
     found = False
@@ -191,6 +206,146 @@ def evaluate_grouped(node: tuple, df: pd.DataFrame, groups: list[str], mode: str
     if not found:
         return eval_expr(Expr(node), df, None, mode)
     return pd.Series(pd.Categorical(values, categories=levels, ordered=ordered), index=df.index)
+
+
+def _columns_only(node: tuple) -> bool:
+    """A single fct_* call on columns: the vectorized grouped path applies.
+
+    Nested factor calls or computed arguments use the per-group loop.
+    """
+    if not (isinstance(node, tuple) and node[0] == "func" and node[1] in FUNCTIONS):
+        return False
+    columns = all(isinstance(arg, tuple) and arg[0] in {"col", "name"} for arg in node[2])
+    literals = all(isinstance(value, tuple) and value[0] == "lit" for value in node[3].values())
+    return bool(node[2]) and columns and literals
+
+
+def _is_factor(value: Any) -> bool:
+    if isinstance(value, pl.Series):
+        return isinstance(value.dtype, (pl.Enum, pl.Categorical))
+    return isinstance(getattr(value, "dtype", None), pd.CategoricalDtype)
+
+
+def _reordered_levels(
+    name: str,
+    source: pd.Series,
+    args: tuple[Any, ...],
+    kw: dict[str, Any],
+    group_ids: Any,
+    *,
+    text: bool,
+) -> tuple[list[str], bool]:
+    """Each group's reordered levels, joined in group order: the final levels.
+
+    The same rules as :func:`_apply` run on one group at a time, computed for
+    all groups at once. A text source gives each group the levels present in
+    it, in sorted order; a factor source gives every group all its levels.
+    Groups are joined in ``group_ids`` order, each adding levels not seen yet,
+    so the result matches applying ``_apply`` group by group.
+    """
+    categories = source.cat.categories.tolist()
+    codes = source.cat.codes.to_numpy()
+    groups = np.asarray(group_ids)
+    count = len(categories)
+    if text:
+        present = codes >= 0
+        pairs = pd.DataFrame({"gid": groups[present], "code": codes[present]}).drop_duplicates()
+    else:
+        unique_groups = pd.unique(groups)
+        pairs = pd.DataFrame({
+            "gid": np.repeat(unique_groups, count),
+            "code": np.tile(np.arange(count), len(unique_groups)),
+        })
+    pairs = pairs.sort_values(["gid", "code"], kind="stable").reset_index(drop=True)
+    ordered = bool(source.cat.ordered)
+    if name == "fct_rev":
+        pairs["key"] = -pairs["code"]
+        keys = ["gid", "key"]
+    elif name == "fct_relevel":
+        requested = list(kw["levels"])
+        if not all(isinstance(level, str) for level in requested):
+            raise TypeError("fct_relevel() callable must return character levels")
+        if len(set(requested)) != len(requested):
+            raise ValueError("fct_relevel() levels must be unique")
+        rank = {categories.index(level): i for i, level in enumerate(requested) if level in categories}
+        missing_per_group = _unknown_requested(pairs, rank, requested, categories)
+        for unknown in missing_per_group:
+            warnings.warn(f"fct_relevel(): unknown levels: {unknown}", UserWarning, stacklevel=4)
+        chosen = pairs["code"].map(rank)
+        other = chosen.isna()
+        pairs["other_rank"] = other.groupby(pairs["gid"]).cumsum().where(other) - 1
+        others = other.groupby(pairs["gid"]).transform("sum")
+        after = kw["after"]
+        position = others if math.isinf(after) else np.minimum(int(after), others)
+        before = other & (pairs["other_rank"] < position)
+        pairs["band"] = np.where(before, 0, np.where(other, 2, 1))
+        pairs["key"] = np.where(other, pairs["other_rank"], chosen)
+        keys = ["gid", "band", "key"]
+    elif name == "fct_infreq":
+        weights = args[0] if args else pd.Series(1.0, index=source.index)
+        if not pd.api.types.is_numeric_dtype(weights) or weights.isna().any() or (weights < 0).any():
+            raise ValueError("fct_infreq() weights must be numeric, non-negative and non-missing")
+        present = codes >= 0
+        sums = (
+            pd.DataFrame({"gid": groups[present], "code": codes[present], "w": np.asarray(weights)[present]})
+            .groupby(["gid", "code"], sort=False)["w"].sum()
+        )
+        pairs["score"] = pd.MultiIndex.from_frame(pairs[["gid", "code"]]).map(sums).fillna(0).astype(float)
+        pairs["key"] = -pairs["score"]
+        keys = ["gid", "key"]
+        ordered = ordered if kw["ordered"] is None else kw["ordered"]
+    else:
+        x = args[0]
+        if not pd.api.types.is_numeric_dtype(x) and not x.dropna().empty:
+            raise TypeError("fct_reorder() x must be numeric")
+        if kw["na_rm"] is None and x.isna().any():
+            warnings.warn("fct_reorder(): removing missing x values; set na_rm=True to silence", UserWarning, stacklevel=4)
+        present = codes >= 0
+        values = pd.DataFrame({"gid": groups[present], "code": codes[present], "x": np.asarray(x)[present]})
+        if kw["na_rm"] is not False:
+            values = values[values["x"].notna()]
+        scores = _pair_summaries(values, kw["fun"], kw["fun_kwargs"])
+        score = pd.MultiIndex.from_frame(pairs[["gid", "code"]]).map(scores)
+        filled = pd.Series(score, dtype="Float64").where(
+            pd.Series(pd.MultiIndex.from_frame(pairs[["gid", "code"]]).isin(scores.index)),
+            kw["default"],
+        )
+        pairs["key"] = filled.to_numpy(dtype=float, na_value=np.nan)
+        pairs = pairs.sort_values(
+            ["gid", "key"], ascending=[True, not kw["desc"]], na_position="last", kind="stable"
+        )
+        keys = None
+    if keys is not None:
+        pairs = pairs.sort_values(keys, kind="stable")
+    order = pd.unique(pairs["code"].to_numpy())
+    return [categories[code] for code in order], ordered
+
+
+def _unknown_requested(pairs: pd.DataFrame, rank: dict[int, int], requested: list[str], categories: list[str]) -> list[list[str]]:
+    """The unknown-level lists _apply would warn about, one per distinct list."""
+    present = pairs.groupby("gid", sort=False)["code"].agg(frozenset)
+    seen: dict[tuple[str, ...], None] = {}
+    for codes in present:
+        unknown = tuple(level for level in requested if level not in categories or categories.index(level) not in codes)
+        if unknown:
+            seen.setdefault(unknown, None)
+    return [list(unknown) for unknown in seen]
+
+
+def _pair_summaries(values: pd.DataFrame, fun: Any, kwargs: dict[str, Any]) -> pd.Series:
+    """fct_reorder's summary of x for each (group, level) pair present."""
+    if values.empty:
+        return pd.Series(dtype=float, index=pd.MultiIndex.from_arrays([[], []], names=["gid", "code"]))
+    if getattr(fun, "__module__", "") == "tidy3.expr":
+        from tidy3.pandas_engine import eval_expr
+
+        result = eval_expr(fun(col("x"), **kwargs), values, ["gid", "code"], "agg")
+        if isinstance(result, pd.Series) and list(result.index.names) == ["gid", "code"]:
+            return result
+    return pd.Series(
+        {key: _summary(group, fun, kwargs) for key, group in values.groupby(["gid", "code"], sort=False)["x"]},
+        dtype=object,
+    ).rename_axis(["gid", "code"])
 
 
 def contains_factor(value: Any) -> bool:
