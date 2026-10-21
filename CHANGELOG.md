@@ -13,6 +13,10 @@ Grouped work no longer runs a Python step per group: tens of thousands of groups
 - Grouped work no longer runs a Python step per group, with results unchanged (checked against the previous code on 72 cases with ties, missing values, missing group keys, unused levels, and empty frames, and against R with about 100 groups). With 50,000 groups on 200,000 rows: grouped `fct_reorder` 62 s → 0.13 s on both backends (and `fct_infreq`, `fct_relevel`, `fct_rev` likewise); on pandas, `slice_max`/`slice_min` 13 s → 0.08 s, `slice_head`/`slice_tail`/`slice()` 5 s → 0.01 s, seeded `slice_sample`/`sample_n`/`sample_frac` 6.5 s → 0.01 s (the same rows for the same seed), `reframe` with one value per group 10 s → 0.04 s, `summarise` with `mean`, `sum(min_count=)`, `first`, `last` 0.6 s → 0.005 s, `nth` 0.8 s → 0.03 s, grouped `filter` 1.7 s → 0.01 s, and `group_nest`/`nest(by=)` 3.8 s → 0.7 s. `fct_infreq` and `fct_reorder` also no longer scan the column once per level, so high-cardinality factors are fast without groups too.
 - `tests/test_function_speed.py` adds many-groups guards: exact checks that pandas grouped slices and one-value `reframe` skip the per-group loop and that grouped aggregates skip Python `apply`, plus timing checks at 20,000 groups for 13 grouped operations on both backends.
 
+### Fixed
+
+- Grouped `fct_relevel` checks for unknown levels without building a Python set for every group. Warning contents and factor ordering are unchanged.
+
 ## 0.7.11 — 2026-10-21
 
 Janitor cleaning helpers, timezone helpers, datetime parsers, and `as_string`; factor joins, `bind_rows`, `complete()`, and `right_join` now follow dplyr; common conversions and parsers run natively.

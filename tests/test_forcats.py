@@ -62,6 +62,19 @@ def test_frequency_weights_ties_and_reverse(backend):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_grouped_relevel_warns_once_per_distinct_missing_set(backend):
+    frame = t.tidy({"g": [1, 1, 2, 3, 4], "species": ["a", "b", "a", "b", "a"]}, backend=backend)
+    with pytest.warns(UserWarning) as recorded:
+        out = frame >> t.group_by("g") >> t.mutate(species=t.fct_relevel("species", "b", "missing"))
+    assert [str(w.message) for w in recorded] == [
+        "fct_relevel(): unknown levels: ['missing']",
+        "fct_relevel(): unknown levels: ['b', 'missing']",
+    ]
+    assert levels(out) == ["b", "a"]
+    assert out.collect(as_="pandas")["species"].tolist() == ["a", "b", "a", "b", "a"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_reorder_summary_and_missing_values(backend):
     frame = penguins(backend)
     assert levels(frame >> t.mutate(species=t.fct_reorder("species", "mass"))) == ["Adelie", "Chinstrap", "Gentoo", "unused"]

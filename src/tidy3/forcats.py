@@ -268,7 +268,7 @@ def _reordered_levels(
         if len(set(requested)) != len(requested):
             raise ValueError("fct_relevel() levels must be unique")
         rank = {categories.index(level): i for i, level in enumerate(requested) if level in categories}
-        missing_per_group = _unknown_requested(pairs, rank, requested, categories)
+        missing_per_group = _unknown_requested(pairs, rank, requested)
         for unknown in missing_per_group:
             warnings.warn(f"fct_relevel(): unknown levels: {unknown}", UserWarning, stacklevel=4)
         chosen = pairs["code"].map(rank)
@@ -321,15 +321,18 @@ def _reordered_levels(
     return [categories[code] for code in order], ordered
 
 
-def _unknown_requested(pairs: pd.DataFrame, rank: dict[int, int], requested: list[str], categories: list[str]) -> list[list[str]]:
+def _unknown_requested(pairs: pd.DataFrame, rank: dict[int, int], requested: list[str]) -> list[list[str]]:
     """The unknown-level lists _apply would warn about, one per distinct list."""
-    present = pairs.groupby("gid", sort=False)["code"].agg(frozenset)
-    seen: dict[tuple[str, ...], None] = {}
-    for codes in present:
-        unknown = tuple(level for level in requested if level not in categories or categories.index(level) not in codes)
-        if unknown:
-            seen.setdefault(unknown, None)
-    return [list(unknown) for unknown in seen]
+    codes = {position: code for code, position in rank.items()}
+    groups = pairs["gid"].drop_duplicates()
+    missing = pd.DataFrame({
+        level: ~groups.isin(pairs.loc[pairs["code"] == codes.get(i, -1), "gid"]).to_numpy()
+        for i, level in enumerate(requested)
+    }).drop_duplicates()
+    return [
+        [level for level, absent in zip(requested, row) if absent]
+        for row in missing.itertuples(index=False, name=None) if any(row)
+    ]
 
 
 def _pair_summaries(values: pd.DataFrame, fun: Any, kwargs: dict[str, Any]) -> pd.Series:
