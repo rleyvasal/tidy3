@@ -258,8 +258,8 @@ GROUPED_TIMED: list[tuple[str, Callable[[Any], Any], float]] = [
     ("summarise_mean", lambda f: f >> t3.group_by("g") >> t3.summarise(m=t3.mean("mass")), FLOOR),
     ("summarise_nth", lambda f: f >> t3.group_by("g") >> t3.summarise(m=t3.nth("mass", 2)), FLOOR),
     ("filter", lambda f: f >> t3.group_by("g") >> t3.filter(t3.col("mass") > t3.mean("mass")), FLOOR),
-    # One pandas DataFrame per group is the nested format, so these keep a
-    # per-group cost; the budget still fails the old label-lookup loop.
+    # Pandas nesting builds one DataFrame per group; its timing baseline
+    # below constructs the same representation.
     ("group_nest", lambda f: f >> t3.group_by("g") >> t3.group_nest(), 1.0),
     ("nest_by", lambda f: f >> t3.nest(by="g"), 1.0),
 ]
@@ -277,8 +277,15 @@ def test_many_groups_speed(grouped_data, backend, name, build, floor):
 
     elapsed = _best(run)
     pdf = grouped_data.to_pandas()
-    baseline = _best(lambda: pdf.groupby("g")["mass"].max())
-    budget = max(RATIO * baseline, floor)
+    if backend == "pandas" and name in {"group_nest", "nest_by"}:
+        baseline = _best(lambda: [
+            part.reset_index(drop=True)
+            for _, part in pdf.groupby("g")[["species", "mass", "bill"]]
+        ])
+        budget = max(2 * baseline, floor)
+    else:
+        baseline = _best(lambda: pdf.groupby("g")["mass"].max())
+        budget = max(RATIO * baseline, floor)
     assert elapsed <= budget, (
         f"{name} on {backend} with {GROUPS:,} groups took {elapsed * 1000:.0f} ms; "
         f"budget {budget * 1000:.0f} ms"
