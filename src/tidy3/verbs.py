@@ -907,6 +907,11 @@ def mutate(
         assignments = _resolve_in_order(
             _expanded_assignments(context, specs, kwargs, "mutate"), input_columns
         )
+        from tidy3.forcats import contains_factor, prepare_polars, SORT_GROUPS
+
+        has_factors = any(contains_factor(value) for value in assignments.values())
+        if has_factors and tf._backend != "pandas":
+            tf = tf.compute()
         deleted_so_far: set[str] = set()
         for name, value in assignments.items():
             if value is None:
@@ -957,7 +962,11 @@ def mutate(
                     )
                     if cached:
                         work = _pe().do_mutate(work, cached, groups)
-                    work = _pe().do_mutate(work, stage, groups)
+                    token = SORT_GROUPS.set(not transient)
+                    try:
+                        work = _pe().do_mutate(work, stage, groups)
+                    finally:
+                        SORT_GROUPS.reset(token)
                     if cache_columns:
                         work = work.drop(columns=cache_columns)
             pdf = work
@@ -966,8 +975,17 @@ def mutate(
             if deletions:
                 pdf = pdf.drop(columns=deletions, errors="ignore")
             problems = merge_pandas_problems(getattr(tf, "_problems", None), found)
+            category_levels = (
+                {name: series.cat.categories.tolist() for name, series in pdf.items()
+                 if str(series.dtype) == "category"}
+                if has_factors else dict(tf._category_levels)
+            )
+            for name in assignments:
+                if name in pdf and str(pdf[name].dtype) == "category":
+                    category_levels[name] = pdf[name].cat.categories.tolist()
             result = tf._with_pdf(
-                pdf, groups=None if transient else tf._groups, problems=problems
+                pdf, groups=None if transient else tf._groups, problems=problems,
+                category_levels=category_levels,
             )
             ordered = _mutate_column_order(
                 result,
@@ -982,6 +1000,7 @@ def mutate(
                 pdf.loc[:, ordered],
                 groups=None if transient else tf._groups,
                 problems=problems,
+                category_levels=category_levels,
             )
         from tidy3.convert import merge_problem_plans, output_column, problem_plans
 
@@ -990,6 +1009,7 @@ def mutate(
             marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
             lf = tf._lf.with_row_index(marker)
             for stage in stages:
+                lf, stage = prepare_polars(tf, lf, stage, [marker], sort_groups=False)
                 for name, value in stage.items():
                     if isinstance(value, Expr):
                         plans.extend(problem_plans(lf, value.node, name))
@@ -1002,6 +1022,7 @@ def mutate(
         else:
             lf = tf._lf
             for stage in stages:
+                lf, stage = prepare_polars(tf, lf, stage, groups, sort_groups=not transient)
                 cached, stage, cache_columns = (
                     _aggregate_cache_plan(stage, lf.collect_schema().names())
                     if groups
@@ -1030,8 +1051,16 @@ def mutate(
             existing = lf.collect_schema().names()
             lf = lf.drop(*[name for name in deletions if name in existing])
         problems = merge_problem_plans(getattr(tf, "_problems", None), plans)
+        category_levels = dict(tf._category_levels)
+        if has_factors:
+            for name in assignments:
+                category_levels.pop(name, None)
+        for name, dtype in lf.collect_schema().items():
+            if isinstance(dtype, pl.Enum):
+                category_levels[name] = dtype.categories.to_list()
         result = tf._with_lf(
-            lf, groups=None if transient else tf._groups, problems=problems
+            lf, groups=None if transient else tf._groups, problems=problems,
+            category_levels=category_levels,
         )
         ordered = _mutate_column_order(
             result,
@@ -1046,6 +1075,7 @@ def mutate(
             lf.select(ordered),
             groups=None if transient else tf._groups,
             problems=problems,
+            category_levels=category_levels,
         )
 
     return Verb(_apply, "mutate")

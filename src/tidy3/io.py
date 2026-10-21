@@ -180,7 +180,7 @@ def _guess_dtype(values: pl.Series) -> Any:
     return None
 
 
-def _guess_types(lf: pl.LazyFrame, skip: set[str], rows: int | None) -> pl.LazyFrame:
+def _guess_types(lf: pl.LazyFrame, skip: set[str], rows: int | None) -> dict[str, str]:
     """Guess column types from trimmed text, so a padded " 6" is still a number.
 
     Polars guesses before :func:`_trim_strings` would run, so the readers
@@ -193,25 +193,18 @@ def _guess_types(lf: pl.LazyFrame, skip: set[str], rows: int | None) -> pl.LazyF
         if dtype == pl.String and name not in skip
     ]
     if not names:
-        return lf
+        return {}
     sample = lf.select(names)
     sample = (sample if rows is None else sample.head(rows)).collect()
-    expressions = []
+    inferred = {}
     for name in names:
         values = sample[name].drop_nulls()
         if values.is_empty():
             continue
         dtype = _guess_dtype(values)
-        if dtype == pl.Boolean:
-            expressions.append(
-                pl.col(name)
-                .str.to_lowercase()
-                .replace_strict({"true": True, "false": False}, return_dtype=pl.Boolean)
-                .alias(name)
-            )
-        elif dtype is not None:
-            expressions.append(pl.col(name).cast(dtype).alias(name))
-    return lf.with_columns(expressions) if expressions else lf
+        if dtype is not None:
+            inferred[name] = {pl.Boolean: "logical", pl.Int64: "integer", pl.Float64: "double"}[dtype]
+    return inferred
 
 
 def _scan_table(
@@ -286,11 +279,12 @@ def _scan_table(
     if trim_ws:
         frame = _trim_strings(frame, {id} if id else set())
         frame = _null_after_trim(frame, na, {id} if id else set())
+    inferred = {}
     if guess:
         skip_guess = {*(col_types or {}), *user_overrides, *([id] if id else [])}
-        frame = _guess_types(frame, {str(name) for name in skip_guess}, sample_rows)
+        inferred = _guess_types(frame, {str(name) for name in skip_guess}, sample_rows)
     result = TidyFrame(frame)
-    assignments = _cast_assignments(col_types, strict=strict, marks=locale)
+    assignments = _cast_assignments({**inferred, **(col_types or {})}, strict=strict, marks=locale)
     if assignments:
         from tidy3.verbs import mutate
 

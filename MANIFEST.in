@@ -1,0 +1,3 @@
+include CHANGELOG.md load.py tidy3.py
+include tests/r_oracle_cases.R
+recursive-include docs *.md

@@ -1,0 +1,162 @@
+"""Category ordering, values, and factor metadata on both backends."""
+
+import math
+
+import pandas as pd
+import polars as pl
+import pytest
+
+import tidy3 as t
+
+BACKENDS = ["polars", "pandas"]
+
+
+def levels(frame, name="species"):
+    return frame.collect(as_="pandas")[name].cat.categories.tolist()
+
+
+def penguins(backend):
+    return t.tidy(pd.DataFrame({
+        "species": pd.Categorical(
+            ["Gentoo", "Adelie", "Gentoo", None, "Chinstrap"],
+            categories=["Chinstrap", "Adelie", "Gentoo", "unused"],
+        ),
+        "mass": [5000., 3500., 5200., 4000., 3700.],
+    }), backend=backend)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_relevel_preserves_values_unused_levels_and_metadata(backend):
+    frame = penguins(backend) >> t.mutate(species=t.fct_relevel("species", "Gentoo", "Adelie"))
+    assert levels(frame) == ["Gentoo", "Adelie", "Chinstrap", "unused"]
+    assert frame.collect(as_="pandas")["species"].dropna().tolist() == ["Gentoo", "Adelie", "Gentoo", "Chinstrap"]
+    assert frame._category_levels["species"] == levels(frame)
+    ordered = (frame >> t.arrange("species")).collect(as_="pandas")["species"]
+    assert ordered.dropna().tolist() == ["Gentoo", "Gentoo", "Adelie", "Chinstrap"]
+    counted = frame >> t.count("species", drop=False)
+    assert counted.collect(as_="pandas")["n"].tolist() == [2, 1, 1, 0, 1]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_relevel_after_callable_unknown_and_duplicate(backend):
+    frame = penguins(backend)
+    assert levels(frame >> t.mutate(species=t.fct_relevel("species", "Adelie", after=2))) == ["Chinstrap", "Gentoo", "Adelie", "unused"]
+    assert levels(frame >> t.mutate(species=t.fct_relevel("species", "Adelie", after=math.inf))) == ["Chinstrap", "Gentoo", "unused", "Adelie"]
+    assert levels(frame >> t.mutate(species=t.fct_relevel("species", sorted))) == ["Adelie", "Chinstrap", "Gentoo", "unused"]
+    with pytest.warns(UserWarning, match="unknown"):
+        assert levels(frame >> t.mutate(species=t.fct_relevel("species", "missing"))) == frame._category_levels["species"]
+    with pytest.raises(ValueError, match="unique"):
+        frame >> t.mutate(species=t.fct_relevel("species", "Adelie", "Adelie"))
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_frequency_weights_ties_and_reverse(backend):
+    frame = penguins(backend)
+    assert levels(frame >> t.mutate(species=t.fct_infreq("species"))) == ["Gentoo", "Chinstrap", "Adelie", "unused"]
+    assert levels(frame >> t.mutate(species=t.fct_infreq("species", w="mass"))) == ["Gentoo", "Chinstrap", "Adelie", "unused"]
+    assert levels(frame >> t.mutate(species=t.fct_rev(t.fct_infreq("species")))) == ["unused", "Adelie", "Chinstrap", "Gentoo"]
+    with pytest.raises(ValueError, match="non-negative"):
+        frame >> t.mutate(species=t.fct_infreq("species", w=-t.col("mass")))
+    weighted = t.tidy({"species": ["Gentoo", "Gentoo", "Adelie"], "weight": [1., 1., 10.]}, backend=backend)
+    assert levels(weighted >> t.mutate(species=t.fct_infreq("species", "weight"))) == ["Adelie", "Gentoo"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_reorder_summary_and_missing_values(backend):
+    frame = penguins(backend)
+    assert levels(frame >> t.mutate(species=t.fct_reorder("species", "mass"))) == ["Adelie", "Chinstrap", "Gentoo", "unused"]
+    assert levels(frame >> t.mutate(species=t.fct_reorder("species", "mass", t.mean, desc=True))) == ["unused", "Gentoo", "Chinstrap", "Adelie"]
+    assert levels(frame >> t.mutate(species=t.fct_reorder("species", "mass", lambda x: x.max(), default=-math.inf))) == ["unused", "Adelie", "Chinstrap", "Gentoo"]
+    frame = t.tidy({"species": ["Adelie", "Gentoo", "Gentoo"], "mass": [3500., None, 5000.]}, backend=backend)
+    with pytest.warns(UserWarning, match="missing"):
+        assert levels(frame >> t.mutate(species=t.fct_reorder("species", "mass"))) == ["Adelie", "Gentoo"]
+    assert levels(frame >> t.mutate(species=t.fct_reorder("species", "mass", na_rm=False, desc=True))) == ["Adelie", "Gentoo"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("transient", [False, True])
+def test_grouped_character_factors_reconcile_in_group_order(backend, transient):
+    frame = t.tidy({"island": ["b", "a", "b", "a"], "species": ["Gentoo", "Adelie", "Gentoo", "Adelie"]}, backend=backend)
+    if transient:
+        out = frame >> t.mutate(species=t.fct_rev(t.fct_infreq("species")), by="island")
+        expected = ["Gentoo", "Adelie"]
+    else:
+        out = frame >> t.group_by("island") >> t.mutate(species=t.fct_rev(t.fct_infreq("species")))
+        expected = ["Adelie", "Gentoo"]
+    assert levels(out) == expected
+    assert t.group_vars(out) == ([] if transient else ["island"])
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_across_sequential_assignments_and_type_selection(backend):
+    frame = penguins(backend) >> t.mutate(t.across("species", t.fct_rev))
+    assert levels(frame) == ["unused", "Gentoo", "Adelie", "Chinstrap"]
+    out = frame >> t.mutate(ordered=t.fct_infreq("species"), reversed=t.fct_rev("ordered"))
+    assert levels(out, "reversed") == list(reversed(levels(out, "ordered")))
+    assert (out >> t.select(t.where(t.is_categorical))).columns == ["species", "ordered", "reversed"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_empty_and_all_missing_factors(backend):
+    for values in [[], [None, None]]:
+        frame = t.tidy(pd.DataFrame({"species": pd.Categorical(values, categories=["Adelie", "Gentoo"])}), backend=backend)
+        assert levels(frame >> t.mutate(species=t.fct_rev("species"))) == ["Gentoo", "Adelie"]
+
+
+def test_polars_factor_stage_keeps_source_snapshot_and_other_dtypes(tmp_path):
+    path = tmp_path / "penguins.csv"
+    path.write_text("species,mass\nAdelie,3500\nGentoo,5000\n")
+    frame = t.scan_csv(path) >> t.mutate(species=t.fct_rev("species"))
+    path.unlink()
+    assert frame.collect()["mass"].to_list() == [3500, 5000]
+    assert frame.collect().schema["mass"] == pl.Int64
+    assert isinstance(frame._lf, pl.LazyFrame)
+
+
+def test_vectors_and_invalid_inputs():
+    result = t.fct_rev(["Gentoo", "Adelie", None])
+    assert result.categories.tolist() == ["Gentoo", "Adelie"]
+    with pytest.raises(TypeError, match="character"):
+        t.fct_rev([1, 2])
+    with pytest.raises(ValueError, match="after"):
+        t.fct_relevel("species", "Gentoo", after=-1)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_factor_order_survives_plot_handoff(backend):
+    from plot3 import aes, geom_point
+
+    frame = penguins(backend) >> t.mutate(species=t.fct_relevel("species", "Gentoo"))
+    plot = frame.ggplot(aes(x="species", y="mass")) + geom_point()
+    assert plot.data.to_pandas()["species"].cat.categories.tolist() == ["Gentoo", "Chinstrap", "Adelie", "unused"]
+    assert len(plot.html()) > 100
+
+
+def test_factor_notebook_syntax():
+    source = "penguins >> mutate(species=fct_reorder(species, mass, mean, na_rm=True))"
+    code = t.transform_source(source)
+    namespace = {name: getattr(t, name) for name in t.__all__}
+    namespace["penguins"] = penguins("polars")
+    exec("result = " + code.strip(), namespace)
+    assert levels(namespace["result"]) == ["Adelie", "Chinstrap", "Gentoo", "unused"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_grouped_factor_values_follow_positions_with_duplicate_index(backend):
+    pdf = pd.DataFrame({
+        "island": ["b", "a", "b", "a"],
+        "species": ["Gentoo", "Adelie", "Adelie", "Gentoo"],
+    }, index=[0, 0, 1, 1])
+    out = t.tidy(pdf, backend=backend) >> t.group_by("island") >> t.mutate(species=t.fct_rev("species"))
+    assert out.collect(as_="pandas")["species"].tolist() == pdf["species"].tolist()
+    assert levels(out) == ["Gentoo", "Adelie"]
+
+
+def test_factor_snapshot_keeps_parse_problems(tmp_path):
+    path = tmp_path / "penguins.csv"
+    path.write_text("species,mass\nAdelie,3500\nGentoo,oops\n")
+    frame = t.scan_csv(path) >> t.mutate(mass=t.parse_double("mass"))
+    frame = frame >> t.mutate(species=t.fct_rev("species"))
+    path.unlink()
+    assert t.problems(frame).collect()["original"].to_list() == ["oops"]
+    assert frame.collect()["mass"].to_list() == [3500., None]

@@ -61,6 +61,103 @@ base <- tibble(
 
 result <- switch(
   case_name,
+  date_components = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      d <- c(as.Date("2019-12-25") + 0:1849, as.Date(NA))
+      list(
+        weekday=lubridate::wday(d), monday=lubridate::wday(d, week_start=1),
+        yearday=lubridate::yday(d), week=lubridate::week(d), iso=lubridate::isoweek(d),
+        q=lubridate::quarter(d), hour=lubridate::hour(d), minute=lubridate::minute(d), second=lubridate::second(d)
+      )
+    }
+  },
+  weekday_labels = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      d <- c(as.Date("2024-01-01") + 0:6, as.Date(NA))
+      result <- list()
+      for (start in 1:7) for (abbr in c(TRUE, FALSE)) {
+        f <- lubridate::wday(d, label=TRUE, abbr=abbr, week_start=start, locale="C")
+        key <- paste0(start, "_", if (abbr) "abbr" else "full")
+        result[[key]] <- list(values=as.character(f), levels=levels(f), ordered=is.ordered(f))
+      }
+      result
+    }
+  },
+  fiscal_quarters = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      d <- c(as.Date(sprintf("%d-%02d-15", rep(c(2023, 2024), each=12), rep(1:12, 2))), as.Date(NA))
+      result <- list()
+      for (start in 1:12) for (kind in c("quarter", "year.quarter", "date_first", "date_last", "year_start/end")) {
+        value <- lubridate::quarter(d, type=kind, fiscal_start=start)
+        if (kind %in% c("date_first", "date_last")) value <- as.character(value)
+        result[[paste0(start, "_", kind)]] <- value
+      }
+      result
+    }
+  },
+  clock_components = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      d <- as.POSIXct(c("2024-01-01 23:59:59.125", "2024-03-10 01:59:59.5", "2024-03-10 03:00:00.25", "2024-11-03 01:30:00", NA), tz="America/Los_Angeles")
+      list(h=lubridate::hour(d), m=lubridate::minute(d), s=lubridate::second(d), weekday=lubridate::wday(d))
+    }
+  },
+  factor_ordering = {
+    if (!requireNamespace("forcats", quietly=TRUE)) {
+      list(skip=TRUE, reason="forcats is not installed")
+    } else {
+      f <- factor(c("Gentoo", "Adelie", "Gentoo", NA, "Chinstrap"), levels=c("Chinstrap", "Adelie", "Gentoo", "unused"))
+      mass <- c(5000, 3500, 5200, 4000, 3700)
+      payload <- function(f) list(values=as.character(f), levels=levels(f))
+      lapply(list(
+        reverse=forcats::fct_rev(f), frequency=forcats::fct_infreq(f),
+        weighted=forcats::fct_infreq(f, w=mass),
+        relevel=forcats::fct_relevel(f, "Gentoo", "Adelie"),
+        after=forcats::fct_relevel(f, "Adelie", after=2),
+        last=forcats::fct_relevel(f, "Adelie", after=Inf),
+        callable=forcats::fct_relevel(f, sort),
+        median=forcats::fct_reorder(f, mass),
+        mean_desc=forcats::fct_reorder(f, mass, mean, .desc=TRUE)
+      ), payload)
+    }
+  },
+  factor_grouped = {
+    if (!requireNamespace("forcats", quietly=TRUE)) {
+      list(skip=TRUE, reason="forcats is not installed")
+    } else {
+      penguins <- tibble(island=c("b", "a", "b", "a"), species=c("Gentoo", "Adelie", "Gentoo", "Adelie"))
+      persistent <- penguins |> group_by(island) |> mutate(species=forcats::fct_rev(forcats::fct_infreq(species)))
+      transient <- penguins |> mutate(species=forcats::fct_rev(forcats::fct_infreq(species)), .by=island)
+      payload <- function(df) list(values=as.character(df$species), levels=levels(df$species))
+      list(persistent=payload(persistent), transient=payload(transient))
+    }
+  },
+  factor_missing = {
+    if (!requireNamespace("forcats", quietly=TRUE)) {
+      list(skip=TRUE, reason="forcats is not installed")
+    } else {
+      f <- factor(c("Gentoo", "Adelie", "Gentoo", NA), levels=c("Gentoo", "Adelie", "unused"))
+      mass <- c(NA, 3500, 5000, NA)
+      # Explicit vector wrappers retain empty values in the JSON oracle.
+      payload <- function(f) list(
+        values=list(kind="vector", data=unname(as.list(as.character(f)))),
+        levels=list(kind="vector", data=unname(as.list(levels(f))))
+      )
+      list(
+        remove=payload(forcats::fct_reorder(f, mass, .na_rm=TRUE)),
+        keep=payload(forcats::fct_reorder(f, mass, .na_rm=FALSE, .desc=TRUE)),
+        default=payload(forcats::fct_reorder(f, mass, .na_rm=TRUE, .default=-Inf)),
+        empty=payload(forcats::fct_rev(factor(character(), levels=c("Adelie", "Gentoo"))))
+      )
+    }
+  },
   filter_missing = base |> filter(x > 1),
   filter_out_missing = base |> filter(is.na(x) | !(x > 1)),
   mutate_sequential = base |> mutate(a=y * 2, b=a + 1, .before=x),
@@ -580,6 +677,52 @@ result <- switch(
         hp=bad$hp,
         problem_rows=found$row,
         problem_values=found$actual
+      )
+    }
+  },
+  round_extremes = {
+    x <- c(1.25, -1.25, 0, 1.25e-310, -1.25e-310, 1.75e-310, 5e-324)
+    digits <- c(309, 310, 323, 324, -309)
+    setNames(lapply(digits, function(d) {
+      list(kind="vector", data=as.list(sprintf("%.17g", round(x, d))))
+    }), as.character(digits))
+  },
+  string_summaries = {
+    if (!requireNamespace("stringr", quietly=TRUE)) {
+      list(skip=TRUE, reason="stringr is not installed")
+    } else {
+      cars <- tibble(cyl=c(4L, 4L, 6L), model=c("Datsun", "Toyota", "Mazda"))
+      list(
+        whole=cars |> summarise(
+          length=stringr::str_length(first(model)),
+          upper=stringr::str_to_upper(first(model)),
+          label=stringr::str_c(first(model), "!")
+        ),
+        grouped=cars |> group_by(cyl) |> summarise(
+          length=stringr::str_length(first(model)),
+          upper=stringr::str_to_upper(first(model)),
+          label=stringr::str_c(first(model), "!")
+        )
+      )
+    }
+  },
+  inferred_csv_failures = {
+    if (!requireNamespace("readr", quietly=TRUE)) {
+      list(skip=TRUE, reason="readr is not installed")
+    } else {
+      # Once these types are chosen, late failures follow readr's parser
+      # contract. Sampling positions and default numeric types differ.
+      text <- paste0("hp,mpg,am\n", paste(rep("110,21.5,TRUE\n", 100), collapse=""), "oops,oops,oops\n")
+      cars <- suppressWarnings(readr::read_csv(I(text), col_types=readr::cols(
+        hp=readr::col_integer(), mpg=readr::col_double(), am=readr::col_logical()
+      )))
+      found <- readr::problems(cars)
+      list(
+        hp=cars$hp, mpg=cars$mpg, am=cars$am,
+        problems=tibble(
+          row=found$row, column=c("hp", "mpg", "am"),
+          original=found$actual, expected=c("integer", "double", "logical")
+        )
       )
     }
   },

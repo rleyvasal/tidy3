@@ -372,7 +372,7 @@ def _round_expr(value: pl.Expr, digits: int) -> pl.Expr:
         rounded = pl.select(
             pl.when(series.is_null()).then(None).otherwise(rounded)
         ).to_series()
-        return rounded.cast(series.dtype) if series.dtype.is_integer() else rounded
+        return rounded.cast(series.dtype)
 
     # Integers stay integers; floats stay floats.
     return value.map_batches(batch, return_dtype=pl.dtype_of(value), is_elementwise=True)
@@ -381,9 +381,20 @@ def _round_expr(value: pl.Expr, digits: int) -> pl.Expr:
 def _round_numpy(values: np.ndarray, digits: int) -> np.ndarray:
     """R's ``round`` on a float array; shared by both backends."""
     x = np.asarray(values, dtype=float)
+    if digits > 323:
+        return x.copy()
+    if digits < -308:
+        return np.where(np.isfinite(x) & (x != 0), 0.0, x)
     with np.errstate(all="ignore"):
         size = np.abs(x)
-        if digits >= 0:
+        if digits > 308:
+            # Split the scale so tiny numbers can round past 308 places
+            # without computing an overflowing power of ten.
+            extra = 10.0 ** (digits - 308)
+            scaled = (size * 1e308) * extra
+            whole = np.floor(scaled)
+            lower, upper = (whole / 1e308) / extra, (np.ceil(scaled) / 1e308) / extra
+        elif digits >= 0:
             scale = 10.0**digits
             whole = np.floor(size * scale)
             lower, upper = whole / scale, np.ceil(size * scale) / scale
@@ -462,7 +473,9 @@ def _as_series(value: Any, index: pd.Index) -> pd.Series:
 def _pandas_pair(name: str, args: tuple[Any, ...], na_rm: bool, index: pd.Index) -> pd.Series:
     frame = pd.concat([_as_series(arg, index) for arg in args], axis=1)
     # NaN counts as missing, as in R.
-    frame = frame.mask(frame.map(lambda value: isinstance(value, float) and math.isnan(value)))
+    frame = frame.mask(frame.apply(
+        lambda column: column.map(lambda value: isinstance(value, float) and math.isnan(value))
+    ))
     result = frame.min(axis=1, skipna=na_rm) if name == "pmin" else frame.max(axis=1, skipna=na_rm)
     return result
 
@@ -479,7 +492,9 @@ def _pandas_rows(
         fill = np.nan if operation == "mean" or min_count else 0
         return pd.Series(fill, index=index)
     frame = pd.concat([_as_series(arg, index) for arg in args], axis=1)
-    frame = frame.mask(frame.map(lambda value: isinstance(value, float) and math.isnan(value)))
+    frame = frame.mask(frame.apply(
+        lambda column: column.map(lambda value: isinstance(value, float) and math.isnan(value))
+    ))
     present = frame.notna().sum(axis=1)
     if na_rm:
         total = frame.sum(axis=1, min_count=0)

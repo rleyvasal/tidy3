@@ -1162,24 +1162,26 @@ def eval_pandas(
     """pandas result for the ``str_*`` node *name*; *args* are evaluated values."""
     from tidy3.pandas_engine import _as_series, _grouped
 
+    # Reduced inputs carry a group index, rather than the source row index.
+    index = next((arg.index for arg in args if isinstance(arg, pd.Series)), df.index)
     if name in {"str_c", "str_glue"}:
         sep = kw.get("sep", "")
         out: Any = None
         for arg in args:
-            part = _text(arg, df.index)
+            part = _text(arg, index)
             if name == "str_glue":
                 part = part.fillna("NA") if isinstance(part, pd.Series) else (
                     "NA" if part is _NA else part
                 )
             out = part if out is None else out + sep + part
         if not isinstance(out, pd.Series):
-            out = pd.Series(out, index=df.index, dtype="string")
+            out = pd.Series(out, index=index, dtype="string")
         return _to_str(out)
     if name == "str_conv":
-        series = _as_series(args[0], df.index)
+        series = _as_series(args[0], index)
         return _to_str(_map(series.astype(object), lambda v: _decode(v, kw["encoding"])))
 
-    x = _as_series(args[0], df.index).astype("string")
+    x = _as_series(args[0], index).astype("string")
     if name in {"str_detect", "str_starts", "str_ends"}:
         if _plain(kw) and name == "str_starts":
             found = x.str.startswith(kw["pattern"])
@@ -1193,7 +1195,7 @@ def eval_pandas(
         found = found.astype("boolean")
         return ~found if kw["negate"] else found
     if name == "str_equal":
-        y = _text(args[1], df.index)
+        y = _text(args[1], index)
         if kw["ignore_case"]:
             x = x.str.lower()
             y = y.str.lower() if isinstance(y, pd.Series) else (

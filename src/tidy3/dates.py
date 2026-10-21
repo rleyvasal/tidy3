@@ -31,6 +31,14 @@ __all__ = [
     "year",
     "month",
     "day",
+    "wday",
+    "yday",
+    "week",
+    "isoweek",
+    "quarter",
+    "hour",
+    "minute",
+    "second",
     "floor_date",
     "ceiling_date",
     "days_in_month",
@@ -47,6 +55,14 @@ FUNCTIONS = frozenset(
         "year",
         "month",
         "day",
+        "wday",
+        "yday",
+        "week",
+        "isoweek",
+        "quarter",
+        "hour",
+        "minute",
+        "second",
         "floor_date",
         "ceiling_date",
         "days_in_month",
@@ -169,6 +185,69 @@ def month(x: Any) -> Expr:
 def day(x: Any) -> Expr:
     """Day of the month, from 1."""
     return _func("day", _value(x))
+
+
+_DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_QUARTER_TYPES = ("quarter", "year.quarter", "date_first", "date_last", "year_start/end")
+
+
+def wday(x: Any, *, label: bool = False, abbr: bool = True, week_start: int = 7) -> Expr:
+    """Weekday, with the first day numbered 1 (Sunday by default).
+
+    ``label=True`` returns an ordered categorical of English day names;
+    ``abbr=False`` uses full names. ``week_start=1`` starts on Monday.
+    """
+    if not isinstance(label, bool) or not isinstance(abbr, bool):
+        raise TypeError("wday() label and abbr must be booleans")
+    return _func("wday", _value(x), label=label, abbr=abbr, week_start=_week_start(week_start))
+
+
+def yday(x: Any) -> Expr:
+    """Day of the year, from 1 to 365 or 366."""
+    return _func("yday", _value(x))
+
+
+def week(x: Any) -> Expr:
+    """Seven-day block since January 1, numbered from 1; not an ISO week."""
+    return _func("week", _value(x))
+
+
+def isoweek(x: Any) -> Expr:
+    """ISO 8601 week number (1–53), which can belong to a neighboring year."""
+    return _func("isoweek", _value(x))
+
+
+def quarter(x: Any, type: str = "quarter", *, fiscal_start: int = 1) -> Expr:
+    """Fiscal quarter, numbered from the month *fiscal_start*.
+
+    ``type`` also accepts ``year.quarter`` (the fiscal ending year plus
+    quarter/10), ``date_first``, ``date_last``, and ``year_start/end``.
+    """
+    if type not in _QUARTER_TYPES:
+        raise ValueError(f"quarter() type must be one of: {', '.join(_QUARTER_TYPES)}")
+    if isinstance(fiscal_start, bool) or not isinstance(fiscal_start, int) or not 1 <= fiscal_start <= 12:
+        raise ValueError("quarter() fiscal_start must be an integer from 1 to 12")
+    return _func("quarter", _value(x), type=type, fiscal_start=fiscal_start)
+
+
+def hour(x: Any) -> Expr:
+    """Hour of local clock time, 0–23; dates have hour 0."""
+    return _func("hour", _value(x))
+
+
+def minute(x: Any) -> Expr:
+    """Minute of local clock time, 0–59; dates have minute 0."""
+    return _func("minute", _value(x))
+
+
+def second(x: Any) -> Expr:
+    """Seconds of local clock time, including the fractional part."""
+    return _func("second", _value(x))
+
+
+def _weekday_labels(abbr: bool, week_start: int) -> list[str]:
+    names = [name[:3] if abbr else name for name in _DAY_NAMES]
+    return names[week_start - 1:] + names[:week_start - 1]
 
 
 def _unit(name: str, unit: str) -> str:
@@ -349,6 +428,38 @@ def compile_period_bin(op: str, left: Any, right: Any, compile: Any) -> pl.Expr 
     return shift_polars(compile(left), period)
 
 
+def _clock_polars(value: pl.Expr, name: str) -> pl.Expr:
+    dtype = pl.Float64 if name == "second" else pl.Int64
+
+    def batch(series: pl.Series) -> pl.Series:
+        if series.dtype == pl.Date:
+            return series.cast(pl.Int64).cast(dtype) * 0
+        result = getattr(series.dt, name)().cast(dtype)
+        if name == "second":
+            result = result + series.dt.nanosecond() / 1e9
+        return result
+
+    return value.map_batches(batch, return_dtype=dtype, is_elementwise=True)
+
+
+def _quarter_polars(value: pl.Expr, kind: str, start: int) -> pl.Expr:
+    month_ = value.dt.month().cast(pl.Int64)
+    number = ((month_ - start) % 12) // 3 + 1
+    if kind == "quarter":
+        return number
+    ending_year = value.dt.year() + ((month_ >= start) & (start != 1)).cast(pl.Int64)
+    if kind == "year.quarter":
+        return ending_year + number / 10
+    if kind == "year_start/end":
+        return pl.concat_str([
+            (ending_year - 1).cast(pl.String).fill_null("NA"), pl.lit("/"),
+            (ending_year % 100).cast(pl.String).str.pad_start(2, "0").fill_null("NA"),
+            pl.lit(" Q"), number.cast(pl.String).fill_null("NA"),
+        ])
+    beginning = value.dt.date().dt.month_start().dt.offset_by(pl.format("-{}mo", (month_ - start) % 3))
+    return beginning if kind == "date_first" else beginning.dt.offset_by("3mo").dt.offset_by("-1d")
+
+
 def compile_polars(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> pl.Expr:
     """Compile a date helper to a Polars expression."""
     value = args[0]
@@ -358,6 +469,21 @@ def compile_polars(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> 
         return value.dt.month().cast(pl.Int64)
     if name == "day":
         return value.dt.day().cast(pl.Int64)
+    if name in {"hour", "minute", "second"}:
+        return _clock_polars(value, name)
+    if name in {"yday", "week"}:
+        day_ = value.dt.ordinal_day().cast(pl.Int64)
+        return day_ if name == "yday" else (day_ - 1) // 7 + 1
+    if name == "isoweek":
+        return value.dt.week().cast(pl.Int64)
+    if name == "wday":
+        number = (value.dt.weekday().cast(pl.Int64) - kwargs["week_start"]) % 7 + 1
+        if not kwargs["label"]:
+            return number
+        labels = _weekday_labels(kwargs["abbr"], kwargs["week_start"])
+        return number.replace_strict(dict(enumerate(labels, 1)), return_dtype=pl.String).cast(pl.Enum(labels))
+    if name == "quarter":
+        return _quarter_polars(value, kwargs["type"], kwargs["fiscal_start"])
     if name == "days_in_month":
         return value.dt.days_in_month().cast(pl.Int64)
     if name == "floor_date":
@@ -407,6 +533,32 @@ def _component(series: pd.Series, name: str) -> pd.Series:
     stamped = _temporal(series)
     values = getattr(stamped.dt, name)
     return values.astype("Int64")
+
+
+def _quarter_pandas(source: pd.Series, kind: str, start: int) -> pd.Series:
+    stamped = _temporal(source)
+    month_ = stamped.dt.month.astype("Int64")
+    number = ((month_ - start) % 12) // 3 + 1
+    if kind == "quarter":
+        return number
+    ending_year = stamped.dt.year.astype("Int64") + ((month_ >= start) & (start != 1)).astype("Int64")
+    if kind == "year.quarter":
+        return ending_year + number / 10
+    if kind == "year_start/end":
+        return ((ending_year - 1).astype("string").fillna("NA") + "/"
+                + (ending_year % 100).astype("string").str.zfill(2).fillna("NA")
+                + " Q" + number.astype("string").fillna("NA"))
+    values = []
+    for value in stamped:
+        if pd.isna(value):
+            values.append(None)
+            continue
+        beginning = date(value.year, value.month, 1) - pd.DateOffset(months=(value.month - start) % 3)
+        result = beginning if kind == "date_first" else beginning + pd.DateOffset(months=3) - pd.Timedelta(days=1)
+        values.append(result.date())
+    import pyarrow as pa
+
+    return pd.Series(values, index=source.index, dtype=pd.ArrowDtype(pa.date32()))
 
 
 def shift_pandas(series: pd.Series, period: Period) -> pd.Series:
@@ -504,6 +656,25 @@ def eval_pandas(
         return _component(source, "month")
     if name == "day":
         return _component(source, "day")
+    if name in {"hour", "minute"}:
+        return _component(source, name)
+    if name == "second":
+        stamped = _temporal(source)
+        return (stamped.dt.second + stamped.dt.microsecond / 1e6 + stamped.dt.nanosecond / 1e9).astype("Float64")
+    if name in {"yday", "week"}:
+        day_ = _component(source, "dayofyear")
+        return day_ if name == "yday" else (day_ - 1) // 7 + 1
+    if name == "isoweek":
+        return _temporal(source).dt.isocalendar().week.astype("Int64")
+    if name == "wday":
+        number = (_component(source, "dayofweek") + 1 - kwargs["week_start"]) % 7 + 1
+        if not kwargs["label"]:
+            return number
+        labels = _weekday_labels(kwargs["abbr"], kwargs["week_start"])
+        text = number.map(dict(enumerate(labels, 1)))
+        return pd.Series(pd.Categorical(text, categories=labels, ordered=True), index=source.index)
+    if name == "quarter":
+        return _quarter_pandas(source, kwargs["type"], kwargs["fiscal_start"])
     if name == "days_in_month":
         return _component(source, "days_in_month")
     date_only = _date_only(source)

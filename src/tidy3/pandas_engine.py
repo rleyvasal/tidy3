@@ -289,6 +289,11 @@ def _ev_func(
     mode: str,
 ) -> Any:
     _, name, raw_args, raw_kwargs = node
+    from tidy3.forcats import FUNCTIONS as _FACTOR_FUNCTIONS
+    from tidy3.forcats import eval_pandas as _eval_factor, evaluate_grouped
+
+    if name in _FACTOR_FUNCTIONS and groups:
+        return evaluate_grouped(node, df, groups, mode)
     if name == "order_by":
         # Evaluate on rows sorted by the key (stable, missing last), then
         # line the results back up with the original rows by index.
@@ -315,9 +320,15 @@ def _ev_func(
     args = tuple(_ev(arg, df, groups, mode) for arg in raw_args)
     kwargs = {key: _ev(value, df, groups, mode) for key, value in raw_kwargs.items()}
 
+    if name in _FACTOR_FUNCTIONS:
+        return _eval_factor(name, args, kwargs)
+
     if name.startswith("str_"):
         from tidy3.stringr import eval_pandas
 
+        if args and not any(isinstance(arg, pd.Series) for arg in args):
+            out = eval_pandas(name, args, kwargs, pd.DataFrame(index=pd.RangeIndex(1)), None, mode)
+            return out.iloc[0] if isinstance(out, pd.Series) else out
         return eval_pandas(name, args, kwargs, df, groups, mode)
 
     from tidy3.helpers import FUNCTIONS as _HELPER_FUNCTIONS

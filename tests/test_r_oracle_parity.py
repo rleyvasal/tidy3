@@ -1360,6 +1360,170 @@ def _readr_files(backend: str):
     }
 
 
+def _date_components(backend: str):
+    from datetime import date, timedelta
+    import tidy3 as t3
+
+    days = [date(2019, 12, 25) + timedelta(days=i) for i in range(1850)] + [None]
+    frame = tidy({"d": days}, backend=backend)
+    out = (frame >> mutate(
+        weekday=t3.wday("d"), monday=t3.wday("d", week_start=1),
+        yearday=t3.yday("d"), week=t3.week("d"), iso=t3.isoweek("d"),
+        q=t3.quarter("d"), hour=t3.hour("d"), minute=t3.minute("d"), second=t3.second("d"),
+    )).collect()
+    return {name: out[name] for name in out.columns if name != "d"}
+
+
+def _weekday_labels(backend: str):
+    from datetime import date, timedelta
+    import tidy3 as t3
+
+    frame = tidy({"d": [date(2024, 1, 1) + timedelta(days=i) for i in range(7)] + [None]}, backend=backend)
+    result = {}
+    for start in range(1, 8):
+        for abbr in (True, False):
+            series = (frame >> mutate(label=t3.wday("d", label=True, abbr=abbr, week_start=start))).collect(as_="pandas")["label"]
+            result[f"{start}_{'abbr' if abbr else 'full'}"] = {
+                "values": pl.Series([None if pd.isna(value) else value for value in series], dtype=pl.String),
+                "levels": pl.Series(series.cat.categories.tolist()),
+                "ordered": series.cat.ordered,
+            }
+    return result
+
+
+def _fiscal_quarters(backend: str):
+    from datetime import date
+    import tidy3 as t3
+
+    frame = tidy({"d": [date(year, month, 15) for year in (2023, 2024) for month in range(1, 13)] + [None]}, backend=backend)
+    result = {}
+    for start in range(1, 13):
+        for kind in ("quarter", "year.quarter", "date_first", "date_last", "year_start/end"):
+            out = frame >> mutate(q=t3.quarter("d", type=kind, fiscal_start=start))
+            if kind in {"date_first", "date_last"}:
+                out = out >> mutate(q=t3.as_character("q"))
+            result[f"{start}_{kind}"] = out.collect()["q"]
+    return result
+
+
+def _clock_components(backend: str):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    import tidy3 as t3
+
+    zone = ZoneInfo("America/Los_Angeles")
+    frame = tidy({"d": [
+        datetime(2024, 1, 1, 23, 59, 59, 125000, tzinfo=zone),
+        datetime(2024, 3, 10, 1, 59, 59, 500000, tzinfo=zone),
+        datetime(2024, 3, 10, 3, 0, 0, 250000, tzinfo=zone),
+        datetime(2024, 11, 3, 1, 30, 0, 0, tzinfo=zone), None,
+    ]}, backend=backend)
+    out = (frame >> mutate(h=t3.hour("d"), m=t3.minute("d"), s=t3.second("d"), weekday=t3.wday("d"))).collect()
+    return {name: out[name] for name in ("h", "m", "s", "weekday")}
+
+
+def _factor_payload(frame):
+    factor = frame.collect(as_="pandas")["species"]
+    return {
+        "values": pl.Series([None if pd.isna(value) else value for value in factor], dtype=pl.String),
+        "levels": pl.Series(factor.cat.categories.tolist(), dtype=pl.String),
+    }
+
+
+def _factor_ordering(backend: str):
+    import tidy3 as t3
+
+    frame = tidy(pd.DataFrame({
+        "species": pd.Categorical(
+            ["Gentoo", "Adelie", "Gentoo", None, "Chinstrap"],
+            categories=["Chinstrap", "Adelie", "Gentoo", "unused"],
+        ),
+        "mass": [5000., 3500., 5200., 4000., 3700.],
+    }), backend=backend)
+    expressions = {
+        "reverse": t3.fct_rev("species"),
+        "frequency": t3.fct_infreq("species"),
+        "weighted": t3.fct_infreq("species", "mass"),
+        "relevel": t3.fct_relevel("species", "Gentoo", "Adelie"),
+        "after": t3.fct_relevel("species", "Adelie", after=2),
+        "last": t3.fct_relevel("species", "Adelie", after=float("inf")),
+        "callable": t3.fct_relevel("species", sorted),
+        "median": t3.fct_reorder("species", "mass"),
+        "mean_desc": t3.fct_reorder("species", "mass", t3.mean, desc=True),
+    }
+    return {name: _factor_payload(frame >> mutate(species=expr)) for name, expr in expressions.items()}
+
+
+def _factor_grouped(backend: str):
+    import tidy3 as t3
+
+    frame = tidy({"island": ["b", "a", "b", "a"], "species": ["Gentoo", "Adelie", "Gentoo", "Adelie"]}, backend=backend)
+    expr = t3.fct_rev(t3.fct_infreq("species"))
+    return {
+        "persistent": _factor_payload(frame >> group_by("island") >> mutate(species=expr)),
+        "transient": _factor_payload(frame >> mutate(species=expr, by="island")),
+    }
+
+
+def _factor_missing(backend: str):
+    import tidy3 as t3
+
+    frame = tidy(pd.DataFrame({
+        "species": pd.Categorical(["Gentoo", "Adelie", "Gentoo", None], categories=["Gentoo", "Adelie", "unused"]),
+        "mass": [None, 3500., 5000., None],
+    }), backend=backend)
+    return {
+        "remove": _factor_payload(frame >> mutate(species=t3.fct_reorder("species", "mass", na_rm=True))),
+        "keep": _factor_payload(frame >> mutate(species=t3.fct_reorder("species", "mass", na_rm=False, desc=True))),
+        "default": _factor_payload(frame >> mutate(species=t3.fct_reorder("species", "mass", na_rm=True, default=-float("inf")))),
+        "empty": _factor_payload(tidy(pd.DataFrame({"species": pd.Categorical([], categories=["Adelie", "Gentoo"])}), backend=backend) >> mutate(species=t3.fct_rev("species"))),
+    }
+
+
+def _round_extremes(backend: str):
+    import tidy3 as t3
+
+    x = [1.25, -1.25, 0.0, 1.25e-310, -1.25e-310, 1.75e-310, 5e-324]
+    frame = tidy({"x": x}, backend=backend)
+    result = {}
+    for digits in (309, 310, 323, 324, -309):
+        out = (frame >> mutate(r=t3.round("x", digits))).collect()
+        result[str(digits)] = pl.Series(["%.17g" % value for value in out["r"]])
+    return result
+
+
+def _string_summaries(backend: str):
+    import tidy3 as t3
+
+    cars = tidy({"cyl": [4, 4, 6], "model": ["Datsun", "Toyota", "Mazda"]}, backend=backend)
+    summaries = {
+        "length": t3.str_length(t3.first("model")),
+        "upper": t3.str_to_upper(t3.first("model")),
+        "label": t3.str_c(t3.first("model"), "!"),
+    }
+    return {
+        "whole": cars >> summarise(**summaries),
+        "grouped": cars >> group_by("cyl") >> summarise(**summaries),
+    }
+
+
+def _inferred_csv_failures(backend: str):
+    import tempfile
+
+    if backend == "pandas":
+        pytest.skip("read_csv reads with Polars; the pandas backend has no reader of its own")
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "cars.csv"
+        path.write_text("hp,mpg,am\n" + "110,21.5,TRUE\n" * 100 + "oops,oops,oops\n")
+        frame = tidy3.read_csv(path)
+    return {
+        "hp": frame.collect()["hp"],
+        "mpg": frame.collect()["mpg"],
+        "am": frame.collect()["am"],
+        "problems": tidy3.problems(frame),
+    }
+
+
 def _round_grid(backend: str):
     import tidy3 as t3
 
@@ -1468,6 +1632,13 @@ def _lubridate_grid(backend: str):
 
 
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
+    "date_components": _date_components,
+    "weekday_labels": _weekday_labels,
+    "fiscal_quarters": _fiscal_quarters,
+    "clock_components": _clock_components,
+    "factor_ordering": _factor_ordering,
+    "factor_grouped": _factor_grouped,
+    "factor_missing": _factor_missing,
     "filter_missing": _filter_missing,
     "filter_out_missing": _filter_out_missing,
     "mutate_sequential": _mutate_sequential,
@@ -1534,6 +1705,9 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "readr_more": _readr_more,
     "readr_files": _readr_files,
     "round_grid": _round_grid,
+    "round_extremes": _round_extremes,
+    "string_summaries": _string_summaries,
+    "inferred_csv_failures": _inferred_csv_failures,
     "readr_grid": _readr_grid,
     "readr_rows": _readr_rows,
     "lubridate_grid": _lubridate_grid,

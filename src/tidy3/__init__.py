@@ -65,6 +65,7 @@ from tidy3.groups import (
     nest_by,
 )
 from tidy3.frame import TidyFrame, options, tidy
+from tidy3.forcats import fct_relevel, fct_reorder, fct_infreq, fct_rev
 from tidy3.io import (
     excel_sheets,
     read_csv,
@@ -114,11 +115,19 @@ from tidy3.dates import (
     days_in_month,
     dmy,
     floor_date,
+    hour,
+    isoweek,
     mdy,
+    minute,
     month,
     months,
     now,
+    quarter,
+    second,
     today,
+    wday,
+    week,
+    yday,
     year,
     years,
     ym,
@@ -355,6 +364,10 @@ from tidy3.__version__ import __version__
 
 __all__ = [
     "TidyFrame",
+    "fct_relevel",
+    "fct_reorder",
+    "fct_infreq",
+    "fct_rev",
     "ColumnNotFoundError",
     "JoinCondition",
     "JoinSpec",
@@ -584,6 +597,14 @@ __all__ = [
     "year",
     "month",
     "day",
+    "wday",
+    "yday",
+    "week",
+    "isoweek",
+    "quarter",
+    "hour",
+    "minute",
+    "second",
     "floor_date",
     "ceiling_date",
     "days_in_month",

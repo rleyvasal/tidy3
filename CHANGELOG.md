@@ -4,12 +4,23 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.7.10 — 2026-10-21
 
 The R oracle tests now cover the 0.7.9 helpers against R, readr, and lubridate, and the differences they found are fixed. Where tidy3 still differs on purpose, the reference lists it.
 
+### Added
+
+- Lubridate-style components: `wday`, `yday`, `week`, `isoweek`, `quarter`, `hour`, `minute`, and `second` on both backends. Weekday labels carry ordered English levels; quarters support fiscal years and boundary dates; clock components preserve local time and fractional seconds. Expressions stay lazy on Polars. R comparisons cover calendar and ISO boundaries, weekday level order, every fiscal starting month, and daylight saving transitions.
+- Factor ordering: `fct_relevel`, `fct_reorder`, `fct_infreq`, and `fct_rev` in `mutate` and `across`, on both backends. They preserve values, missing values, and unused levels; grouped mutations reconcile factor levels in group order. Vector inputs return a pandas categorical. Polars factor mutations compute a snapshot to discover Enum levels, then resume lazy piping. Tests compare values and levels against R's forcats.
+
 ### Fixed
 
+- Source distributions include the notebook loaders, Markdown documentation, and R oracle fixture needed by the shipped tests.
+- Guessed CSV columns use the same parsers as explicit `col_types`: a bad value beyond the type-guessing sample becomes missing with a row in `problems()`, or raises `ConversionError` under `strict=True`.
+- String helpers around summaries, such as `str_length(first(model))`, return one value per group on pandas, matching Polars and R.
+- `round` preserves Float32 columns and handles extreme `digits` without overflowing, including rounding tiny numbers past 308 decimal places.
+- `pmin`, `pmax`, `row_sums`, and `row_means` work with pandas 2.0, the declared minimum version.
+- Imports and `python -m tidy3` work from the repository root. Notebook setup now lives in `load.py`; both `%run load.py` and `%run tidy3.py` still enable pipes.
 - `parse_number` reads text the way readr does. A minus counts only right before the number, so `"$-5"` is -5 but `"-$1,234"` and `"Price - 12"` are missing. Grouping marks are skipped anywhere in the whole part (`"1,23"` is 123), a second decimal mark ends the number (`"1.2.3"` is 1.2), and exponents work (`"1e3"` is 1000).
 - `parse_double` takes an exponent (`"1e3"`) and, as in readr, fails on grouping marks, `Inf`, and `NaN`: `"1,234.5"` is missing, so use `parse_number`. `parse_integer` fails on `"1,234"`.
 - `parse_double` and `parse_integer` no longer crash on empty or blank text; it is a recorded failure.

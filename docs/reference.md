@@ -104,7 +104,8 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 | Helpers | `is_na`, `is_nan`, `is_finite`, `is_infinite`, `abs`, `floor`, `ceiling`, `round`, `pmin`, `pmax`, `row_sums`, `row_means` |
 | Convert | `as_numeric`/`as_double`, `as_integer`, `as_character`, `as_logical`, `as_date`, `as_datetime`, `ConversionError` |
 | Parse | `parse_double`, `parse_integer`, `parse_logical`, `parse_date`, `parse_datetime`, `parse_number`, `locale`, `problems`, `stop_for_problems` |
-| Dates | `ymd`, `mdy`, `dmy`, `ym`, `year`, `month`, `day`, `floor_date`, `ceiling_date`, `days_in_month`, `months`, `years`, `add_with_rollback`, `today`, `now` |
+| Dates | `ymd`, `mdy`, `dmy`, `ym`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `days_in_month`, `months`, `years`, `add_with_rollback`, `today`, `now` |
+| Factors | `fct_relevel`, `fct_reorder`, `fct_infreq`, `fct_rev` |
 | Rows | `filter`, `filter_out`, `arrange`, `distinct`, `slice`, `slice_head`, `slice_tail`, `slice_min`, `slice_max`, `slice_sample`, `head`, `sample_n`, `sample_frac` |
 | Columns | `mutate`, `transmute`, `select`, `drop`, `rename`, `rename_with`, `relocate`, `pull`, `glimpse` |
 | Groups | `group_by`, `rowwise`, `ungroup`, `with_groups`, `group_split`, `group_map`, `group_modify`, `group_walk`, `group_nest`, `nest_by`, `group_data`, `group_keys`, `group_rows`, `group_size`, `group_indices`, `group_vars`, `groups`, `n_groups`, `group_trim`, `summarise`, `reframe`, `count`, `tally`, `add_count`, `add_tally` |
@@ -256,7 +257,29 @@ Four-digit years ignore the cutoff.
 `year`, `month`, and `day` pull those fields as integers. In a notebook
 pipe, a bare `year` is still the column when penguins (or any frame) has
 one: `filter(year == 2007)` filters the column, and `year(date)` calls the
-function. `floor_date` and `ceiling_date` round to `second`, `minute`,
+function.
+
+`wday` numbers Sunday as 1 by default; `week_start=1` numbers Monday as 1.
+With `label=True`, it returns an ordered categorical/Enum with all seven
+English weekday levels, starting on `week_start`. `abbr=False` uses full
+names. Labels are always English; R's labels depend on its locale.
+`yday` counts from January 1 as day 1. `week` counts seven-day blocks from
+January 1, while `isoweek` follows ISO 8601: 2021-01-01 is week 1 under
+`week` and week 53 under `isoweek`.
+
+`quarter(x, fiscal_start=1)` returns quarters 1–4. `type="year.quarter"`
+returns the fiscal ending year plus quarter/10. `type="date_first"` and
+`"date_last"` return boundary dates; `"year_start/end"` returns text such
+as `"2023/24 Q1"`. As in R, missing input under that last type produces
+the literal text `"NA/NA QNA"`; the other types keep it missing.
+
+`hour`, `minute`, and `second` extract the input's local clock time,
+preserving the timezone already attached to a datetime. Dates give 0;
+missing input stays missing. `second` includes fractional seconds, to the
+precision of the input. Component helpers stay lazy on Polars, including
+weekday labels whose seven levels are known in advance.
+
+`floor_date` and `ceiling_date` round to `second`, `minute`,
 `hour`, `day`, `week`, `month`, `quarter`, or `year`. Weeks start on Sunday
 (`week_start=7`); `1` is Monday. A week starts at midnight, so a datetime
 floors to 00:00 on the first day of its week. Under `ceiling_date`, as in
@@ -298,7 +321,10 @@ With `trim_ws=True`, fields are trimmed before column types are guessed
 the integer 6 and `" NA "` is missing. `col_types` values `character`, `integer`,
 `double`, `logical`, `date`, and `datetime` are read as text and then
 parsed, so an id column keeps leading zeros and a bad integer becomes
-missing with a row in `problems()`. Date columns are ISO `YYYY-MM-DD`.
+missing with a row in `problems()`. Guessed numeric and logical columns
+use the same parsers: a bad value after the guessing sample becomes missing
+and is recorded in `problems()`. `strict=True` raises `ConversionError`
+instead. Date columns are ISO `YYYY-MM-DD`.
 `id` adds a column with each row's source path, including when `source` is
 a glob. A non-UTF-8 `encoding` is available on `read_csv` for one file;
 `scan_csv` asks you to use `read_csv` for that. `read_excel(path, sheet=)`
@@ -318,6 +344,49 @@ against R, dplyr, readr, and lubridate. These differences are deliberate:
   readr guesses double. The values are the same.
 - On the pandas backend a missing float is NaN, so `is_nan` is true there
   for missing values too.
+
+### Factor ordering
+
+Use `fct_relevel` to move named levels to the front, `fct_reorder` to order
+them by another column, `fct_infreq` to put frequent levels first, and
+`fct_rev` to reverse them. These change level order while preserving values
+and missing values. Existing categorical inputs keep unused levels. Ties
+keep the previous level order.
+
+```python
+ordered_cars = (
+    cars >> mutate(cyl=as_character("cyl"))
+    >> mutate(cyl=fct_reorder("cyl", "hp", mean))
+)
+ordered_cars >> arrange("cyl")
+ordered_cars >> mutate(cyl=fct_rev("cyl"))
+```
+
+`fct_reorder(f, x, fun=median)` summarizes numeric `x` with the median; `fun` may be a tidy3
+aggregation or a callable returning one number. `na_rm=None` removes missing
+`x` with a warning; `True` removes silently, and `False` passes missing values
+to `fun`. Empty levels use `default=float("inf")`; `desc=True` reverses the
+summary order, keeping missing summaries last. `fct_infreq(f, w=)` accepts a
+weight column with non-negative, non-missing weights.
+
+`fct_relevel(f, "Gentoo", "Adelie", after=0)` keeps unmentioned levels in
+their existing order. `after=float("inf")` moves the named levels to the end.
+One callable, such as `sorted`, may replace the level names. Unknown levels
+warn and are ignored; duplicate names are an error.
+
+Use factor expressions in `mutate`, `transmute`, or `across` before sorting,
+grouping, or plotting. On pandas the result is categorical; on Polars it is
+an Enum, so its level order survives collection and plot3 handoff. **A Polars
+mutation containing a factor expression computes a snapshot**, including the
+source frame, to discover levels. Later verbs build a lazy plan on that
+snapshot. This path uses Python callbacks and is intended for preparing
+categories for tables and plots. Other mutations stay lazy.
+
+A list, pandas categorical/Series, or Polars Series runs immediately and
+returns a pandas categorical. Character input starts with levels sorted in
+Unicode order; R's character-to-factor sorting depends on locale. Existing
+categorical input preserves its order. `fct_infreq(ordered=)` controls the
+pandas ordered flag; Polars Enums always carry an explicit sort order.
 
 ### Tidy-select and column-wise operations
 
