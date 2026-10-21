@@ -145,7 +145,8 @@ TIMED: list[tuple[str, Callable[[], Any], Callable[[pl.DataFrame], Any]]] = [
 @pytest.mark.parametrize("name, build, native", TIMED, ids=[case[0] for case in TIMED])
 def test_function_speed_is_close_to_native(data, backend, name, build, native):
     frame = tidy(data if backend == "polars" else data.to_pandas(), backend=backend)
-    elapsed = _best(lambda: (frame >> mutate(out=build())).collect())
+    # Match native(data): materialize only the converted column on either backend.
+    elapsed = _best(lambda: (frame >> mutate(out=build())).collect(columns="out"))
     baseline = _best(lambda: native(data))
     budget = max(RATIO * baseline, FLOOR)
     assert elapsed <= budget, (

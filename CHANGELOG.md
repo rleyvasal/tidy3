@@ -28,6 +28,8 @@ Janitor cleaning helpers, timezone helpers, datetime parsers, and `as_string`; f
 
 ### Fixed
 
+- Pandas datetime conversions preserve microsecond precision on pandas 2 as well as pandas 3. Native conversions no longer build an unused Python list before executing.
+
 - Joins with factor keys follow dplyr on both backends. A factor joined to a text key, which raised `SchemaError` on Polars, now joins and returns the key as text; two factors with different levels join on the union of their levels, x's first; `semi_join` and `anti_join` return x's factor unchanged, which pandas had turned into text.
 - `bind_rows` of factors with different levels gives one factor with every level, in order of first appearance, as vctrs does. It raised `SchemaError` on Polars and gave text on pandas. A factor bound to text is text, and a frame without the column keeps the factor (pandas had turned it into text).
 - `complete()` and `expand()` use every level of a factor named outside `nesting()`, including unused ones, as tidyr does; a grouped `complete()` adds NA only in groups that have it. Missing values sort last, and on Polars a row with a missing key keeps its values instead of losing them in the join.

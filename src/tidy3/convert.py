@@ -1317,7 +1317,7 @@ def _pandas_fast(
     elif kind in _LOGICAL_KINDS:
         target = "boolean"
     else:  # datetimes keep their NumPy datetime64 type and any time zone
-        out = converted.to_pandas()
+        out = converted.to_pandas().dt.as_unit("us")
         out.index = source.index
         return out
     out = converted.to_pandas(use_pyarrow_extension_array=True).astype(target)
@@ -1338,13 +1338,6 @@ def eval_pandas(
     source = args[0]
     if not isinstance(source, pd.Series):
         source = pd.Series(source, index=df.index)
-    # pandas marks a missing value with NaN, in float and object columns
-    # alike, so NaN here is missing, not a failure: as_integer(c(2, NA)) is
-    # c(2L, NA), and as_date(c("2010-01-31", NA)) is a date and NA.
-    values = [
-        None if isinstance(value, float) and value != value else value
-        for value in source.tolist()
-    ]
     if options["kind"] == "character":
         # The same text as on Polars: convert the column with its own type
         # (a float32 stays float32; NaN becomes missing, as pandas means it),
@@ -1360,6 +1353,13 @@ def eval_pandas(
     fast = _pandas_fast(source, name, options, column)
     if fast is not None:
         return fast
+    # pandas marks a missing value with NaN, in float and object columns
+    # alike, so NaN here is missing, not a failure: as_integer(c(2, NA)) is
+    # c(2L, NA), and as_date(c("2010-01-31", NA)) is a date and NA.
+    values = [
+        None if isinstance(value, float) and value != value else value
+        for value in source.tolist()
+    ]
     converted, problems = _apply(values, name, options, column)
     sink = _SINK.get()
     if sink is not None and problems and not options["strict"]:
@@ -1374,7 +1374,7 @@ def eval_pandas(
     if kind == "character":
         return pd.Series(converted, index=source.index, dtype="string")
     if kind in {"datetime", "parse_datetime"}:
-        return pd.Series(pd.to_datetime(converted), index=source.index)
+        return pd.Series(pd.to_datetime(converted), index=source.index).dt.as_unit("us")
     if kind in _DATETIME_ORDERS:
         return pd.Series(
             converted, index=source.index, dtype=pd.DatetimeTZDtype("us", options["tz"])

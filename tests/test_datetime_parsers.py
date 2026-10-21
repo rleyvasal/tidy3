@@ -179,6 +179,7 @@ def test_parse_datetime_offsets_are_naive_utc_clocks(backend):
     assert t.problems(frame).collect()["row"].to_list() == [6]
     plain = t.tidy({"x": ["2024-01-01 12:00:00", None]}, backend=backend)
     kept = (plain >> t.mutate(at=t.parse_datetime("x", "%Y-%m-%d %H:%M:%S"))).collect()["at"]
+    assert kept.dtype == pl.Datetime("us")
     assert kept.to_list() == [datetime(2024, 1, 1, 12, 0), None]
     with pytest.raises(t.ConversionError, match="bad"):
         (t.tidy({"x": ["bad"]}, backend=backend)
