@@ -177,12 +177,14 @@ def _ev(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str) -> A
                     side = _ev(node[3], df, groups, mode)
                     if not isinstance(side, pd.Series):
                         side = pd.Series(side, index=df.index)
-                    return shift_pandas(side, left_period)
+                    return shift_pandas(
+                        side, _resolve_period(left_period, df, groups, mode)
+                    )
                 period = right_period if node[1] == "+" else -right_period
                 side = _ev(node[2], df, groups, mode)
                 if not isinstance(side, pd.Series):
                     side = pd.Series(side, index=df.index)
-                return shift_pandas(side, period)
+                return shift_pandas(side, _resolve_period(period, df, groups, mode))
         left = _ev(node[2], df, groups, mode)
         right = _ev(node[3], df, groups, mode)
         if node[1] in _COMPARE:
@@ -235,10 +237,49 @@ def _ev(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str) -> A
     raise ValueError(f"unknown expression node: {node!r}")
 
 
+def _resolve_period(period: Any, df: pd.DataFrame, groups: list[str] | None, mode: str) -> Any:
+    """Evaluate column counts in ``months(col("k"))`` against *df*."""
+    import polars as pl
+
+    from tidy3.dates import Period
+
+    def count(value: Any) -> Any:
+        if isinstance(value, Expr):
+            return _as_series(_ev(value.node, df, groups, mode), df.index)
+        if isinstance(value, pl.Expr):
+            raise TypeError(
+                "months() and years() take col() on the pandas backend, not a Polars expression"
+            )
+        return value
+
+    return Period(months=count(period.months), years=count(period.years))
+
+
 def _as_series(value: Any, index: pd.Index) -> pd.Series:
     if isinstance(value, pd.Series):
         return value.reindex(index)
     return pd.Series(value, index=index)
+
+
+def _eval_column_function(
+    name: str, raw_args: tuple, args: tuple, kwargs: dict, df: pd.DataFrame
+) -> Any:
+    """Run a helper, conversion, or date function from tidy3's own modules."""
+    from tidy3.convert import FUNCTIONS as _CONVERT_FUNCTIONS
+    from tidy3.convert import eval_pandas as _eval_convert
+    from tidy3.dates import FUNCTIONS as _DATE_FUNCTIONS
+    from tidy3.dates import eval_pandas as _eval_date
+    from tidy3.helpers import eval_pandas as _eval_helper
+
+    if name in _CONVERT_FUNCTIONS:
+        from tidy3.convert import _OUTPUT
+
+        source = raw_args[0][1] if raw_args and raw_args[0][0] in {"col", "name"} else None
+        column = source or _OUTPUT.get() or "<expression>"
+        return _eval_convert(name, args, kwargs, df, column=column)
+    if name in _DATE_FUNCTIONS:
+        return _eval_date(name, args, kwargs, df)
+    return _eval_helper(name, args, kwargs, df)
 
 
 def _ev_func(
@@ -280,22 +321,20 @@ def _ev_func(
         return eval_pandas(name, args, kwargs, df, groups, mode)
 
     from tidy3.helpers import FUNCTIONS as _HELPER_FUNCTIONS
-    from tidy3.helpers import eval_pandas as _eval_helper
     from tidy3.convert import FUNCTIONS as _CONVERT_FUNCTIONS
-    from tidy3.convert import eval_pandas as _eval_convert
     from tidy3.dates import FUNCTIONS as _DATE_FUNCTIONS
-    from tidy3.dates import eval_pandas as _eval_date
 
-    if name in _HELPER_FUNCTIONS:
-        return _eval_helper(name, args, kwargs, df)
-    if name in _CONVERT_FUNCTIONS or name in _DATE_FUNCTIONS:
-        source = raw_args[0][1] if raw_args and raw_args[0][0] in {"col", "name"} else None
-        if name in _CONVERT_FUNCTIONS:
-            from tidy3.convert import _OUTPUT
-
-            column = source or _OUTPUT.get() or "<expression>"
-            return _eval_convert(name, args, kwargs, df, column=column)
-        return _eval_date(name, args, kwargs, df)
+    if name in _HELPER_FUNCTIONS or name in _CONVERT_FUNCTIONS or name in _DATE_FUNCTIONS:
+        if name == "add_with_rollback":
+            kwargs = {**kwargs, "period": _resolve_period(kwargs["period"], df, groups, mode)}
+        if args and not any(isinstance(arg, pd.Series) for arg in args):
+            # A single value in, such as mean(hp) inside summarise(), is a
+            # single value out: round(mean(hp), 1) is one number per group.
+            out = _eval_column_function(
+                name, raw_args, args, kwargs, pd.DataFrame(index=pd.RangeIndex(1))
+            )
+            return out.iloc[0] if isinstance(out, pd.Series) else out
+        return _eval_column_function(name, raw_args, args, kwargs, df)
 
     if name == "cur_group_id":
         group_names = tuple(kwargs.get("groups", ()))

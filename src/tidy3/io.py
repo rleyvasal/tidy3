@@ -34,6 +34,8 @@ _STRING_TYPES = frozenset({"character", "string", "str"})
 _CAST_TYPES = frozenset(
     {"integer", "double", "numeric", "logical", "date", "datetime"}
 )
+# readr's default na: an empty field and the text NA are missing.
+_READR_NA = ("", "NA")
 _UTF8 = {
     "utf-8": "utf8",
     "utf8": "utf8",
@@ -139,6 +141,79 @@ def _trim_strings(lf: pl.LazyFrame, skip: set[str]) -> pl.LazyFrame:
     return lf.with_columns(expressions)
 
 
+def _null_values(na: Any, name: str) -> list[str]:
+    if isinstance(na, str):
+        return [na]
+    if isinstance(na, dict):
+        return _null_values(na.get(name), name) if na.get(name) is not None else []
+    if isinstance(na, (list, tuple)):
+        return [str(value) for value in na]
+    return []
+
+
+def _null_after_trim(lf: pl.LazyFrame, na: Any, skip: set[str]) -> pl.LazyFrame:
+    """Missing-value strings match the trimmed field, as in readr: " NA " is NA."""
+    if na is None:
+        return lf
+    expressions = []
+    for name, dtype in lf.collect_schema().items():
+        values = _null_values(na, name)
+        if name in skip or dtype != pl.String or not values:
+            continue
+        column = pl.col(name)
+        expressions.append(
+            pl.when(column.is_in(values)).then(None).otherwise(column).alias(name)
+        )
+    return lf.with_columns(expressions) if expressions else lf
+
+
+def _guess_dtype(values: pl.Series) -> Any:
+    """Integer, float, or logical when every sampled value is one; else None."""
+    if values.str.contains(r"^[+-]?\d+$").all() and not values.cast(
+        pl.Int64, strict=False
+    ).null_count():
+        return pl.Int64
+    if not values.cast(pl.Float64, strict=False).null_count():
+        return pl.Float64
+    if values.str.to_lowercase().is_in(["true", "false"]).all():
+        return pl.Boolean
+    return None
+
+
+def _guess_types(lf: pl.LazyFrame, skip: set[str], rows: int | None) -> pl.LazyFrame:
+    """Guess column types from trimmed text, so a padded " 6" is still a number.
+
+    Polars guesses before :func:`_trim_strings` would run, so the readers
+    read every column as text, trim it, and guess here from the first
+    *rows* rows (all rows when ``None``), as readr does.
+    """
+    names = [
+        name
+        for name, dtype in lf.collect_schema().items()
+        if dtype == pl.String and name not in skip
+    ]
+    if not names:
+        return lf
+    sample = lf.select(names)
+    sample = (sample if rows is None else sample.head(rows)).collect()
+    expressions = []
+    for name in names:
+        values = sample[name].drop_nulls()
+        if values.is_empty():
+            continue
+        dtype = _guess_dtype(values)
+        if dtype == pl.Boolean:
+            expressions.append(
+                pl.col(name)
+                .str.to_lowercase()
+                .replace_strict({"true": True, "false": False}, return_dtype=pl.Boolean)
+                .alias(name)
+            )
+        elif dtype is not None:
+            expressions.append(pl.col(name).cast(dtype).alias(name))
+    return lf.with_columns(expressions) if expressions else lf
+
+
 def _scan_table(
     source: Any,
     *,
@@ -185,11 +260,22 @@ def _scan_table(
         if not isinstance(id, str) or not id:
             raise TypeError("id= must be the name of the file-path column")
         options["include_file_paths"] = id
+    user_overrides = set(options.get("schema_overrides") or {})
     overrides = _schema_overrides(col_types)
     if overrides:
         current = dict(options.get("schema_overrides") or {})
         current.update(overrides)
         options["schema_overrides"] = current
+    # Guess types after trimming, not before: read text, trim, then guess.
+    guess = (
+        trim_ws
+        and not options.get("schema")
+        and options.get("infer_schema", True) is not False
+        and not options.get("try_parse_dates")
+    )
+    sample_rows = options.pop("infer_schema_length", 100) if guess else None
+    if guess:
+        options["infer_schema"] = False
     if polars_encoding is None:
         text = Path(source).read_text(encoding=encoding)
         frame = pl.read_csv(io.BytesIO(text.encode("utf-8")), **options).lazy()
@@ -199,12 +285,25 @@ def _scan_table(
         frame = pl.scan_csv(source, **options)
     if trim_ws:
         frame = _trim_strings(frame, {id} if id else set())
+        frame = _null_after_trim(frame, na, {id} if id else set())
+    if guess:
+        skip_guess = {*(col_types or {}), *user_overrides, *([id] if id else [])}
+        frame = _guess_types(frame, {str(name) for name in skip_guess}, sample_rows)
     result = TidyFrame(frame)
     assignments = _cast_assignments(col_types, strict=strict, marks=locale)
     if assignments:
         from tidy3.verbs import mutate
 
         result = result >> mutate(**assignments)
+        if options.get("has_header", True) and result._problems is not None:
+            # readr numbers a file's problem rows counting the header line:
+            # the first data row is row 2. Skipped and comment lines do not
+            # count, which is what Polars' row position already gives.
+            result = result._with_lf(
+                result._lf,
+                groups=None,
+                problems=result._problems.with_columns(pl.col("row") + 1),
+            )
     return result
 
 
@@ -263,7 +362,10 @@ def read_csv(
 ) -> TidyFrame:
     """Read a CSV into a :class:`~tidy3.frame.TidyFrame`.
 
-    Same options as :func:`scan_csv`, with ``trim_ws=True``. ``col_types``
+    Same options as :func:`scan_csv`, with readr's defaults: ``trim_ws=True``
+    and ``na=["", "NA"]``. Fields are trimmed before column types are
+    guessed, so ``" 6"`` is the number 6, and ``" NA "`` is missing. Types
+    are guessed from the first ``infer_schema_length`` rows (100). ``col_types``
     keeps an id column as text (``"character"``) so leading zeros survive,
     and parses ``integer``, ``double``, ``logical``, ``date``, and
     ``datetime`` through the conversion engine. Date columns are ISO
@@ -273,6 +375,8 @@ def read_csv(
     delim = kwargs.pop("delim", None)
     if delim is None and "separator" not in kwargs:
         delim = ","
+    if na is None and "null_values" not in kwargs:
+        na = list(_READR_NA)
     frame = _scan_table(
         source,
         delim=delim,
