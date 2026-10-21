@@ -996,8 +996,13 @@ def mutate(
             raise ValueError(
                 f"mutate() cannot delete grouping columns: {grouped_deletions}"
             )
+        # A string is text, as in dplyr and on both backends:
+        # mutate(source="mtcars") writes "mtcars" in every row. A column is
+        # col("hp") in plain Python, or the bare name hp in a notebook pipe.
         assignments = {
-            name: value for name, value in assignments.items() if value is not None
+            name: Expr(("lit", value)) if isinstance(value, str) else value
+            for name, value in assignments.items()
+            if value is not None
         }
         if tf._backend != "pandas":
             # mutate(cluster = [0, 1, 0]): a vector, one value per row, as in

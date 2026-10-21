@@ -167,6 +167,13 @@ pandas, with dplyr window semantics after `group_by` on both. The pandas
 backend covers the documented verb/expression subset; anything
 polars-specific raises a clear error pointing back to `backend="polars"`.
 
+A quoted string assigned in `mutate`, `transmute`, `summarise`, or `reframe`
+is text, as in dplyr, on both backends: `mtcars >> mutate(source="mtcars")`
+writes `"mtcars"` in every row. A column is `col("hp")` in plain Python and
+the bare name `hp` in a notebook pipe, which `nb_export` writes as
+`col("hp")`. Strings that name columns elsewhere (`select("hp")`,
+`arrange("hp")`, `mean("hp")`) are unchanged.
+
 ### Duplicate records
 
 `get_dupes` follows janitor's duplicate inspection helper. It returns every

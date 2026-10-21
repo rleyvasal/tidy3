@@ -4,6 +4,16 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- A quoted string assigned in `mutate` or `transmute` is text, as in dplyr, on both backends: `mutate(source="mtcars")` writes `"mtcars"` in every row. Polars used to read it as a column name (so `mutate(exists="Y")` raised `ColumnNotFoundError`) while pandas read it as text. Use `col("hp")` for a column in plain Python; in a notebook pipe the bare name `hp` already means the column, and `nb_export` writes it as `col("hp")`.
+
+### Fixed
+
+- `partial_run` accepts backtick column names such as `` mutate(`data set` = "mtcars") ``, as notebook cells already did.
+
 ## 0.7.12 — 2026-10-21
 
 Grouped work no longer runs a Python step per group: tens of thousands of groups take milliseconds instead of seconds, with results unchanged.

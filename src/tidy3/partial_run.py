@@ -501,6 +501,9 @@ def partial_run(
         from tidy3.masking import NAME_REF
 
         ns.setdefault(NAME_REF, name_ref)
+        from tidy3.masking import ASSIGN_NAME, make_named_assign
+
+        ns.setdefault(ASSIGN_NAME, make_named_assign)
         import tidy3
         from tidy3.masking import API_NAME
 
