@@ -4,7 +4,9 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.7.13 — 2026-10-21
+
+A quoted string in `mutate` is text, as in dplyr, on both backends; columns are `col("hp")` in plain Python and bare names in notebook pipes.
 
 ### Changed
 
