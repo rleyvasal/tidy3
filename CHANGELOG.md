@@ -4,7 +4,9 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.7.11 — 2026-10-21
+
+Janitor cleaning helpers, timezone helpers, datetime parsers, and `as_string`; factor joins, `bind_rows`, `complete()`, and `right_join` now follow dplyr; common conversions and parsers run natively.
 
 ### Added
 
