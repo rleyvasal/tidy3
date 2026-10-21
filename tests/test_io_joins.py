@@ -156,6 +156,26 @@ def test_write_excel_or_actionable_optional_dependency_error(
     assert zipfile.is_zipfile(path)
     with zipfile.ZipFile(path) as workbook:
         assert "xl/worksheets/sheet1.xml" in workbook.namelist()
+        names = workbook.read("xl/workbook.xml").decode()
+        assert 'name="Results"' in names
+
+
+def test_write_excel_sheets_and_leading_equals_stay_text(tmp_path: Path):
+    path = tmp_path / "book.xlsx"
+    notes = tidy({"note": ["=1+1", "ok"]})
+    other = tidy({"b": [1]})
+    with pytest.raises(TypeError, match="not both"):
+        notes.write_excel(path, worksheet="Results", sheets={"Notes": notes})
+    notes.write_excel(path, sheets={"Notes": notes, "Other": other})
+    with zipfile.ZipFile(path) as workbook:
+        listing = workbook.read("xl/workbook.xml").decode()
+        assert 'name="Notes"' in listing
+        assert 'name="Other"' in listing
+        shared = workbook.read("xl/sharedStrings.xml").decode()
+        assert "=1+1" in shared
+        for name in workbook.namelist():
+            if name.startswith("xl/worksheets/sheet"):
+                assert "<f" not in workbook.read(name).decode()
 
 
 def test_left_join():

@@ -176,7 +176,16 @@ _FIRST_COLUMN_ARG = frozenset(
         "first", "last", "nth", "lead", "lag", "cummean", "cumall", "cumany",
         "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist",
         "ntile", "case_match", "recode", "recode_values", "replace_values",
-        "replace_when", "any", "all", "abs", "round", "order_by", "with_order",
+        "replace_when", "any", "all", "abs", "round", "floor", "ceiling",
+        "is_na", "is_nan", "is_finite", "is_infinite",
+        "as_numeric", "as_double", "as_integer", "as_character", "as_logical",
+        "as_date", "as_datetime",
+        "ymd", "mdy", "dmy", "ym", "year", "month", "day",
+        "floor_date", "ceiling_date", "days_in_month", "add_with_rollback",
+        "months", "years",
+        "parse_double", "parse_integer", "parse_logical", "parse_date",
+        "parse_datetime", "parse_number",
+        "order_by", "with_order",
         "str_detect", "str_starts", "str_ends", "str_count", "str_length",
         "str_sub", "str_trunc", "str_replace", "str_replace_all", "str_remove",
         "str_remove_all", "str_replace_na", "str_to_upper", "str_to_lower",
@@ -196,6 +205,7 @@ _ALL_COLUMN_ARGS = frozenset(
     {
         "coalesce", "if_else", "near", "na_if", "n_distinct", "between",
         "consecutive_id", "when_any", "when_all", "str_c",
+        "pmin", "pmax", "row_sums", "row_means",
     }
 )
 

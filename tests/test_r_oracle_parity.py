@@ -1037,6 +1037,119 @@ def _specs(backend: str):
     }
 
 
+def _helpers(backend: str):
+    import tidy3 as t3
+
+    rounded = (
+        tidy({"x": [0.5, 1.5, -1.5, 1.25]}, backend=backend)
+        >> mutate(z=t3.round("x"))
+    ).collect()["z"]
+    rounded_1 = (
+        tidy({"x": [1.25, 1.35]}, backend=backend)
+        >> mutate(z=t3.round("x", 1))
+    ).collect()["z"]
+    rounded_tens = (
+        tidy({"x": [123.0, -15.0]}, backend=backend)
+        >> mutate(z=t3.round("x", -1))
+    ).collect()["z"]
+    pairs = tidy(
+        {"a": [1.0, None, 5.0], "b": [2.0, 3.0, None], "c": [0.0, 4.0, 4.0]},
+        backend=backend,
+    )
+    paired = (
+        pairs
+        >> mutate(
+            pmin=t3.pmin("a", "b"),
+            pmin_rm=t3.pmin("a", "b", na_rm=True),
+            pmax=t3.pmax("a", "c"),
+        )
+    ).collect()
+    rows = tidy(
+        {"a": [1.0, None, None], "b": [None, None, 4.0], "c": [2.0, None, 6.0]},
+        backend=backend,
+    )
+    reduced = (
+        rows
+        >> mutate(
+            row_sums=t3.row_sums("a", "b", "c"),
+            row_sums_rm=t3.row_sums("a", "b", "c", na_rm=True),
+            row_means_rm=t3.row_means("a", "b", "c", na_rm=True),
+        )
+    ).collect()
+    return {
+        "rounded": rounded,
+        "rounded_1": rounded_1,
+        "rounded_tens": rounded_tens,
+        "pmin": paired["pmin"],
+        "pmin_rm": paired["pmin_rm"],
+        "pmax": paired["pmax"],
+        "row_sums": reduced["row_sums"],
+        "row_sums_rm": reduced["row_sums_rm"],
+        "row_means_rm": reduced["row_means_rm"],
+    }
+
+
+def _lubridate_dates(backend: str):
+    import tidy3 as t3
+    from datetime import date
+
+    frame = tidy(
+        {
+            "d": [
+                date(2010, 1, 31),
+                date(2012, 2, 29),
+                date(2010, 1, 25),
+                date(2010, 2, 3),
+                date(2010, 1, 1),
+            ]
+        },
+        backend=backend,
+    )
+    out = (
+        frame
+        >> mutate(
+            rollback=t3.add_with_rollback("d", t3.months(1)),
+            year_roll=t3.add_with_rollback("d", t3.years(1)),
+            floor_week=t3.floor_date("d", "week"),
+            ceiling_week=t3.ceiling_date("d", "week"),
+            ceiling_month=t3.ceiling_date("d", "month"),
+            days=t3.days_in_month("d"),
+        )
+        >> mutate(
+            rollback=t3.as_character("rollback"),
+            year_roll=t3.as_character("year_roll"),
+            floor_week=t3.as_character("floor_week"),
+            ceiling_week=t3.as_character("ceiling_week"),
+            ceiling_month=t3.as_character("ceiling_month"),
+        )
+    )
+    return out >> select(
+        "rollback", "year_roll", "floor_week", "ceiling_week", "ceiling_month", "days"
+    )
+
+
+def _readr_parse(backend: str):
+    import tidy3 as t3
+
+    number = (
+        tidy({"x": ["$1,234.50", "abc"]}, backend=backend)
+        >> mutate(number=t3.parse_number("x"))
+    ).collect()["number"]
+    plain = (
+        tidy({"x": ["1.5", "x"]}, backend=backend)
+        >> mutate(plain=t3.parse_double("x"))
+    ).collect()["plain"]
+    integer = (
+        tidy({"x": ["1234", "2.5"]}, backend=backend)
+        >> mutate(integer=t3.parse_integer("x"))
+    ).collect()["integer"]
+    logical = (
+        tidy({"x": ["true", "1", "0", "yes"]}, backend=backend)
+        >> mutate(logical=t3.parse_logical("x"))
+    ).collect()["logical"]
+    return {"number": number, "plain": plain, "integer": integer, "logical": logical}
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "filter_missing": _filter_missing,
     "filter_out_missing": _filter_out_missing,
@@ -1094,6 +1207,9 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "pivot_options": _pivot_options,
     "list_options": _list_options,
     "specs": _specs,
+    "helpers": _helpers,
+    "lubridate_dates": _lubridate_dates,
+    "readr_parse": _readr_parse,
 }
 
 
@@ -1162,7 +1278,10 @@ INVARIANT_ONLY = {
 @pytest.mark.parametrize("case", sorted(ORACLE_CASES))
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_r_oracle_parity(case, backend):
-    assert _normalise(ORACLE_CASES[case](backend)) == _oracle(case)
+    oracle = _oracle(case)
+    if isinstance(oracle, dict) and oracle.get("skip") is True:
+        pytest.skip(str(oracle.get("reason") or "oracle case skipped"))
+    assert _normalise(ORACLE_CASES[case](backend)) == oracle
 
 
 def test_every_public_frame_verb_has_a_parity_classification():

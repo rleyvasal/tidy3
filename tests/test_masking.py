@@ -210,6 +210,23 @@ def test_order_by_and_with_order_take_bare_columns():
     )
 
 
+def test_year_column_stays_a_column_and_year_call_stays_a_call():
+    c = COL_NAME
+    assert f"filter({c}('year') == 2007)" in _norm("filter(year == 2007)")
+    assert f"mutate(y=year({c}('date')))" in _norm("mutate(y = year(date))")
+    assert f"mutate(y=year(ymd({c}('date'))))" in _norm("mutate(y = year(ymd(date)))")
+    assert "year('date')" not in _norm("mutate(y = year(date))")
+
+
+def test_new_helpers_take_bare_columns():
+    c = COL_NAME
+    assert f"filter(is_na({c}('body_mass_g')))" in _norm("filter(is_na(body_mass_g))")
+    assert f"mutate(hp_capped=pmin({c}('hp'), 200))" in _norm(
+        "mutate(hp_capped = pmin(hp, 200))"
+    )
+    assert f"mutate(z=abs({c}('n')))" in _norm("mutate(z = abs(n))")
+
+
 def test_new_tidyr_verbs_take_bare_columns():
     assert "chop('x', 'y')" in _norm("chop(x, y)")
     assert "unchop('x', keep_empty=True)" in _norm("unchop(x, keep_empty=True)")

@@ -91,6 +91,7 @@ class Verb:
                             other, "_category_levels", None
                         ),
                         select_base=getattr(other, "_select_base", None),
+                        problems=getattr(other, "_problems", None),
                     )
                 except (AttributeError, TypeError) as e:
                     raise TypeError(
@@ -174,6 +175,8 @@ def _windowed(expr: Any, groups: list[str] | None) -> Any:
 
 def _resolved_value(tf: Any, value: Any) -> Any:
     if isinstance(value, (ColumnSet, ColumnwisePredicate, HorizontalSpec)):
+        return value.expand(tf)
+    if type(value).__name__ == "RowReduce":
         return value.expand(tf)
     return value
 
@@ -937,30 +940,34 @@ def mutate(
         input_columns = [name for name in input_columns if name not in deletions]
         stages = _assignment_stages(assignments)
         if tf._backend == "pandas":
+            from tidy3.convert import merge_pandas_problems, problem_sink
+
             work = tf._pdf
             marker = None
             if tf._rowwise:
                 marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
                 work = work.assign(**{marker: range(len(work))})
                 groups = [marker]
-            for stage in stages:
-                cached, stage, cache_columns = (
-                    _aggregate_cache_plan(stage, list(work.columns))
-                    if groups and not tf._rowwise
-                    else ({}, stage, [])
-                )
-                if cached:
-                    work = _pe().do_mutate(work, cached, groups)
-                work = _pe().do_mutate(work, stage, groups)
-                if cache_columns:
-                    work = work.drop(columns=cache_columns)
+            with problem_sink() as found:
+                for stage in stages:
+                    cached, stage, cache_columns = (
+                        _aggregate_cache_plan(stage, list(work.columns))
+                        if groups and not tf._rowwise
+                        else ({}, stage, [])
+                    )
+                    if cached:
+                        work = _pe().do_mutate(work, cached, groups)
+                    work = _pe().do_mutate(work, stage, groups)
+                    if cache_columns:
+                        work = work.drop(columns=cache_columns)
             pdf = work
             if marker is not None:
                 pdf = pdf.drop(columns=marker)
             if deletions:
                 pdf = pdf.drop(columns=deletions, errors="ignore")
+            problems = merge_pandas_problems(getattr(tf, "_problems", None), found)
             result = tf._with_pdf(
-                pdf, groups=None if transient else tf._groups
+                pdf, groups=None if transient else tf._groups, problems=problems
             )
             ordered = _mutate_column_order(
                 result,
@@ -974,12 +981,22 @@ def mutate(
             return tf._with_pdf(
                 pdf.loc[:, ordered],
                 groups=None if transient else tf._groups,
+                problems=problems,
             )
+        from tidy3.convert import merge_problem_plans, output_column, problem_plans
+
+        plans = []
         if tf._rowwise:
             marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
             lf = tf._lf.with_row_index(marker)
             for stage in stages:
-                exprs = {k: _pl_expr(v).over(marker) for k, v in stage.items()}
+                for name, value in stage.items():
+                    if isinstance(value, Expr):
+                        plans.extend(problem_plans(lf, value.node, name))
+                exprs = {}
+                for name, value in stage.items():
+                    with output_column(name):
+                        exprs[name] = _pl_expr(value).over(marker)
                 lf = lf.with_columns(**exprs)
             lf = lf.drop(marker)
         else:
@@ -991,24 +1008,30 @@ def mutate(
                     else ({}, stage, [])
                 )
                 if cached:
-                    lf = lf.with_columns(
-                        **{
-                            name: _grouped_polars_value(value, groups)
-                            for name, value in cached.items()
-                        }
-                    )
-                exprs = {
-                    k: _grouped_polars_value(v, groups)
-                    for k, v in stage.items()
-                }
+                    for name, value in cached.items():
+                        if isinstance(value, Expr):
+                            plans.extend(problem_plans(lf, value.node, name))
+                    cached_exprs = {}
+                    for name, value in cached.items():
+                        with output_column(name):
+                            cached_exprs[name] = _grouped_polars_value(value, groups)
+                    lf = lf.with_columns(**cached_exprs)
+                for name, value in stage.items():
+                    if isinstance(value, Expr):
+                        plans.extend(problem_plans(lf, value.node, name))
+                exprs = {}
+                for name, value in stage.items():
+                    with output_column(name):
+                        exprs[name] = _grouped_polars_value(value, groups)
                 lf = lf.with_columns(**exprs)
                 if cache_columns:
                     lf = lf.drop(cache_columns)
         if deletions:
             existing = lf.collect_schema().names()
             lf = lf.drop(*[name for name in deletions if name in existing])
+        problems = merge_problem_plans(getattr(tf, "_problems", None), plans)
         result = tf._with_lf(
-            lf, groups=None if transient else tf._groups
+            lf, groups=None if transient else tf._groups, problems=problems
         )
         ordered = _mutate_column_order(
             result,
@@ -1020,7 +1043,9 @@ def mutate(
             after=after,
         )
         return tf._with_lf(
-            lf.select(ordered), groups=None if transient else tf._groups
+            lf.select(ordered),
+            groups=None if transient else tf._groups,
+            problems=problems,
         )
 
     return Verb(_apply, "mutate")

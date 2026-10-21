@@ -4,6 +4,25 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.7.9 — 2026-10-21
+
+Column helpers, type conversion, calendar dates, readr-style parsers, and easier file reading. Each new expression compiles on the Polars and pandas backends.
+
+### Added
+
+- Missing-value checks `is_na`, `is_nan`, `is_finite`, and `is_infinite`, usable in `mutate`, `filter`, and `across`. `is_na` is true for both null and NaN and is never itself missing, so `filter(is_na(body_mass_g))` keeps those rows. On Polars, `is_nan` is true only for NaN. The pandas backend stores a missing float as NaN, so both checks are true there.
+- Math helpers `abs`, `floor`, `ceiling`, `round`, `pmin`, and `pmax`. `round` uses half-to-even, the same rule as R's `round()` and IEEE 754 (`round(0.5)` is 0, `round(1.5)` is 2). `pmin` and `pmax` are element-wise; `na_rm=False` turns a row missing when any input is missing.
+- `row_sums` and `row_means`, with `na_rm`. `min_count` on `sum` and `row_sums` makes a row or group with too few values missing instead of 0. `sum(c_across(...))` with the defaults is unchanged.
+- Type conversion: `as_numeric` / `as_double`, `as_integer`, `as_character`, `as_logical`, `as_date`, and `as_datetime`. `strict=True` (the default) raises `ConversionError`, naming the column and showing example bad values. `strict=False` turns bad values into missing. `as_integer` refuses `2.5` rather than cutting it to 2. `2` and `2.0` succeed.
+- Calendar helpers in the style of lubridate: `ymd`, `mdy`, `dmy`, `ym`, `year`, `month`, `day`, `floor_date`, `ceiling_date`, `days_in_month`, `months`, `years`, `add_with_rollback`, `today`, and `now`. Adding `months()` or `years()` rolls an impossible day back to the last real day (31 January plus one month is 28 February, or 29 in a leap year). `today` and `now` default to UTC. A two-digit year needs an explicit `cutoff` (`cutoff=68` reads 68 as 2068 and 69 as 1969). A bare `year` in `filter(year == 2007)` is still the penguins column; `year(date)` is the function.
+- readr-style parsers: `parse_double`, `parse_integer`, `parse_logical`, `parse_date`, `parse_datetime`, and `parse_number`, plus `locale()` for the decimal mark, grouping mark, and encoding. Parsers are permissive by default and record failures. `problems()` returns a frame of row, column, original value, and expected type. On a lazy frame that frame is its own lazy plan and does not load the file. `stop_for_problems()` collects that plan and raises.
+- `read_csv`, `read_tsv`, and `read_delim` return a `TidyFrame` and share options with `scan_csv`: `col_types`, `na`, `skip`, `comment`, `trim_ws`, and `id` (the source path of each row). `col_types` can keep an id column as text so leading zeros survive. `read_csv` trims whitespace by default; `scan_csv` does not. `read_excel` and `excel_sheets` need the optional extra `pip install 'tidy3[excel]'`.
+- `write_excel(..., sheets={name: frame})` writes several sheets. Text that starts with `=` is stored as text.
+
+### Changed
+
+- `abs`, `round`, `sum`, `min`, `max`, `any`, and `all` shadow the Python built-ins of the same names after `from tidy3 import *`, as they already did for the aggregations. See the reference.
+
 ## 0.7.8 — 2026-10-20
 
 Clear errors for missing columns and failed previews. (0.7.7 had the same changes and was withdrawn from PyPI.)

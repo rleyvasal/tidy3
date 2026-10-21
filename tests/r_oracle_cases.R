@@ -437,6 +437,49 @@ result <- switch(
       glued=build_wider_spec(long, names_from=key, values_from=v, names_glue="col_{key}", names_sort=TRUE)
     )
   },
+  helpers = {
+    rows <- cbind(c(1, NA, NA), c(NA, NA, 4), c(2, NA, 6))
+    list(
+      rounded=round(c(0.5, 1.5, -1.5, 1.25)),
+      rounded_1=round(c(1.25, 1.35), 1),
+      rounded_tens=round(c(123, -15), -1),
+      pmin=pmin(c(1, NA, 5), c(2, 3, NA)),
+      pmin_rm=pmin(c(1, NA, 5), c(2, 3, NA), na.rm=TRUE),
+      pmax=pmax(c(1, NA, 5), c(0, 4, 4)),
+      row_sums=rowSums(rows),
+      row_sums_rm=rowSums(rows, na.rm=TRUE),
+      row_means_rm=rowMeans(rows, na.rm=TRUE)
+    )
+  },
+  lubridate_dates = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      suppressPackageStartupMessages(library(lubridate))
+      d <- as.Date(c("2010-01-31", "2012-02-29", "2010-01-25", "2010-02-03", "2010-01-01"))
+      tibble(
+        rollback=format(add_with_rollback(d, months(1)), "%Y-%m-%d"),
+        year_roll=format(add_with_rollback(d, years(1)), "%Y-%m-%d"),
+        floor_week=format(floor_date(d, "week"), "%Y-%m-%d"),
+        ceiling_week=format(ceiling_date(d, "week"), "%Y-%m-%d"),
+        ceiling_month=format(ceiling_date(d, "month"), "%Y-%m-%d"),
+        days=as.integer(days_in_month(d))
+      )
+    }
+  },
+  readr_parse = {
+    if (!requireNamespace("readr", quietly=TRUE)) {
+      list(skip=TRUE, reason="readr is not installed")
+    } else {
+      suppressPackageStartupMessages(library(readr))
+      list(
+        number=parse_number(c("$1,234.50", "abc")),
+        plain=parse_double(c("1.5", "x")),
+        integer=parse_integer(c("1234", "2.5")),
+        logical=parse_logical(c("true", "1", "0", "yes"))
+      )
+    }
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 

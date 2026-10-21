@@ -29,6 +29,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ipython>=8.0"]
+excel = ["fastexcel>=0.10"]
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/tidy3"

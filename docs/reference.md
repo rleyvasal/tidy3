@@ -78,7 +78,14 @@ result.write_excel(
     autofit=True,
     freeze_panes="A2",
 )
+
+# several sheets; this frame is not added on top of `sheets`
+result.write_excel("report.xlsx", sheets={"Summary": result, "Cars": cars})
 ```
+
+A cell whose text starts with `=` is written as text. `read_excel` and
+`excel_sheets` need the optional reader: `pip install 'tidy3[excel]'`.
+Writing a workbook uses XlsxWriter, which is already installed with tidy3.
 
 You can still collect first when another library needs the result:
 
@@ -92,8 +99,12 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 | Area | Symbols |
 |------|---------|
 | Export | `nb_export`, `transform_source`, `python -m tidy3 export` / `run` |
-| Frame | `tidy`, `scan_parquet`, `scan_csv`, `scan_ipc`, `TidyFrame` |
+| Frame | `tidy`, `scan_parquet`, `scan_csv`, `scan_ipc`, `read_csv`, `read_tsv`, `read_delim`, `read_excel`, `excel_sheets`, `TidyFrame` |
 | Output | `collect`, `to_numpy`, `TidyFrame.write_parquet`, `TidyFrame.write_csv`, `TidyFrame.write_ipc`, `TidyFrame.write_excel` |
+| Helpers | `is_na`, `is_nan`, `is_finite`, `is_infinite`, `abs`, `floor`, `ceiling`, `round`, `pmin`, `pmax`, `row_sums`, `row_means` |
+| Convert | `as_numeric`/`as_double`, `as_integer`, `as_character`, `as_logical`, `as_date`, `as_datetime`, `ConversionError` |
+| Parse | `parse_double`, `parse_integer`, `parse_logical`, `parse_date`, `parse_datetime`, `parse_number`, `locale`, `problems`, `stop_for_problems` |
+| Dates | `ymd`, `mdy`, `dmy`, `ym`, `year`, `month`, `day`, `floor_date`, `ceiling_date`, `days_in_month`, `months`, `years`, `add_with_rollback`, `today`, `now` |
 | Rows | `filter`, `filter_out`, `arrange`, `distinct`, `slice`, `slice_head`, `slice_tail`, `slice_min`, `slice_max`, `slice_sample`, `head`, `sample_n`, `sample_frac` |
 | Columns | `mutate`, `transmute`, `select`, `drop`, `rename`, `rename_with`, `relocate`, `pull`, `glimpse` |
 | Groups | `group_by`, `rowwise`, `ungroup`, `with_groups`, `group_split`, `group_map`, `group_modify`, `group_walk`, `group_nest`, `nest_by`, `group_data`, `group_keys`, `group_rows`, `group_size`, `group_indices`, `group_vars`, `groups`, `n_groups`, `group_trim`, `summarise`, `reframe`, `count`, `tally`, `add_count`, `add_tally` |
@@ -120,7 +131,7 @@ you need predictable performance and semantics.
 | Tier | Intent | Symbols / areas |
 |------|--------|-----------------|
 | **Stable core** | Daily driver: declarative dplyr on Polars, dual-backend tests, R oracle where installed | `tidy`, `scan_*`, `filter`, `filter_out`, `mutate`, `transmute`, `select`, `drop`, `rename`, `relocate`, `arrange`, `distinct`, `group_by`, `ungroup`, `summarise`/`summarize`, `count`, `tally`, `add_count`, `add_tally`, equality joins (`left`/`right`/`inner`/`full`/`semi`/`anti`/`cross`), `bind_rows`/`bind_cols`, set ops (`union`, `union_all`, `intersect`, `setdiff`, `symdiff`, `setequal`), `head`/`slice`/`slice_head`/`slice_tail`/`slice_min`/`slice_max`, core expr helpers (`col`, `n`, `mean`, `sum`, …), tidyselect basics, `collect` and file writers |
-| **Growing** | Feature-complete enough for real work; more edge cases and schema-discovery cost | tidyr missing/reshape (`drop_na`, `replace_na`, `fill`, `complete`, `expand`, `pivot_*`, `separate`, `unite`, `nest`/`unnest*`), `across`/`if_any`/`if_all`/`pick`/`c_across`, `rowwise`, `reframe`, `rename_with`, `join_by` inequality joins, `nest_join`, `rows_*`, advanced ranking/window helpers, NumPy/`to_numpy` handoff |
+| **Growing** | Feature-complete enough for real work; more edge cases and schema-discovery cost | tidyr missing/reshape (`drop_na`, `replace_na`, `fill`, `complete`, `expand`, `pivot_*`, `separate`, `unite`, `nest`/`unnest*`), `across`/`if_any`/`if_all`/`pick`/`c_across`, `rowwise`, `reframe`, `rename_with`, `join_by` inequality joins, `nest_join`, `rows_*`, advanced ranking/window helpers, NumPy/`to_numpy` handoff, column helpers (`is_na`, `round`, `pmin`, `row_sums`), `as_*` conversion, lubridate-style dates, readr-style `parse_*` / `problems`, `read_csv` |
 | **Experimental** | Correctness-first or Python-callback paths; may materialize eagerly or lag R oracle coverage | `group_split`, `group_map`, `group_modify`, `group_nest`, `with_groups`, `hoist`, `pack`, `unpack`, `separate_longer_delim`, `separate_wider_delim`, stochastic sampling (`sample_n`, `sample_frac`, `slice_sample`) |
 
 **Performance note:** the stable core is the path that tracks raw Polars and
@@ -153,6 +164,115 @@ backend-neutral: they compile to `pl.Expr` on polars and evaluate natively on
 pandas, with dplyr window semantics after `group_by` on both. The pandas
 backend covers the documented verb/expression subset; anything
 polars-specific raises a clear error pointing back to `backend="polars"`.
+
+### Column helpers, dates, and readers
+
+These work inside `mutate`, `filter`, `summarise`, and `across` on both
+backends. `from tidy3 import *` binds `abs`, `round`, `sum`, `min`, `max`,
+`any`, and `all` to tidy3's versions, which shadows the Python built-ins of
+those names. Call `builtins.abs` or `builtins.round` when you want the
+built-in. The aggregations already did this for `sum`, `min`, `max`, `any`,
+and `all`.
+
+```python
+cars >> filter(is_na(col("mpg")))
+cars >> mutate(hp_capped=pmin(col("hp"), 200))
+cars >> mutate(total=row_sums("mpg", "hp", "wt", na_rm=True, min_count=1))
+```
+
+`is_na` is true for a Polars null and for NaN, and the result is never
+itself missing, so `filter` keeps the row. `is_nan` is true only for NaN.
+`is_finite` is true only for a finite number. `is_infinite` is true only
+for positive or negative infinity. On the pandas backend a missing float is
+stored as NaN, so that cell is both `is_na` and `is_nan`. The string
+`"nan"` is text, not a missing number.
+
+`round` uses half-to-even (IEEE 754), the same rule as R's `round()`:
+`round(0.5)` is 0, `round(1.5)` is 2, and `round(-1.5)` is -2. Negative
+`digits` round to tens (`round(123, digits=-1)` is 120). `pmin` and `pmax`
+are element-wise. With `na_rm=False`, any missing input makes that row
+missing. `row_sums(..., na_rm=True)` of an all-missing row is 0;
+`min_count=1` makes that row missing. `row_means` of an all-missing row is
+missing. `sum(c_across(cols))` with the defaults still skips nulls and
+returns 0 for an empty row. Pass `na_rm=True` or `min_count` to `sum` of a
+selection to use the `row_sums` rule. `sum(..., min_count=)` on a column
+does the same for a group.
+
+`as_double` (also `as_numeric`), `as_integer`, `as_character`, `as_logical`,
+`as_date`, and `as_datetime` share one converter. `strict=True` raises
+`ConversionError` at collect time on Polars and when `mutate` runs on
+pandas. The message names the column and shows up to five bad values.
+`strict=False` turns those values into missing and records them for
+`problems()`. `as_integer(2.5)` is an error; `2` and `2.0` succeed, and the
+strings `"2.0"` and `"2.5"` do not. `as_double` does not strip thousands
+separators. `as_logical` accepts `TRUE`/`FALSE`/`T`/`F` and numbers (`0` is
+false); the string `"1"` fails. `as_date` accepts ISO `YYYY-MM-DD`.
+`as_datetime` accepts an ISO date or a time after a space or `T`, treats
+`Z` and numeric offsets as UTC, and returns a naive datetime of that UTC
+clock time.
+
+`parse_double`, `parse_integer`, `parse_logical`, `parse_date`,
+`parse_datetime`, and `parse_number` are permissive unless you pass
+`strict=True`. `parse_number("$1,234.50")` is `1234.5`. `parse_double`
+requires the whole string to be a number. Grouping must come in threes from
+the right. `locale(decimal_mark=",", grouping_mark=".")` switches the
+marks; the two marks are single characters and must differ.
+`parse_logical` accepts `true`/`false`/`t`/`f`/`1`/`0`. `parse_date` and
+`parse_datetime` take a `strptime` format.
+
+`problems(frame)` returns a frame with columns `row` (1-based), `column`,
+`original`, and `expected`. On Polars that frame is a lazy plan captured
+when the parse was added. Calling `problems()` does not collect the data,
+and `compute()` keeps the plan pointed at the scan from before the compute,
+so collecting the problems reads that source again. `stop_for_problems()`
+collects the problems plan and raises `ConversionError` when any row failed.
+`ymd`, `mdy`, `dmy`, and `ym` use the same recorder. They default to
+permissive. Orders accept `-`, `/`, `.`, spaces, and compact digits
+(`20100131`). `ym` returns the first of the month. A two-digit year fails
+unless you pass `cutoff`: years up to and including the cutoff are 20xx,
+and the rest are 19xx, so `cutoff=68` reads `68` as 2068 and `69` as 1969.
+Four-digit years ignore the cutoff.
+
+`year`, `month`, and `day` pull those fields as integers. In a notebook
+pipe, a bare `year` is still the column when penguins (or any frame) has
+one: `filter(year == 2007)` filters the column, and `year(date)` calls the
+function. `floor_date` and `ceiling_date` round to `second`, `minute`,
+`hour`, `day`, `week`, `month`, `quarter`, or `year`. Weeks start on Sunday
+(`week_start=7`); `1` is Monday. A value already on the boundary stays
+there under `ceiling_date`. `days_in_month` is 29 for 29 February 2012.
+
+`date + months(1)` and `add_with_rollback` roll an impossible day back to
+the last real day of the destination month. 31 January 2010 plus one month
+is 28 February 2010. 29 February 2012 plus `years(1)` is 28 February 2013.
+Subtracting a date from `months()` or `years()` is an error. `today()` and
+`now()` are Python values taken when the pipe is built. The default
+timezone is UTC. `tzone="local"` uses the machine zone, and any other
+string is an IANA name such as `"America/Los_Angeles"`. `now()` returns the
+wall time in that zone as a naive datetime.
+
+```python
+from pathlib import Path
+
+Path("ids.csv").write_text("id,mass\n001,NA\n002,3700\n# skipped\n", encoding="utf-8")
+read_csv(
+    "ids.csv",
+    col_types={"id": "character", "mass": "double"},
+    na="NA",
+    comment="#",
+    id="source",
+)
+```
+
+`read_csv`, `read_tsv`, and `read_delim` load a `TidyFrame` and share those
+options with `scan_csv`. `read_*` defaults `trim_ws=True`; `scan_csv`
+defaults it to `False`. `col_types` values `character`, `integer`,
+`double`, `logical`, `date`, and `datetime` are read as text and then
+parsed, so an id column keeps leading zeros and a bad integer becomes
+missing with a row in `problems()`. Date columns are ISO `YYYY-MM-DD`.
+`id` adds a column with each row's source path, including when `source` is
+a glob. A non-UTF-8 `encoding` is available on `read_csv` for one file;
+`scan_csv` asks you to use `read_csv` for that. `read_excel(path, sheet=)`
+and `excel_sheets(path)` need `pip install 'tidy3[excel]'`.
 
 ### Tidy-select and column-wise operations
 

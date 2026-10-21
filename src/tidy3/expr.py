@@ -228,7 +228,48 @@ def _agg(name: str):
 
 
 mean = _agg("mean")
-sum = _agg("sum")  # noqa: A001
+
+
+def sum(x: Any, *, na_rm: bool = False, min_count: int | None = None) -> Any:  # noqa: A001
+    """Sum of a column, or of a row-wise selection.
+
+    ``na_rm=False`` (the default) makes the result missing when any value
+    is missing. ``min_count`` makes it missing when fewer than that many
+    values are present, so an empty group stays missing instead of becoming
+    0. Leave ``min_count`` unset for the usual sum.
+
+    ``sum(c_across(...))`` with the defaults stays a horizontal sum: missing
+    values are skipped and an empty row is 0. Pass ``na_rm=True`` or
+    ``min_count`` to use the same rules as ``row_sums``. Shadows Python's
+    ``sum`` when imported from tidy3, as ``min``, ``max``, ``any``, and
+    ``all`` already do.
+    """
+    if not isinstance(na_rm, bool):
+        raise TypeError("sum() na_rm must be a boolean")
+    if min_count is not None and (
+        isinstance(min_count, bool) or not isinstance(min_count, int) or min_count < 0
+    ):
+        raise ValueError("sum() min_count must be a non-negative integer")
+    if type(x).__name__ == "ColumnSet" and (na_rm or min_count is not None):
+        from tidy3.helpers import RowReduce
+
+        return RowReduce(
+            x.selector,
+            "sum",
+            na_rm=na_rm,
+            min_count=min_count,
+            requires_rowwise=bool(x.requires_rowwise),
+        )
+    aggregate = getattr(x, "_tidy3_aggregate", None)
+    if callable(aggregate):
+        return aggregate("sum")
+    base = col(x) if isinstance(x, str) else x
+    kwargs: dict[str, Any] = {"na_rm": na_rm}
+    if min_count is not None:
+        kwargs["min_count"] = min_count
+    return Expr(("call", "sum", _node(base), (), kwargs))
+
+
 min = _agg("min")  # noqa: A001
 max = _agg("max")  # noqa: A001
 median = _agg("median")
@@ -792,7 +833,15 @@ def _compile_pl(node: tuple) -> Any:
     if kind == "col":
         return pl.col(node[1])
     if kind == "lit":
-        return pl.lit(node[1])
+        value = node[1]
+        # months()/years() are Python periods, not Polars scalars. Callers
+        # that add them read the period off the node; pl.lit cannot hold one.
+        if type(value).__name__ == "Period":
+            from tidy3.dates import Period
+
+            if isinstance(value, Period):
+                return value
+        return pl.lit(value)
     if kind == "pl":
         return node[1]
     if kind == "n":
@@ -804,6 +853,12 @@ def _compile_pl(node: tuple) -> Any:
     if kind == "not":
         return ~_compile_pl(node[1])
     if kind == "bin":
+        if node[1] in {"+", "-"}:
+            from tidy3.dates import compile_period_bin
+
+            shifted = compile_period_bin(node[1], node[2], node[3], _compile_pl)
+            if shifted is not None:
+                return shifted
         return _PL_BIN[node[1]](_compile_pl(node[2]), _compile_pl(node[3]))
     if kind == "horizontal":
         _, operation, columns = node
@@ -866,6 +921,23 @@ def _compile_pl(node: tuple) -> Any:
             from tidy3.stringr import compile_polars
 
             return compile_polars(name, args, literal_kwargs)
+        from tidy3.helpers import FUNCTIONS as _HELPER_FUNCTIONS
+        from tidy3.helpers import compile_polars as _compile_helper
+        from tidy3.convert import FUNCTIONS as _CONVERT_FUNCTIONS
+        from tidy3.convert import compile_polars as _compile_convert
+        from tidy3.dates import FUNCTIONS as _DATE_FUNCTIONS
+        from tidy3.dates import compile_polars as _compile_date
+
+        if name in _HELPER_FUNCTIONS:
+            return _compile_helper(name, args, literal_kwargs)
+        if name in _CONVERT_FUNCTIONS or name in _DATE_FUNCTIONS:
+            source = raw_args[0][1] if raw_args and raw_args[0][0] in {"col", "name"} else None
+            if name in _CONVERT_FUNCTIONS:
+                from tidy3.convert import _OUTPUT
+
+                column = source or _OUTPUT.get() or "<expression>"
+                return _compile_convert(name, args, literal_kwargs, column=column)
+            return _compile_date(name, args, literal_kwargs)
         if name == "row_number":
             return (
                 args[0].rank(method="ordinal", descending=descending)
@@ -1038,32 +1110,40 @@ def _compile_pl(node: tuple) -> Any:
         kwargs = {k: to_polars(v) if isinstance(v, Expr) else v for k, v in kwargs.items()}
         if name in {"mean", "sum", "min", "max", "median", "std", "var", "any", "all", "first", "last"}:
             na_rm = bool(kwargs.pop("na_rm", False))
+            min_count = kwargs.pop("min_count", None)
+            if min_count is not None and name != "sum":
+                raise ValueError("min_count is only supported by sum()")
             value = _compile_pl(base)
             if name in {"first", "last"}:
                 if na_rm:
                     value = value.drop_nulls()
                 return getattr(value, name)(*args, **kwargs)
             result = getattr(value, name)(*args, **kwargs)
-            if na_rm:
-                return result
-            missing = value.is_null().any()
-            if name == "any":
-                return (
-                    pl.when(result)
-                    .then(True)
-                    .when(missing)
-                    .then(None)
-                    .otherwise(False)
-                )
-            if name == "all":
-                return (
-                    pl.when(~result)
-                    .then(False)
-                    .when(missing)
-                    .then(None)
-                    .otherwise(True)
-                )
-            return pl.when(missing).then(None).otherwise(result)
+            if not na_rm:
+                missing = value.is_null().any()
+                if name == "any":
+                    result = (
+                        pl.when(result)
+                        .then(True)
+                        .when(missing)
+                        .then(None)
+                        .otherwise(False)
+                    )
+                elif name == "all":
+                    result = (
+                        pl.when(~result)
+                        .then(False)
+                        .when(missing)
+                        .then(None)
+                        .otherwise(True)
+                    )
+                else:
+                    result = pl.when(missing).then(None).otherwise(result)
+            if name == "sum" and min_count is not None:
+                numeric = value.cast(pl.Float64, strict=False)
+                observed = value.is_not_null() & ~numeric.is_nan().fill_null(False)
+                result = pl.when(observed.sum() < min_count).then(None).otherwise(result)
+            return result
         value = _compile_pl(base)
         result = getattr(value, name)(*args, **kwargs)
         if name in {"cum_sum", "cumsum", "cum_max", "cum_min", "cum_prod"}:

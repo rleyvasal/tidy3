@@ -86,6 +86,9 @@ R's `|>`:
 | `pivot_longer(ends_with("_mm"), names_to = "measure")` | `pivot_longer(ends_with("_mm"), names_to = "measure")` |
 | `` rename(`body mass` = body_mass_g) `` | `` rename(`body mass` = body_mass_g) `` |
 | `across(all_of(vars), mean)` | `across(all_of(vars), mean)` |
+| `filter(is.na(body_mass_g))` | `filter(is_na(body_mass_g))` |
+| `mutate(hp_capped = pmin(hp, 200))` | `mutate(hp_capped = pmin(hp, 200))` |
+| `mutate(date = ymd(date))` | `mutate(date = ymd(date))` |
 
 As in dplyr, a column beats a notebook variable of the same name; write
 `env.x` for the variable. Python's own spellings differ in a few places:
@@ -275,7 +278,7 @@ The whole example, as a script, is
 | NumPy, PyTorch, Numba | `to_numpy(columns=..., dtype=np.float32, order="c", writable=True)` |
 | pandas | `collect(as_="pandas")`, or `arrow_backed=True` to skip the copy |
 | Arrow, Polars | `collect(as_="arrow")`, `collect()` |
-| Files | `write_parquet`, `write_csv`, `write_ipc`, `write_excel` |
+| Files | `read_csv`, `write_parquet`, `write_csv`, `write_ipc`, `write_excel` |
 | GPU | `collect(engine="gpu")` with `cudf-polars` installed |
 
 ## In a Python script

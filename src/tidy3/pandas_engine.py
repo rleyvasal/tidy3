@@ -151,6 +151,38 @@ def _ev(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str) -> A
     if kind == "not":
         return ~_ev(node[1], df, groups, mode)
     if kind == "bin":
+        if node[1] in {"+", "-"}:
+            from tidy3.dates import Period, shift_pandas
+
+            left_period = (
+                node[2][1]
+                if node[2][0] == "lit" and isinstance(node[2][1], Period)
+                else None
+            )
+            right_period = (
+                node[3][1]
+                if node[3][0] == "lit" and isinstance(node[3][1], Period)
+                else None
+            )
+            if left_period is not None or right_period is not None:
+                if left_period is not None and right_period is not None:
+                    raise TypeError(
+                        "add months() or years() to a date, not to another period"
+                    )
+                if left_period is not None:
+                    if node[1] == "-":
+                        raise TypeError(
+                            "cannot subtract a date from months() or years()"
+                        )
+                    side = _ev(node[3], df, groups, mode)
+                    if not isinstance(side, pd.Series):
+                        side = pd.Series(side, index=df.index)
+                    return shift_pandas(side, left_period)
+                period = right_period if node[1] == "+" else -right_period
+                side = _ev(node[2], df, groups, mode)
+                if not isinstance(side, pd.Series):
+                    side = pd.Series(side, index=df.index)
+                return shift_pandas(side, period)
         left = _ev(node[2], df, groups, mode)
         right = _ev(node[3], df, groups, mode)
         if node[1] in _COMPARE:
@@ -246,6 +278,24 @@ def _ev_func(
         from tidy3.stringr import eval_pandas
 
         return eval_pandas(name, args, kwargs, df, groups, mode)
+
+    from tidy3.helpers import FUNCTIONS as _HELPER_FUNCTIONS
+    from tidy3.helpers import eval_pandas as _eval_helper
+    from tidy3.convert import FUNCTIONS as _CONVERT_FUNCTIONS
+    from tidy3.convert import eval_pandas as _eval_convert
+    from tidy3.dates import FUNCTIONS as _DATE_FUNCTIONS
+    from tidy3.dates import eval_pandas as _eval_date
+
+    if name in _HELPER_FUNCTIONS:
+        return _eval_helper(name, args, kwargs, df)
+    if name in _CONVERT_FUNCTIONS or name in _DATE_FUNCTIONS:
+        source = raw_args[0][1] if raw_args and raw_args[0][0] in {"col", "name"} else None
+        if name in _CONVERT_FUNCTIONS:
+            from tidy3.convert import _OUTPUT
+
+            column = source or _OUTPUT.get() or "<expression>"
+            return _eval_convert(name, args, kwargs, df, column=column)
+        return _eval_date(name, args, kwargs, df)
 
     if name == "cur_group_id":
         group_names = tuple(kwargs.get("groups", ()))
@@ -534,8 +584,16 @@ def _ev_call(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str)
     if name in _AGG:
         pdname = _AGG[name]
         na_rm = bool(kwargs.pop("na_rm", False))
+        min_count = kwargs.pop("min_count", None)
+        if min_count is not None and name != "sum":
+            raise ValueError("min_count is only supported by sum()")
         if not isinstance(b, pd.Series):
             b = pd.Series(b, index=df.index)
+
+        def _observed(series: pd.Series) -> float:
+            numeric = pd.to_numeric(series, errors="coerce")
+            return float(np.isfinite(numeric.to_numpy(dtype=float, na_value=np.nan)).sum())
+
         if groups:
             g = _grouped(b, df, groups)
             if pdname in {"first", "last"} and not na_rm:
@@ -545,19 +603,31 @@ def _ev_call(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str)
                 return g.apply(lambda series: series.iloc[index])
             if mode == "window":
                 result = g.transform(pdname)
-                if na_rm:
-                    return result
-                missing = g.transform(lambda series: series.isna().any())
-            else:
-                result = getattr(g, pdname)()
-                if na_rm:
-                    return result
+                if not na_rm:
+                    missing = g.transform(lambda series: series.isna().any())
+                    if pdname == "any":
+                        result = result.mask(~result.astype(bool) & missing)
+                    elif pdname == "all":
+                        result = result.mask(result.astype(bool) & missing)
+                    else:
+                        result = result.mask(missing)
+                if min_count is not None:
+                    counts = g.transform(_observed)
+                    result = result.mask(counts < min_count)
+                return result
+            result = getattr(g, pdname)()
+            if not na_rm:
                 missing = g.apply(lambda series: series.isna().any())
-            if pdname == "any":
-                return result.mask(~result.astype(bool) & missing)
-            if pdname == "all":
-                return result.mask(result.astype(bool) & missing)
-            return result.mask(missing)
+                if pdname == "any":
+                    result = result.mask(~result.astype(bool) & missing)
+                elif pdname == "all":
+                    result = result.mask(result.astype(bool) & missing)
+                else:
+                    result = result.mask(missing)
+            if min_count is not None:
+                counts = g.apply(_observed)
+                result = result.mask(counts < min_count)
+            return result
         # ungrouped → scalar (broadcasts in window mode, one row in agg mode)
         if pdname == "first":
             values = b.dropna() if na_rm else b
@@ -566,13 +636,13 @@ def _ev_call(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str)
             values = b.dropna() if na_rm else b
             return values.iloc[-1] if len(values) else np.nan
         result = getattr(b, pdname)()
-        if na_rm or not b.isna().any():
-            return result
-        if pdname == "any" and bool(result):
-            return True
-        if pdname == "all" and not bool(result):
-            return False
-        return np.nan
+        if not na_rm and b.isna().any():
+            if not (pdname == "any" and bool(result)):
+                if not (pdname == "all" and not bool(result)):
+                    result = np.nan
+        if min_count is not None and _observed(b) < min_count:
+            return np.nan
+        return result
 
     if name in _WINDOW:
         if mode != "window":
@@ -703,6 +773,8 @@ def do_mutate(df: pd.DataFrame, kwargs: dict, groups: list[str] | None) -> pd.Da
     grouped = (
         df.groupby(list(groups), sort=False, **_GB_KW) if groups else None
     )
+    from tidy3.convert import output_column
+
     new = {}
     for name, value in kwargs.items():
         result = (
@@ -710,11 +782,12 @@ def do_mutate(df: pd.DataFrame, kwargs: dict, groups: list[str] | None) -> pd.Da
             if grouped is not None
             else _NO_FAST_WINDOW
         )
-        new[name] = (
-            eval_expr(value, df, groups, "window")
-            if result is _NO_FAST_WINDOW
-            else result
-        )
+        with output_column(name):
+            new[name] = (
+                eval_expr(value, df, groups, "window")
+                if result is _NO_FAST_WINDOW
+                else result
+            )
     return df.assign(**new)
 
 

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 __all__ = ["TidyFrame", "tidy", "options"]
 
 _POLARS_EXECUTION_ENGINES = frozenset({"auto", "streaming", "gpu"})
+_KEEP = object()
 
 
 def _validate_execution_engine(engine: Any, *, backend: str) -> None:
@@ -29,6 +30,23 @@ def _validate_execution_engine(engine: Any, *, backend: str) -> None:
 
 def _uses_gpu_engine(engine: Any) -> bool:
     return engine == "gpu" or isinstance(engine, pl.GPUEngine)
+
+
+def _excel_frame(frame: Any, engine: Any) -> pl.DataFrame:
+    if isinstance(frame, TidyFrame):
+        return frame.collect(as_="polars", engine=engine)
+    if isinstance(frame, pl.DataFrame):
+        return frame
+    if isinstance(frame, pl.LazyFrame):
+        return frame.collect()
+    try:
+        import pandas as pd
+
+        if isinstance(frame, pd.DataFrame):
+            return pl.from_pandas(frame)
+    except ImportError:
+        pass
+    raise TypeError("write_excel() sheets must be tidy, Polars, or pandas frames")
 
 
 class TidyFrame:
@@ -48,6 +66,9 @@ class TidyFrame:
         # later filter/filter_out reference columns dropped by select —
         # equivalent to rewriting ``select >> filter`` as ``filter >> select``.
         "_select_base",
+        # Parse failures captured at mutate time. Polars: a lazy plan that
+        # still reads the pre-mutate source. Pandas: a small DataFrame.
+        "_problems",
     )
 
     def __init__(
@@ -59,6 +80,7 @@ class TidyFrame:
         group_drop: bool = True,
         category_levels: dict[str, list[Any]] | None = None,
         select_base: Any | None = None,
+        problems: Any | None = None,
     ):
         if not isinstance(data, pl.LazyFrame):
             import pandas as pd
@@ -81,6 +103,7 @@ class TidyFrame:
             }
         self._category_levels = dict(category_levels or {})
         self._select_base = select_base
+        self._problems = problems
 
     @property
     def backend(self) -> str:
@@ -188,11 +211,14 @@ class TidyFrame:
         category_levels: dict[str, list[Any]] | None = None,
         select_base: Any | None = None,
         keep_select_base: bool = False,
+        problems: Any = _KEEP,
     ) -> TidyFrame:
         # Default: clear select_base (most verbs invalidate the rewrite window).
         # select/filter set select_base=...; pass keep_select_base to preserve.
         if keep_select_base and select_base is None:
             select_base = self._select_base
+        if problems is _KEEP:
+            problems = self._problems
         return TidyFrame(
             lf,
             groups=groups,
@@ -206,6 +232,7 @@ class TidyFrame:
                 else category_levels
             ),
             select_base=select_base,
+            problems=problems,
         )
 
     def _with_pdf(
@@ -218,9 +245,12 @@ class TidyFrame:
         category_levels: dict[str, list[Any]] | None = None,
         select_base: Any | None = None,
         keep_select_base: bool = False,
+        problems: Any = _KEEP,
     ) -> TidyFrame:
         if keep_select_base and select_base is None:
             select_base = self._select_base
+        if problems is _KEEP:
+            problems = self._problems
         return TidyFrame(
             pdf,
             groups=groups,
@@ -234,6 +264,7 @@ class TidyFrame:
                 else category_levels
             ),
             select_base=select_base,
+            problems=problems,
         )
 
     # ── pipe ────────────────────────────────────────────────────────────
@@ -911,7 +942,9 @@ class TidyFrame:
         for every ``collect()``, plot, or ``to_numpy()``. Computing once keeps
         the result in memory; later verbs build on it. Groups, rowwise
         state, and the backend carry over. The pandas backend is already
-        eager, so it returns the frame unchanged.
+        eager, so it returns the frame unchanged. ``problems()`` still
+        describes the parse against the plan from before ``compute()``, so
+        collecting problems reads that source again rather than the cache.
         """
         _validate_execution_engine(engine, backend=self.backend)
         if self.backend == "pandas":
@@ -1187,25 +1220,62 @@ class TidyFrame:
             path, compression=compression, **kwargs
         )
 
+    def problems(self) -> TidyFrame:
+        """Parse failures for this frame. See :func:`tidy3.convert.problems`."""
+        from tidy3.convert import problems_frame
+
+        return problems_frame(self)
+
+    def stop_for_problems(self) -> TidyFrame:
+        """Raise when this frame has parse failures."""
+        from tidy3.convert import stop_for_problems
+
+        return stop_for_problems(self)
+
     def write_excel(
         self,
         path: Any,
         *,
         worksheet: str | None = None,
+        sheets: dict[str, Any] | None = None,
         engine: Any = "auto",
         **kwargs: Any,
     ) -> None:
-        """Materialize and write XLSX output using Polars/XlsxWriter."""
-        try:
-            self.collect(as_="polars", engine=engine).write_excel(
-                workbook=path, worksheet=worksheet, **kwargs
+        """Write an xlsx workbook.
+
+        ``worksheet`` names the single sheet for this frame. ``sheets`` is
+        a dict of sheet name to frame and writes exactly those sheets, not
+        this frame as well. Passing both is an error. Text that starts with
+        ``=`` is stored as text, not run as a formula.
+        """
+        if sheets is not None and worksheet is not None:
+            raise TypeError(
+                "write_excel() takes worksheet= for this frame, or sheets= "
+                "for several frames, not both"
             )
-        except ModuleNotFoundError as error:
-            if error.name == "xlsxwriter" or "xlsxwriter" in str(error).lower():
-                raise ImportError(
-                    "Excel output requires XlsxWriter: pip install xlsxwriter"
-                ) from error
-            raise
+        if sheets is not None and (not isinstance(sheets, dict) or not sheets):
+            raise TypeError(
+                "write_excel() sheets= must be a non-empty dict of sheet name to frame"
+            )
+        _validate_execution_engine(engine, backend=self.backend)
+        try:
+            import xlsxwriter
+        except ImportError as error:
+            raise ImportError(
+                "Excel output requires XlsxWriter. "
+                "Install it with pip install 'tidy3[excel]'."
+            ) from error
+        book = xlsxwriter.Workbook(path, {"strings_to_formulas": False})
+        try:
+            targets = list(sheets.items()) if sheets is not None else [(worksheet, self)]
+            for name, frame in targets:
+                data = _excel_frame(frame, engine)
+                options = dict(kwargs)
+                if name is not None:
+                    options["worksheet"] = name
+                data.write_excel(workbook=book, **options)
+        finally:
+            book.close()
 
     def lazy(self) -> pl.LazyFrame:
         return self._lf

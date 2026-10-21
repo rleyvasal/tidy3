@@ -132,6 +132,35 @@ def test_partial_run_rejects_leading_dot(cars_ns):
         )
 
 
+def test_partial_run_year_column_is_not_the_function():
+    """penguins.year must stay a column after year() is exported."""
+    namespace = {
+        "penguins": pl.DataFrame({"year": [2007, 2008], "body_mass_g": [10.0, None]})
+    }
+    result = partial_run(
+        """
+        tidy(penguins)
+        >> filter(year == 2007)
+        """,
+        namespace=namespace,
+    )
+    out = result.collect()
+    assert out.height == 1
+    assert out["year"].to_list() == [2007]
+
+
+def test_partial_run_year_call_parses_a_date():
+    namespace = {"events": pl.DataFrame({"date": ["2010-01-31", "2012-02-29"]})}
+    result = partial_run(
+        """
+        tidy(events)
+        >> mutate(y = year(ymd(date)))
+        """,
+        namespace=namespace,
+    )
+    assert result.collect()["y"].to_list() == [2010, 2012]
+
+
 def test_partial_run_named_frame(cars_ns):
     cars_ns["tf"] = tidy(cars_ns["cars"])
     result = partial_run(
