@@ -6,7 +6,7 @@ conversion (``strict=False``, and the default for ``parse_*`` and ``ymd``)
 turns those values into missing and records them for :func:`problems`.
 
 ``as_integer`` refuses ``2.5`` instead of cutting it to ``2``. ``as_double``
-does not strip grouping marks; ``parse_double`` and ``parse_number`` do.
+and ``parse_double`` do not strip grouping marks; ``parse_number`` does.
 """
 
 from __future__ import annotations
@@ -92,8 +92,9 @@ _DTYPES = {
     "ym": pl.Date,
 }
 
-_AS_TRUE = frozenset({"true", "t"})
-_AS_FALSE = frozenset({"false", "f"})
+# as.logical() takes exactly these spellings: no trimming, no other case.
+_AS_TRUE = frozenset({"TRUE", "true", "True", "T"})
+_AS_FALSE = frozenset({"FALSE", "false", "False", "F"})
 _PARSE_TRUE = frozenset({"true", "t", "1"})
 _PARSE_FALSE = frozenset({"false", "f", "0"})
 FUNCTIONS = frozenset(_SPECS)
@@ -105,9 +106,11 @@ _ORDERS = {
     "dmy": ("d", "m", "y"),
     "ym": ("y", "m"),
 }
-_TIME_TAIL = re.compile(
-    r"\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+_MONTH_NAMES = (
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
 )
+_ORDINALS = frozenset({"st", "nd", "rd", "th"})
 
 
 class _Bad(Exception):
@@ -155,8 +158,8 @@ class ConversionError(ValueError):
 class Locale:
     """Decimal mark, grouping mark, and encoding for the parsers.
 
-    The marks must differ. ``as_double`` ignores them; ``parse_double``,
-    ``parse_integer``, and ``parse_number`` use them.
+    The marks must differ. ``parse_double`` uses the decimal mark, and
+    :func:`parse_number` uses both. ``as_double`` ignores them.
     """
 
     __slots__ = ("decimal_mark", "grouping_mark", "encoding")
@@ -194,7 +197,7 @@ def locale(
     grouping_mark: str = ",",
     encoding: str = "utf-8",
 ) -> Locale:
-    """Locale for :func:`parse_double`, :func:`parse_integer`, and :func:`parse_number`.
+    """Locale for :func:`parse_double` and :func:`parse_number`.
 
     The default is a point for the decimal mark and a comma for grouping
     (``1,234.50``). A comma decimal is ``locale(decimal_mark=",", grouping_mark=".")``.
@@ -310,62 +313,63 @@ def _plain_float(text: str) -> float:
     return float(token)
 
 
-def _ungroup(whole: str, grouping_mark: str) -> str:
-    if grouping_mark not in whole:
-        if whole != "" and not whole.isdigit():
-            raise _Bad()
-        return whole
-    parts = whole.split(grouping_mark)
-    if not parts[0].isdigit() or not 1 <= len(parts[0]) <= 3:
-        raise _Bad()
-    for part in parts[1:]:
-        if not (part.isdigit() and len(part) == 3):
-            raise _Bad()
-    return "".join(parts)
+def _localized_float(text: str, decimal_mark: str) -> float:
+    """readr's ``parse_double``: a whole number with an optional exponent.
 
-
-def _localized_float(text: str, decimal_mark: str, grouping_mark: str) -> float:
+    Grouping marks, ``Inf``, and ``NaN`` are failures, as in readr; use
+    :func:`parse_number` for ``"1,234.5"``. Only ASCII digits count.
+    """
     token = text.strip()
-    lowered = token.lower()
-    if decimal_mark == "." and lowered in {"nan", "+nan", "-nan", "inf", "+inf", "-inf"}:
-        return float(lowered)
-    sign = 1
-    if token[:1] in "+-":
-        sign = -1 if token[0] == "-" else 1
-        token = token[1:]
-    if token == "" or token == decimal_mark:
+    if not re.fullmatch(_double_pattern(re.escape(decimal_mark)), token):
         raise _Bad()
-    if decimal_mark in token:
-        whole, frac = token.split(decimal_mark, 1)
-        if decimal_mark in frac or grouping_mark in frac or not frac.isdigit():
-            raise _Bad()
-    else:
-        whole, frac = token, None
-    whole = _ungroup(whole, grouping_mark)
-    if whole == "":
-        whole = "0"
-    if not whole.isdigit():
-        raise _Bad()
-    number = float(f"{whole}.{frac}" if frac is not None else whole)
-    return sign * number
+    return float(token.replace(decimal_mark, ".") if decimal_mark != "." else token)
+
+
+def _double_pattern(decimal: str) -> str:
+    return rf"[+-]?(?:[0-9]+(?:{decimal}[0-9]*)?|{decimal}[0-9]+)(?:[eE][+-]?[0-9]+)?"
 
 
 def _first_number(text: str, decimal_mark: str, grouping_mark: str) -> float:
-    decimal = re.escape(decimal_mark)
-    grouping = re.escape(grouping_mark)
-    pattern = re.compile(
-        rf"\d(?:\d|{grouping})*(?:{decimal}\d+)?|{decimal}\d+"
-    )
-    found = pattern.search(text)
-    if found is None:
+    """readr's ``parse_number``: the first number in *text*.
+
+    Skip to the first digit, minus, or decimal mark. A minus must be
+    followed by the number itself, so ``"$-5"`` is -5 but ``"-$5"`` and
+    ``"- 5"`` fail. Grouping marks are ignored wherever they fall in the
+    whole part (``"1,23"`` is 123), a second decimal mark ends the number
+    (``"1.2.3"`` is 1.2), and an exponent such as ``e3`` is read.
+    """
+    size = len(text)
+    i = 0
+    while i < size and not (
+        text[i] == "-" or text[i] == decimal_mark or "0" <= text[i] <= "9"
+    ):
+        i += 1
+    if i == size:
         raise _Bad()
-    prefix = text[: found.start()]
-    sign = -1 if re.search(r"-(?=[^\d]*)$", prefix) else 1
-    magnitude = _localized_float(found.group(0), decimal_mark, grouping_mark)
-    return sign * abs(magnitude)
+    sign = 1
+    if text[i] == "-":
+        sign = -1
+        i += 1
+    whole: list[str] = []
+    frac: list[str] = []
+    in_frac = False
+    while i < size:
+        char = text[i]
+        if "0" <= char <= "9":
+            (frac if in_frac else whole).append(char)
+        elif char == decimal_mark and not in_frac:
+            in_frac = True
+        elif char != grouping_mark or in_frac:
+            break
+        i += 1
+    if not whole and not frac:
+        raise _Bad()
+    exponent = re.match(r"[eE][+-]?[0-9]+", text[i:])
+    digits = f"{''.join(whole) or '0'}.{''.join(frac) or '0'}"
+    return sign * float(digits + (exponent.group(0) if exponent else ""))
 
 
-def _whole_int(value: Any, *, grouping_mark: str | None, decimal_mark: str | None) -> int:
+def _whole_int(value: Any) -> int:
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
@@ -376,21 +380,9 @@ def _whole_int(value: Any, *, grouping_mark: str | None, decimal_mark: str | Non
         number = int(value)
     elif isinstance(value, str):
         token = value.strip()
-        if grouping_mark is None:
-            if not re.fullmatch(r"[+-]?\d+", token):
-                raise _Bad()
-            number = int(token)
-        else:
-            if decimal_mark and decimal_mark in token:
-                raise _Bad()
-            sign = 1
-            if token[:1] in "+-":
-                sign = -1 if token[0] == "-" else 1
-                token = token[1:]
-            digits = _ungroup(token, grouping_mark)
-            if not digits.isdigit():
-                raise _Bad()
-            number = sign * int(digits)
+        if not re.fullmatch(r"[+-]?\d+", token):
+            raise _Bad()
+        number = int(token)
     else:
         raise _Bad()
     if number < _INT64_MIN or number > _INT64_MAX:
@@ -414,7 +406,7 @@ def _logical(value: Any, *, readr: bool) -> bool | None:
             raise _Bad()
         return value != 0
     if isinstance(value, str):
-        key = value.strip().lower()
+        key = value.strip().lower() if readr else value
         truth = _PARSE_TRUE if readr else _AS_TRUE
         false = _PARSE_FALSE if readr else _AS_FALSE
         if key in truth:
@@ -506,18 +498,6 @@ def _with_format(text: str, fmt: str, cutoff: int | None, *, as_date: bool) -> d
     return parsed.date() if as_date else parsed
 
 
-def _split_date_text(text: str) -> str:
-    if "T" in text:
-        head, tail = text.split("T", 1)
-        if _TIME_TAIL.fullmatch(tail):
-            return head
-    if " " in text:
-        head, tail = text.split(" ", 1)
-        if _TIME_TAIL.fullmatch(tail):
-            return head
-    return text
-
-
 def _expand_year(token: str, cutoff: int | None) -> int:
     if not token.isdigit():
         raise _Bad()
@@ -531,9 +511,36 @@ def _expand_year(token: str, cutoff: int | None) -> int:
     raise _Bad()
 
 
+def _month_number(word: str) -> int | None:
+    """``Jan``, ``jan``, ``Sept``, or ``January`` as 1-12; None for other words."""
+    word = word.lower()
+    if len(word) < 3:
+        return None
+    for number, name in enumerate(_MONTH_NAMES, start=1):
+        if name.startswith(word):
+            return number
+    return None
+
+
 def _parts_for(order: str, text: str) -> list[str]:
-    body = _split_date_text(text.strip())
-    parts = re.findall(r"\d+", body)
+    """Date fields of *text* in order, as lubridate's ``ymd`` family reads them.
+
+    Any punctuation or space separates fields, month names count as the
+    month (``"Jan 31 2010"``), and ordinals such as ``1st`` drop their
+    suffix. Any other word, or a time after the date, is a failure, as in
+    lubridate: ``ymd("2010-01-31 10:00")`` is NA.
+    """
+    parts: list[str] = []
+    for token in re.findall(r"[0-9]+|[A-Za-z]+", text):
+        if token.isdigit():
+            parts.append(token)
+        elif token.lower() in _ORDINALS and parts:
+            continue
+        else:
+            month = _month_number(token)
+            if month is None:
+                raise _Bad()
+            parts.append(str(month))
     widths = {"ymd": (8, 6), "mdy": (8, 6), "dmy": (8, 6), "ym": (6, 4)}
     if len(parts) == 1 and len(parts[0]) in widths[order]:
         digits = parts[0]
@@ -609,7 +616,7 @@ def _convert_one(
             if isinstance(value, (int, float)):
                 return float(value), False
             if isinstance(value, str):
-                return _localized_float(value, decimal_mark, grouping_mark), False
+                return _localized_float(value, decimal_mark), False
             raise _Bad()
         if kind == "parse_number":
             if isinstance(value, bool):
@@ -620,11 +627,10 @@ def _convert_one(
                 return _first_number(value, decimal_mark, grouping_mark), False
             raise _Bad()
         if kind == "integer":
-            return _whole_int(value, grouping_mark=None, decimal_mark=None), False
+            return _whole_int(value), False
         if kind == "parse_integer":
-            return _whole_int(
-                value, grouping_mark=grouping_mark, decimal_mark=decimal_mark
-            ), False
+            # readr's parse_integer takes no grouping marks: "1,234" fails.
+            return _whole_int(value), False
         if kind == "logical":
             return _logical(value, readr=False), False
         if kind == "parse_logical":
@@ -738,6 +744,153 @@ def _apply(values: list[Any], name: str, options: dict[str, Any], column: str):
     return converted, problems
 
 
+# ── native Polars path ──────────────────────────────────────────────────
+# as_double, as_integer, and parse_double on text, number, and logical
+# columns run as vectorized Polars casts. Each pattern accepts exactly what
+# the per-value converter above accepts, written with ASCII digits. Rows
+# the casts cannot settle (a failure with Unicode digits or spaces, where
+# Python's isdigit() and strip() differ from these patterns, or accepted
+# text that does not cast) go through the per-value path one by one, so
+# the two paths never disagree. Other column types use the per-value path.
+
+_FAST_KINDS = frozenset({"double", "integer", "parse_double"})
+# NaN and Inf in any case, with an optional sign: Polars' float cast reads
+# these spellings itself, as Python's float() does.
+_SPECIAL = r"(?i:[+-]?(?:nan|inf))"
+_PLAIN_FLOAT = (
+    rf"^(?:[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|{_SPECIAL})$"
+)
+_PLAIN_INT = r"^[+-]?[0-9]+$"
+# Python's \d and isdigit() take any Unicode digit, and its strip() also
+# removes \x1c-\x1f; the patterns here do neither.
+_UNSURE = r"[\x1c-\x1f]|[\d\s&&[^0-9\t\n\x0B\x0C\r ]]"
+
+
+def _rx(mark: str) -> str:
+    """*mark* as a regex literal; Polars' regex has no re.escape."""
+    return "\\x{%X}" % ord(mark)
+
+
+def _localized_pattern(decimal_mark: str) -> str:
+    return rf"^{_double_pattern(_rx(decimal_mark))}$"
+
+
+def _fast_text(text: pl.Expr, kind: str, options: dict[str, Any]) -> tuple[pl.Expr, pl.Expr]:
+    """``(value, accepted)`` for a stripped text column."""
+    if kind == "integer":
+        return text.cast(pl.Int64, strict=False), text.str.contains(_PLAIN_INT)
+    if kind == "double":
+        return text.cast(pl.Float64, strict=False), text.str.contains(_PLAIN_FLOAT)
+    decimal_mark = options["decimal_mark"]
+    cleaned = text
+    if decimal_mark != ".":
+        cleaned = cleaned.str.replace(decimal_mark, ".", literal=True)
+    accepted = text.str.contains(_localized_pattern(decimal_mark))
+    return cleaned.cast(pl.Float64, strict=False), accepted
+
+
+def _per_value(values: list[Any], options: dict[str, Any]) -> tuple[list[Any], list[bool]]:
+    pairs = [
+        _convert_one(
+            value,
+            kind=options["kind"],
+            cutoff=None,
+            fmt=None,
+            decimal_mark=options["decimal_mark"],
+            grouping_mark=options["grouping_mark"],
+            encoding=options["encoding"],
+        )
+        for value in values
+    ]
+    return [value for value, _ in pairs], [failed for _, failed in pairs]
+
+
+def _fast_convert(series: pl.Series, options: dict[str, Any]) -> tuple[pl.Series, pl.Series] | None:
+    """``(converted, failed)`` computed natively, or None for the per-value path."""
+    kind = options["kind"]
+    if kind not in _FAST_KINDS or options["encoding"].lower().replace("_", "-") not in {"utf-8", "utf8"}:
+        return None
+    dtype = series.dtype
+    out_dtype = pl.Int64 if kind == "integer" else pl.Float64
+    v = pl.col("v")
+    present = v.is_not_null()
+    if dtype == pl.Null:
+        value, failed = pl.lit(None, dtype=out_dtype), pl.lit(False)
+    elif dtype == pl.Boolean:
+        value, failed = v.cast(out_dtype), pl.lit(False)
+    elif dtype.is_integer():
+        if kind == "integer":
+            value = v.cast(pl.Int64, strict=False)
+            failed = present & value.is_null()
+        else:
+            value, failed = v.cast(pl.Float64), pl.lit(False)
+    elif dtype.is_float():
+        if kind == "integer":
+            whole = v.is_finite() & (v == v.floor())
+            value = pl.when(whole).then(v.cast(pl.Int64, strict=False))
+            failed = present & value.is_null()
+        else:
+            value, failed = v.cast(pl.Float64), pl.lit(False)
+    elif dtype == pl.String:
+        number, accepted = _fast_text(pl.col("t"), kind, options)
+        frame = (
+            series.to_frame("v")
+            .with_columns(t=v.str.strip_chars())
+            .with_columns(number=number, accepted=accepted)
+            .select(
+                value=pl.when("accepted").then("number"),
+                failed=present & ~pl.col("accepted"),
+                miss=pl.col("accepted") & pl.col("number").is_null(),
+            )
+        )
+        value_out, failed_out = frame["value"].cast(out_dtype), frame["failed"]
+        # Rows the casts cannot settle go through the per-value path alone:
+        # accepted text that did not cast (out of range, say), and failures
+        # that Python's Unicode-aware rules might still accept.
+        rows = failed_out.arg_true()
+        if rows.len():
+            rows = rows.filter(series.gather(rows).str.contains(_UNSURE))
+        rows = pl.concat([rows, frame["miss"].arg_true()])
+        if rows.len():
+            redo, redo_failed = _per_value(series.gather(rows).to_list(), options)
+            value_out = value_out.scatter(rows, pl.Series(redo, dtype=out_dtype))
+            failed_out = failed_out.scatter(rows, pl.Series(redo_failed, dtype=pl.Boolean))
+        return value_out, failed_out
+    else:
+        return None
+    frame = series.to_frame("v").select(
+        value=value.cast(out_dtype), failed=pl.repeat(False, pl.len()) | failed
+    )
+    return frame["value"], frame["failed"]
+
+
+def _failed_originals(series: pl.Series, failed: pl.Series) -> pl.Series:
+    """Original text of failed values, null elsewhere, as the per-value path writes it."""
+    if series.dtype == pl.String:
+        return series.to_frame("v").select(
+            pl.when(failed).then(pl.col("v")).otherwise(None)
+        ).to_series()
+    out = pl.Series([None] * series.len(), dtype=pl.String)
+    rows = failed.arg_true()
+    if rows.len():
+        out = out.scatter(rows, [_original(value) for value in series.gather(rows).to_list()])
+    return out
+
+
+def _fast_apply(
+    series: pl.Series, name: str, options: dict[str, Any], column: str
+) -> tuple[pl.Series, pl.Series] | None:
+    """The native path for :func:`_apply`: raise in strict mode, else return."""
+    fast = _fast_convert(series, options)
+    if fast is None:
+        return None
+    converted, failed = fast
+    if options["strict"] and failed.any():
+        originals = _failed_originals(series, failed).drop_nulls().to_list()
+        raise ConversionError.from_values(name, column, options["detail"], originals)
+    return converted, failed
+
+
 def compile_polars(
     name: str,
     args: tuple[Any, ...],
@@ -750,6 +903,9 @@ def compile_polars(
     dtype = _DTYPES[options["kind"]]
 
     def batch(series: pl.Series) -> pl.Series:
+        fast = _fast_apply(series, name, options, column)
+        if fast is not None:
+            return fast[0]
         converted, _problems = _apply(series.to_list(), name, options, column)
         return pl.Series(converted, dtype=dtype)
 
@@ -769,7 +925,14 @@ def eval_pandas(
     source = args[0]
     if not isinstance(source, pd.Series):
         source = pd.Series(source, index=df.index)
-    converted, problems = _apply(source.tolist(), name, options, column)
+    # pandas marks a missing value with NaN, in float and object columns
+    # alike, so NaN here is missing, not a failure: as_integer(c(2, NA)) is
+    # c(2L, NA), and as_date(c("2010-01-31", NA)) is a date and NA.
+    values = [
+        None if isinstance(value, float) and value != value else value
+        for value in source.tolist()
+    ]
+    converted, problems = _apply(values, name, options, column)
     sink = _SINK.get()
     if sink is not None and problems and not options["strict"]:
         sink.extend(problems)
@@ -863,6 +1026,9 @@ def _failure_expr(
     column: str,
 ) -> pl.Expr:
     def batch(series: pl.Series) -> pl.Series:
+        fast = _fast_convert(series, options)
+        if fast is not None:
+            return _failed_originals(series, fast[1])
         values = series.to_list()
         _converted, problems = convert_batch(
             values,
@@ -1049,8 +1215,10 @@ def as_character(x: Any, *, strict: bool = True) -> Expr:
 def as_logical(x: Any, *, strict: bool = True) -> Expr:
     """Convert to logical, as R's ``as.logical``.
 
-    ``TRUE`` / ``FALSE`` / ``T`` / ``F`` (any case) and numbers work: ``0``
-    is false and any other number is true. The string ``"1"`` is a failure.
+    Text must be exactly ``TRUE``, ``true``, ``True``, or ``T`` (or the
+    ``FALSE`` forms); ``"tRuE"`` and ``" TRUE"`` are failures, as in R.
+    Numbers work: ``0`` is false and any other number is true. The string
+    ``"1"`` is a failure.
     NaN is missing, not a failure. For ``true`` / ``false`` / ``1`` / ``0``
     text, use :func:`parse_logical`.
     """
@@ -1088,17 +1256,24 @@ def _parse(name: str, x: Any, *, suffix: dict[str, Any], marks: Locale | None) -
 
 
 def parse_double(x: Any, *, locale: Locale | None = None, strict: bool = False) -> Expr:
-    """Parse a whole string as a number, using *locale* grouping and decimal marks.
+    """Parse a whole string as a number, as readr's ``parse_double`` does.
 
-    ``"1,234.50"`` is ``1234.5`` with the default locale. ``"$1,234"`` fails
-    because of the dollar sign; use :func:`parse_number` for that. Failures
-    become missing and are listed by :func:`problems`, unless ``strict=True``.
+    ``"1.5"``, ``" 1e3 "``, and ``"5."`` work; the decimal mark comes from
+    *locale*. Grouping marks, currency, ``Inf``, and ``NaN`` are failures:
+    ``"1,234.50"`` and ``"$1,234"`` fail, so use :func:`parse_number` for
+    them. Failures become missing and are listed by :func:`problems`,
+    unless ``strict=True``.
     """
     return _parse("parse_double", x, suffix={"strict": strict}, marks=locale)
 
 
 def parse_integer(x: Any, *, locale: Locale | None = None, strict: bool = False) -> Expr:
-    """Parse a whole string as an integer. ``"1,234"`` works; ``"2.5"`` does not."""
+    """Parse a whole string as an integer, as readr's ``parse_integer`` does.
+
+    ``" 7 "``, ``"+5"``, and ``"007"`` work. ``"2.5"``, ``"1e3"``, and
+    ``"1,234"`` are failures. Integers are 64-bit, so values past R's
+    32-bit limit still parse. *locale* is accepted for symmetry and unused.
+    """
     return _parse("parse_integer", x, suffix={"strict": strict}, marks=locale)
 
 
@@ -1111,7 +1286,13 @@ def parse_logical(x: Any, *, strict: bool = False) -> Expr:
 
 
 def parse_number(x: Any, *, locale: Locale | None = None, strict: bool = False) -> Expr:
-    """The first number in messy text, such as ``"$1,234.50"`` → ``1234.5``."""
+    """The first number in messy text, as readr's ``parse_number`` reads it.
+
+    ``"$1,234.50"`` is 1234.5, ``"50%"`` is 50, and ``"1e3"`` is 1000.
+    Grouping marks are skipped anywhere in the whole part, so ``"1,23"`` is
+    123. A minus counts only right before the number: ``"$-5"`` is -5, but
+    ``"-$5"`` and ``"- 5"`` are failures, as in readr.
+    """
     return _parse("parse_number", x, suffix={"strict": strict}, marks=locale)
 
 
@@ -1160,9 +1341,11 @@ def parse_datetime(
 def ymd(x: Any, *, cutoff: int | None = None, strict: bool = False) -> Expr:
     """Parse year-month-day text into a date (lubridate's ``ymd``).
 
-    ``"2010-01-31"`` and ``"20100131"`` both work. A two-digit year needs
-    ``cutoff``; see :func:`parse_date`. Failures become missing and show up
-    in :func:`problems`.
+    ``"2010-01-31"``, ``"20100131"``, and ``"2010 Jan 31"`` all work; month
+    names may be abbreviated. Text with a time, such as
+    ``"2010-01-31 10:00"``, is a failure, as in lubridate. A two-digit year
+    needs ``cutoff``; see :func:`parse_date`. Failures become missing and
+    show up in :func:`problems`.
     """
     return _parse("ymd", x, suffix={"cutoff": cutoff, "strict": strict}, marks=None)
 

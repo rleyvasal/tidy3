@@ -172,12 +172,15 @@ def ceiling(x: Any) -> Expr:
 
 
 def round(x: Any, digits: int = 0) -> Expr:  # noqa: A001
-    """Round *x* half to even, the same rule as R's ``round`` and IEEE 754.
+    """Round *x* as R's ``round`` does (R 4.0 and later).
 
-    A value ending in 5 goes to the even digit: ``round(0.5)`` is 0 and
-    ``round(1.5)`` is 2. ``round(-1.5)`` is -2. Negative ``digits`` round
-    to tens, hundreds, and so on (``round(123, -1)`` is 120). Shadows
-    Python's ``round`` when imported from tidy3; Python uses this same rule.
+    An exact tie goes to the even digit: ``round(0.5)`` is 0, ``round(1.5)``
+    is 2, and ``round(0.125, 2)`` is 0.12. Otherwise the result is the
+    candidate nearer to the number as stored, so ``round(2.675, 2)`` is
+    2.67 because 2.675 is stored as 2.67499999.... Negative ``digits`` round
+    to tens, hundreds, and so on (``round(123, -1)`` is 120). Integer
+    columns stay integers. Shadows Python's ``round`` when imported from
+    tidy3.
     """
     if isinstance(digits, bool) or not isinstance(digits, int):
         raise TypeError("round() digits must be an integer")
@@ -327,9 +330,16 @@ def _flag_expr(name: str, value: pl.Expr) -> pl.Expr:
 
 
 def _nullify_nan(expr: pl.Expr) -> pl.Expr:
-    """Treat NaN as missing so pmin/row sums match R, where NaN is NA."""
-    nan = expr.cast(pl.Float64, strict=False).is_nan().fill_null(False)
-    return pl.when(nan).then(None).otherwise(expr)
+    """Treat NaN as missing so pmin/row sums match R, where NaN is NA.
+
+    Only float columns hold NaN; text such as ``"nan"`` is left alone, so
+    ``pmin(c("nan", "b"), c("c", "a"))`` is ``c("c", "a")`` as in R.
+    """
+
+    def batch(series: pl.Series) -> pl.Series:
+        return series.fill_nan(None) if series.dtype.is_float() else series
+
+    return expr.map_batches(batch, return_dtype=pl.dtype_of(expr), is_elementwise=True)
 
 
 def _pair(name: str, args: tuple[Any, ...], na_rm: bool) -> pl.Expr:
@@ -343,11 +353,50 @@ def _pair(name: str, args: tuple[Any, ...], na_rm: bool) -> pl.Expr:
     return pl.when(missing).then(None).otherwise(result)
 
 
+# R's round() (R 4.0 and later): of the two candidates either side of x,
+# take the one nearer to the double x actually holds; on an exact tie take
+# the even one. 2.675 is stored as 2.67499999..., so it rounds to 2.67,
+# while 0.125 is exact and rounds to 0.12. When x already has more than 15
+# significant digits before the rounding place, R returns it unchanged.
+_ROUND_KEEP_DIGITS = 15
+
+
 def _round_expr(value: pl.Expr, digits: int) -> pl.Expr:
-    if digits >= 0:
-        return value.round(digits, mode="half_to_even")
-    scale = 10 ** (-digits)
-    return (value / scale).round(0, mode="half_to_even") * scale
+    def batch(series: pl.Series) -> pl.Series:
+        if series.dtype.is_integer() and digits >= 0:
+            return series
+        # NumPy, not Polars arithmetic: Polars divides a column by a constant
+        # through its reciprocal, so 3 / 10 would come out 0.30000000000000004.
+        values = series.cast(pl.Float64).to_numpy()
+        rounded = pl.Series(series.name, _round_numpy(values, digits))
+        rounded = pl.select(
+            pl.when(series.is_null()).then(None).otherwise(rounded)
+        ).to_series()
+        return rounded.cast(series.dtype) if series.dtype.is_integer() else rounded
+
+    # Integers stay integers; floats stay floats.
+    return value.map_batches(batch, return_dtype=pl.dtype_of(value), is_elementwise=True)
+
+
+def _round_numpy(values: np.ndarray, digits: int) -> np.ndarray:
+    """R's ``round`` on a float array; shared by both backends."""
+    x = np.asarray(values, dtype=float)
+    with np.errstate(all="ignore"):
+        size = np.abs(x)
+        if digits >= 0:
+            scale = 10.0**digits
+            whole = np.floor(size * scale)
+            lower, upper = whole / scale, np.ceil(size * scale) / scale
+        else:
+            scale = 10.0**-digits
+            whole = np.floor(size / scale)
+            lower, upper = whole * scale, np.ceil(size / scale) * scale
+        down, up = size - lower, upper - size
+        nearer = np.where((down < up) | ((down == up) & (np.fmod(whole, 2) == 0)), lower, upper)
+        keep = ~np.isfinite(size) | (size == 0)
+        if digits > 0:
+            keep |= np.log10(size) + digits > _ROUND_KEEP_DIGITS
+        return np.where(keep, x, np.copysign(nearer, x))
 
 
 def _row_expr(
@@ -453,10 +502,13 @@ def eval_pandas(
     df: pd.DataFrame,
 ) -> Any:
     """Evaluate a helper against a pandas frame."""
+    # Inputs keep their own index: inside a grouped summarise, mean(hp) has
+    # one value per group, indexed by group, not one per row of *df*.
+    index = next((arg.index for arg in args if isinstance(arg, pd.Series)), df.index)
     if name in _FLAGS:
-        series = _as_series(args[0], df.index)
+        series = _as_series(args[0], index)
         return _pandas_flags(series)[name]
-    series = _as_series(args[0], df.index) if args else None
+    series = _as_series(args[0], index) if args else None
     if name == "abs":
         return series.abs()
     if name == "floor":
@@ -464,15 +516,22 @@ def eval_pandas(
     if name == "ceiling":
         return np.ceil(series)
     if name == "round":
-        return series.round(int(kwargs["digits"]))
+        digits = int(kwargs["digits"])
+        if pd.api.types.is_integer_dtype(series) and digits >= 0:
+            return series
+        values = series.to_numpy(dtype=float, na_value=np.nan)
+        rounded = pd.Series(_round_numpy(values, digits), index=series.index)
+        if pd.api.types.is_integer_dtype(series):
+            return rounded.astype(series.dtype)
+        return rounded
     if name in _PAIRS:
-        return _pandas_pair(name, args, bool(kwargs["na_rm"]), df.index)
+        return _pandas_pair(name, args, bool(kwargs["na_rm"]), index)
     if name in _ROWS:
         return _pandas_rows(
             "sum" if name == "row_sums" else "mean",
             args,
             na_rm=bool(kwargs["na_rm"]),
             min_count=kwargs.get("min_count"),
-            index=df.index,
+            index=index,
         )
     raise ValueError(f"unknown helper: {name}")

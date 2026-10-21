@@ -480,6 +480,182 @@ result <- switch(
       )
     }
   },
+  helper_edges = {
+    v <- c(1, NA, NaN, Inf)
+    list(
+      is_na=is.na(v),
+      is_finite=is.finite(v),
+      is_infinite=is.infinite(v),
+      abs=abs(c(-2.5, 2.5, NA)),
+      floor=floor(c(-2.5, 2.5, NA)),
+      ceiling=ceiling(c(-2.5, 2.5, NA)),
+      round_2=round(c(2.675, 0.125, 1.005), 2),
+      round_1=round(c(0.15, 0.25, 0.35), 1),
+      round_tens=round(c(125, 135, -15), -1),
+      pmin_text=pmin(c("nan", "b"), c("c", "a")),
+      pmin_nan=pmin(c(1, NaN), c(2, 3))
+    )
+  },
+  is_nan = is.nan(c(1, NA, NaN, Inf)),
+  conversions = list(
+    as_double=suppressWarnings(as.numeric(c("1.5", " 2 ", "1e5", "-.5", "NaN", "abc", "1,234"))),
+    as_integer=as.integer(c("2", " 7 ", "-3", "007")),
+    as_integer_num=as.integer(c(2, -3, NA)),
+    as_logical_text=as.logical(c("TRUE", "true", "T", "True", "FALSE", "false", "F", "tRuE", "yes", "1")),
+    as_logical_num=as.logical(c(0, 2, -1, NaN, NA)),
+    as_logical_exact=as.logical(c(" TRUE", "TRUE ", "yes", "True", "T", "false", "F")),
+    # 1e5 is "1e+05" in R; tidy3 writes whole numbers in full (see the reference).
+    as_character=as.character(c(1, 1.5, 123456, 0.25, -3, 100001)),
+    as_character_logical=as.character(c(TRUE, FALSE, NA)),
+    as_date=format(as.Date(c("2010-01-31", NA)), "%Y-%m-%d")
+  ),
+  lubridate_more = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      suppressPackageStartupMessages(library(lubridate))
+      day_text <- function(x) format(x, "%Y-%m-%d")
+      time_text <- function(x) format(x, "%Y-%m-%dT%H:%M:%S", tz="UTC")
+      d <- as.Date(c("2024-02-29", "2024-01-31", "2010-03-31"))
+      t <- ymd_hms(c("2026-10-21 15:30:00", "2026-10-18 09:00:00", "2026-10-18 00:00:00"))
+      list(
+        ymd=day_text(suppressWarnings(ymd(c("2010-01-31", "20100131", "2010/1/31", "2010.01.31", "2010 01 31", "bad")))),
+        ymd_with_time=day_text(suppressWarnings(ymd("2010-01-31 10:00:00"))),
+        mdy=day_text(suppressWarnings(mdy(c("01/31/2010", "1-31-2010", "Jan 31 2010")))),
+        dmy=day_text(dmy(c("31.01.2010", "31012010"))),
+        ym=day_text(ym(c("2010-02", "201002"))),
+        parts=list(year=year(d), month=month(d), day=day(d), days=as.integer(days_in_month(d))),
+        both=day_text(add_with_rollback(d, years(1) + months(1))),
+        back=day_text(add_with_rollback(d, -(years(1) + months(1)))),
+        month_column=day_text(d %m+% months(c(1L, NA, -1L))),
+        year_minus=day_text(d %m-% years(1)),
+        floor_week=time_text(floor_date(t, "week")),
+        ceiling_week=time_text(ceiling_date(t, "week")),
+        floor_week_monday=time_text(floor_date(t, "week", week_start=1)),
+        floor_month=time_text(floor_date(t, "month")),
+        ceiling_hour=time_text(ceiling_date(t, "hour")),
+        floor_quarter=day_text(floor_date(d, "quarter")),
+        ceiling_day=day_text(ceiling_date(d, "day")),
+        ceiling_month=day_text(ceiling_date(as.Date(c("2010-01-31", "2010-02-01")), "month"))
+      )
+    }
+  },
+  readr_more = {
+    if (!requireNamespace("readr", quietly=TRUE)) {
+      list(skip=TRUE, reason="readr is not installed")
+    } else {
+      suppressPackageStartupMessages(library(readr))
+      q <- function(x) suppressWarnings(x)
+      kept <- tibble(x=c("1", "a", "2", "b")) |>
+        filter(x != "1") |>
+        mutate(n=q(parse_double(x)))
+      found <- problems(kept$n)
+      list(
+        number=q(parse_number(c("-$1,234", "$-5", "USD -7.5", "Price - 12", "50%", "abc"))),
+        double=q(parse_double(c("1.5", " 1.5 ", "1e3", "abc"))),
+        double_grouped=q(parse_double("1,234.5")),
+        double_euro=q(parse_double(c("1,5", "-0,25"), locale=locale(decimal_mark=",", grouping_mark="."))),
+        integer=q(parse_integer(c("1234", " 7 ", "2.5", "x"))),
+        logical=q(parse_logical(c("TRUE", "T", "true", "t", "1", "FALSE", "f", "0", "yes"))),
+        date=format(q(parse_date(c("31/01/2010", "bad"), "%d/%m/%Y")), "%Y-%m-%d"),
+        date_cutoff=format(parse_date(c("68/01/02", "69/01/02"), "%y/%m/%d"), "%Y-%m-%d"),
+        problem_rows=found$row,
+        problem_values=found$actual
+      )
+    }
+  },
+  readr_files = {
+    if (!requireNamespace("readr", quietly=TRUE)) {
+      list(skip=TRUE, reason="readr is not installed")
+    } else {
+      suppressPackageStartupMessages(library(readr))
+      q <- function(x) suppressWarnings(suppressMessages(x))
+      cars <- q(read_csv(I("model,mpg,cyl,am\nMazda RX4,21.0, 6,TRUE\nDatsun 710,NA,4 ,false\nValiant, NA , 6,\n"), show_col_types=FALSE))
+      bad <- q(read_csv(I("model,hp\nMazda RX4,110\nValiant,abc\nDatsun 710,2.5\n"), col_types=cols(model=col_character(), hp=col_integer())))
+      found <- problems(bad)
+      list(
+        mpg=cars$mpg,
+        cyl=as.numeric(cars$cyl),
+        am=cars$am,
+        hp=bad$hp,
+        problem_rows=found$row,
+        problem_values=found$actual
+      )
+    }
+  },
+  round_grid = {
+    # Exact text, not JSON numbers: jsonlite keeps 15 decimals, which would
+    # hide a result that is off in the last bit.
+    x <- c((0:2000) / 1000, -(1:500) / 1000 * 3.7, (0:400) / 8,
+           2.675, 1.005, 5.015, 0.285, 2^900, 123456789.123456789)
+    exact <- function(v) sprintf("%.17g", v)
+    list(
+      d0=exact(round(x, 0)),
+      d1=exact(round(x, 1)),
+      d2=exact(round(x, 2)),
+      d3=exact(round(x, 3)),
+      tens=exact(round(x * 1000, -1)),
+      hundreds=exact(round(x * 1000, -2))
+    )
+  },
+  readr_grid = {
+    if (!requireNamespace("readr", quietly=TRUE)) {
+      list(skip=TRUE, reason="readr is not installed")
+    } else {
+      suppressPackageStartupMessages(library(readr))
+      q <- function(x) suppressWarnings(suppressMessages(x))
+      euro <- locale(decimal_mark=",", grouping_mark=".")
+      list(
+        number=q(parse_number(c("-$1,234", "$-5", "a-5", "- 5", "--5", "+5", "$+5", "1-2",
+          "1,234,", "(5)", ".5", "-.5", "12abc34", "abc", "1e3", "1E3", "50%", "1,23",
+          "1,2345", "12,34,567", "$1,234.50", "USD -7.5", "-", "Price 12", "1.2.3",
+          "1,234.5.6", " 7 ", "", "Price - 12", "3eggs"))),
+        number_euro=q(parse_number(c("1.234,5", "€1.234,5", "1,5"), locale=euro)),
+        double=q(parse_double(c("1,234", "1234", " 1e3", "1e+3", "1E-2", ".5", "5.", "+5",
+          "-.5", "Inf", "inf", "NaN", "1 234", "", "1.2.3"))),
+        double_euro=q(parse_double(c("1,5", "1.234,5", "1e3", ",5"), locale=euro)),
+        integer=q(parse_integer(c("1,234", "+5", "007", "1e3", "-0", " 12 ", "1.0", ""))),
+        logical=q(parse_logical(c("True", "TRUE", "yes", "Y", "N", "no", " true", "F", "0")))
+      )
+    }
+  },
+  readr_rows = {
+    if (!requireNamespace("readr", quietly=TRUE)) {
+      list(skip=TRUE, reason="readr is not installed")
+    } else {
+      suppressPackageStartupMessages(library(readr))
+      q <- function(x) suppressWarnings(suppressMessages(x))
+      rows <- function(text, ...) {
+        q(problems(q(read_csv(I(text), col_types=cols(model=col_character(), hp=col_integer()), ...))))$row
+      }
+      list(
+        rows_plain=rows("model,hp\nMazda RX4,110\nValiant,abc\nDatsun 710,2.5\n"),
+        rows_skip=rows("junk line\nmodel,hp\nMazda RX4,110\nValiant,abc\n", skip=1),
+        rows_comment=rows("model,hp\n# note\nMazda RX4,110\n# note\nValiant,abc\n", comment="#")
+      )
+    }
+  },
+  lubridate_grid = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      suppressPackageStartupMessages(library(lubridate))
+      day_text <- function(x) format(x, "%Y-%m-%d")
+      q <- function(x) suppressWarnings(x)
+      d <- as.Date(c("2010-01-31", "2010-01-30", "2010-01-01", "2010-04-01", "2010-02-17"))
+      list(
+        ymd=day_text(q(ymd(c("2010-01-31T10:00:00", "2010-01-31 10:00", "2010 Jan 31", "2010-jan-31")))),
+        mdy=day_text(q(mdy(c("January 31, 2010", "jan 31 2010", "Sept 1 2010", "31 Jan 2010")))),
+        dmy=day_text(q(dmy(c("31 Jan 2010", "31-January-2010", "1st March 2010")))),
+        ym=day_text(q(ym(c("2010 Feb", "2010-February")))),
+        ceiling_week=day_text(ceiling_date(d, "week")),
+        ceiling_month=day_text(ceiling_date(d, "month")),
+        ceiling_quarter=day_text(ceiling_date(d, "quarter")),
+        ceiling_year=day_text(ceiling_date(d, "year")),
+        floor_week=day_text(floor_date(d, "week"))
+      )
+    }
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 

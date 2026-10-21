@@ -1150,6 +1150,323 @@ def _readr_parse(backend: str):
     return {"number": number, "plain": plain, "integer": integer, "logical": logical}
 
 
+def _column(backend: str, values: list[Any], expr: Any) -> pl.Series:
+    """One expression over one column ``x``, as a vector."""
+    return (tidy({"x": values}, backend=backend) >> mutate(out=expr)).collect()["out"]
+
+
+def _helper_edges(backend: str):
+    import tidy3 as t3
+
+    v = [1.0, None, float("nan"), float("inf")]
+    half = [-2.5, 2.5, None]
+    return {
+        "is_na": _column(backend, v, t3.is_na("x")),
+        "is_finite": _column(backend, v, t3.is_finite("x")),
+        "is_infinite": _column(backend, v, t3.is_infinite("x")),
+        "abs": _column(backend, half, t3.abs("x")),
+        "floor": _column(backend, half, t3.floor("x")),
+        "ceiling": _column(backend, half, t3.ceiling("x")),
+        "round_2": _column(backend, [2.675, 0.125, 1.005], t3.round("x", 2)),
+        "round_1": _column(backend, [0.15, 0.25, 0.35], t3.round("x", 1)),
+        "round_tens": _column(backend, [125.0, 135.0, -15.0], t3.round("x", -1)),
+        "pmin_text": (
+            tidy({"a": ["nan", "b"], "b": ["c", "a"]}, backend=backend)
+            >> mutate(out=t3.pmin("a", "b"))
+        ).collect()["out"],
+        "pmin_nan": (
+            tidy({"a": [1.0, float("nan")], "b": [2.0, 3.0]}, backend=backend)
+            >> mutate(out=t3.pmin("a", "b"))
+        ).collect()["out"],
+    }
+
+
+def _is_nan(backend: str):
+    import tidy3 as t3
+
+    if backend == "pandas":
+        pytest.skip("pandas stores a missing float as NaN, so is_nan is true for NA there")
+    return _column(backend, [1.0, None, float("nan"), float("inf")], t3.is_nan("x"))
+
+
+def _conversions(backend: str):
+    import tidy3 as t3
+    from datetime import date
+
+    return {
+        "as_double": _column(
+            backend,
+            ["1.5", " 2 ", "1e5", "-.5", "NaN", "abc", "1,234"],
+            t3.as_double("x", strict=False),
+        ),
+        "as_integer": _column(backend, ["2", " 7 ", "-3", "007"], t3.as_integer("x")),
+        "as_integer_num": _column(backend, [2.0, -3.0, None], t3.as_integer("x")),
+        "as_logical_text": _column(
+            backend,
+            ["TRUE", "true", "T", "True", "FALSE", "false", "F", "tRuE", "yes", "1"],
+            t3.as_logical("x", strict=False),
+        ),
+        "as_logical_num": _column(
+            backend, [0.0, 2.0, -1.0, float("nan"), None], t3.as_logical("x")
+        ),
+        "as_character": _column(
+            backend, [1.0, 1.5, 123456.0, 0.25, -3.0, 100001.0], t3.as_character("x")
+        ),
+        "as_logical_exact": _column(
+            backend,
+            [" TRUE", "TRUE ", "yes", "True", "T", "false", "F"],
+            t3.as_logical("x", strict=False),
+        ),
+        "as_character_logical": _column(backend, [True, False, None], t3.as_character("x")),
+        "as_date": _column(
+            backend,
+            ["2010-01-31", None],
+            t3.as_character(t3.as_date("x")),
+        ),
+    }
+
+
+def _lubridate_more(backend: str):
+    import tidy3 as t3
+    from datetime import date, datetime
+
+    def days(values, expr):
+        return _column(backend, values, t3.as_character(expr))
+
+    d = [date(2024, 2, 29), date(2024, 1, 31), date(2010, 3, 31)]
+    t = [datetime(2026, 10, 21, 15, 30), datetime(2026, 10, 18, 9, 0), datetime(2026, 10, 18)]
+    dated = tidy({"d": d, "k": [1, None, -1]}, backend=backend)
+    moved = (
+        dated
+        >> mutate(
+            both=t3.add_with_rollback("d", t3.years(1) + t3.months(1)),
+            back=t3.add_with_rollback("d", -(t3.years(1) + t3.months(1))),
+            month_column=col("d") + t3.months(col("k")),
+            year_minus=col("d") - t3.years(1),
+            floor_quarter=t3.floor_date("d", "quarter"),
+            ceiling_day=t3.ceiling_date("d", "day"),
+        )
+        >> mutate(
+            both=t3.as_character("both"),
+            back=t3.as_character("back"),
+            month_column=t3.as_character("month_column"),
+            year_minus=t3.as_character("year_minus"),
+            floor_quarter=t3.as_character("floor_quarter"),
+            ceiling_day=t3.as_character("ceiling_day"),
+            year=t3.year("d"),
+            month=t3.month("d"),
+            day=t3.day("d"),
+            days=t3.days_in_month("d"),
+        )
+    ).collect()
+    return {
+        "ymd": days(
+            ["2010-01-31", "20100131", "2010/1/31", "2010.01.31", "2010 01 31", "bad"],
+            t3.ymd("x"),
+        ),
+        "ymd_with_time": days(["2010-01-31 10:00:00"], t3.ymd("x"))[0],
+        "mdy": days(["01/31/2010", "1-31-2010", "Jan 31 2010"], t3.mdy("x")),
+        "dmy": days(["31.01.2010", "31012010"], t3.dmy("x")),
+        "ym": days(["2010-02", "201002"], t3.ym("x")),
+        "parts": {
+            "year": moved["year"],
+            "month": moved["month"],
+            "day": moved["day"],
+            "days": moved["days"],
+        },
+        "both": moved["both"],
+        "back": moved["back"],
+        "month_column": moved["month_column"],
+        "year_minus": moved["year_minus"],
+        "floor_week": days(t, t3.floor_date("x", "week")),
+        "ceiling_week": days(t, t3.ceiling_date("x", "week")),
+        "floor_week_monday": days(t, t3.floor_date("x", "week", week_start=1)),
+        "floor_month": days(t, t3.floor_date("x", "month")),
+        "ceiling_hour": days(t, t3.ceiling_date("x", "hour")),
+        "floor_quarter": moved["floor_quarter"],
+        "ceiling_day": moved["ceiling_day"],
+        "ceiling_month": days(
+            [date(2010, 1, 31), date(2010, 2, 1)], t3.ceiling_date("x", "month")
+        ),
+    }
+
+
+def _readr_more(backend: str):
+    import tidy3 as t3
+
+    euro = t3.locale(decimal_mark=",", grouping_mark=".")
+    kept = (
+        tidy({"x": ["1", "a", "2", "b"]}, backend=backend)
+        >> filter(col("x") != "1")
+        >> mutate(n=t3.parse_double("x"))
+    )
+    found = t3.problems(kept).collect()
+    return {
+        "number": _column(
+            backend,
+            ["-$1,234", "$-5", "USD -7.5", "Price - 12", "50%", "abc"],
+            t3.parse_number("x"),
+        ),
+        "double": _column(backend, ["1.5", " 1.5 ", "1e3", "abc"], t3.parse_double("x")),
+        "double_grouped": _column(backend, ["1,234.5"], t3.parse_double("x"))[0],
+        "double_euro": _column(backend, ["1,5", "-0,25"], t3.parse_double("x", locale=euro)),
+        "integer": _column(backend, ["1234", " 7 ", "2.5", "x"], t3.parse_integer("x")),
+        "logical": _column(
+            backend,
+            ["TRUE", "T", "true", "t", "1", "FALSE", "f", "0", "yes"],
+            t3.parse_logical("x"),
+        ),
+        "date": _column(
+            backend,
+            ["31/01/2010", "bad"],
+            t3.as_character(t3.parse_date("x", "%d/%m/%Y")),
+        ),
+        # readr reads %y with a fixed cutoff of 68; tidy3 asks for it.
+        "date_cutoff": _column(
+            backend,
+            ["68/01/02", "69/01/02"],
+            t3.as_character(t3.parse_date("x", "%y/%m/%d", cutoff=68)),
+        ),
+        "problem_rows": found["row"],
+        "problem_values": found["original"],
+    }
+
+
+def _readr_files(backend: str):
+    import tempfile
+
+    import tidy3 as t3
+
+    if backend == "pandas":
+        pytest.skip("read_csv reads with Polars; the pandas backend has no reader of its own")
+    folder = Path(tempfile.mkdtemp())
+    cars_path = folder / "cars.csv"
+    cars_path.write_text(
+        "model,mpg,cyl,am\nMazda RX4,21.0, 6,TRUE\nDatsun 710,NA,4 ,false\nValiant, NA , 6,\n"
+    )
+    bad_path = folder / "bad.csv"
+    bad_path.write_text("model,hp\nMazda RX4,110\nValiant,abc\nDatsun 710,2.5\n")
+    cars = t3.read_csv(cars_path).collect()
+    bad = t3.read_csv(bad_path, col_types={"model": "character", "hp": "integer"})
+    found = t3.problems(bad).collect()
+    return {
+        "mpg": cars["mpg"],
+        # readr guesses whole numbers as double; compare the values.
+        "cyl": cars["cyl"].cast(pl.Float64),
+        "am": cars["am"],
+        "hp": bad.collect()["hp"],
+        "problem_rows": found["row"],
+        "problem_values": found["original"],
+    }
+
+
+def _round_grid(backend: str):
+    import tidy3 as t3
+
+    x = (
+        [k / 1000 for k in range(2001)]
+        + [-k / 1000 * 3.7 for k in range(1, 501)]
+        + [k / 8 for k in range(401)]
+        + [2.675, 1.005, 5.015, 0.285, 2.0**900, 123456789.123456789]
+    )
+    frame = tidy({"x": x, "big": [value * 1000 for value in x]}, backend=backend)
+    out = (
+        frame
+        >> mutate(
+            d0=t3.round("x", 0),
+            d1=t3.round("x", 1),
+            d2=t3.round("x", 2),
+            d3=t3.round("x", 3),
+            tens=t3.round("big", -1),
+            hundreds=t3.round("big", -2),
+        )
+    ).collect()
+    exact = lambda column: pl.Series(["%.17g" % value for value in out[column]])
+    return {name: exact(name) for name in ("d0", "d1", "d2", "d3", "tens", "hundreds")}
+
+
+def _readr_grid(backend: str):
+    import tidy3 as t3
+
+    euro = t3.locale(decimal_mark=",", grouping_mark=".")
+    result = {
+        "number": _column(
+            backend,
+            ["-$1,234", "$-5", "a-5", "- 5", "--5", "+5", "$+5", "1-2", "1,234,", "(5)",
+             ".5", "-.5", "12abc34", "abc", "1e3", "1E3", "50%", "1,23", "1,2345",
+             "12,34,567", "$1,234.50", "USD -7.5", "-", "Price 12", "1.2.3", "1,234.5.6",
+             " 7 ", "", "Price - 12", "3eggs"],
+            t3.parse_number("x"),
+        ),
+        "number_euro": _column(
+            backend, ["1.234,5", "€1.234,5", "1,5"], t3.parse_number("x", locale=euro)
+        ),
+        "double": _column(
+            backend,
+            ["1,234", "1234", " 1e3", "1e+3", "1E-2", ".5", "5.", "+5", "-.5", "Inf", "inf",
+             "NaN", "1 234", "", "1.2.3"],
+            t3.parse_double("x"),
+        ),
+        "double_euro": _column(
+            backend, ["1,5", "1.234,5", "1e3", ",5"], t3.parse_double("x", locale=euro)
+        ),
+        "integer": _column(
+            backend, ["1,234", "+5", "007", "1e3", "-0", " 12 ", "1.0", ""], t3.parse_integer("x")
+        ),
+        "logical": _column(
+            backend,
+            ["True", "TRUE", "yes", "Y", "N", "no", " true", "F", "0"],
+            t3.parse_logical("x"),
+        ),
+    }
+    return result
+
+
+def _readr_rows(backend: str):
+    import tempfile
+
+    import tidy3 as t3
+
+    if backend == "pandas":
+        pytest.skip("read_csv reads with Polars; the pandas backend has no reader of its own")
+    folder = Path(tempfile.mkdtemp())
+    result = {}
+
+    def rows(text, **kwargs):
+        path = folder / "file.csv"
+        path.write_text(text)
+        frame = t3.read_csv(path, col_types={"model": "character", "hp": "integer"}, **kwargs)
+        return t3.problems(frame).collect()["row"]
+
+    result["rows_plain"] = rows("model,hp\nMazda RX4,110\nValiant,abc\nDatsun 710,2.5\n")
+    result["rows_skip"] = rows("junk line\nmodel,hp\nMazda RX4,110\nValiant,abc\n", skip=1)[0]
+    result["rows_comment"] = rows(
+        "model,hp\n# note\nMazda RX4,110\n# note\nValiant,abc\n", comment="#"
+    )[0]
+    return result
+
+
+def _lubridate_grid(backend: str):
+    import tidy3 as t3
+    from datetime import date
+
+    def days(values, expr):
+        return _column(backend, values, t3.as_character(expr))
+
+    d = [date(2010, 1, 31), date(2010, 1, 30), date(2010, 1, 1), date(2010, 4, 1), date(2010, 2, 17)]
+    return {
+        "ymd": days(["2010-01-31T10:00:00", "2010-01-31 10:00", "2010 Jan 31", "2010-jan-31"], t3.ymd("x")),
+        "mdy": days(["January 31, 2010", "jan 31 2010", "Sept 1 2010", "31 Jan 2010"], t3.mdy("x")),
+        "dmy": days(["31 Jan 2010", "31-January-2010", "1st March 2010"], t3.dmy("x")),
+        "ym": days(["2010 Feb", "2010-February"], t3.ym("x")),
+        "ceiling_week": days(d, t3.ceiling_date("x", "week")),
+        "ceiling_month": days(d, t3.ceiling_date("x", "month")),
+        "ceiling_quarter": days(d, t3.ceiling_date("x", "quarter")),
+        "ceiling_year": days(d, t3.ceiling_date("x", "year")),
+        "floor_week": days(d, t3.floor_date("x", "week")),
+    }
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "filter_missing": _filter_missing,
     "filter_out_missing": _filter_out_missing,
@@ -1210,6 +1527,16 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "helpers": _helpers,
     "lubridate_dates": _lubridate_dates,
     "readr_parse": _readr_parse,
+    "helper_edges": _helper_edges,
+    "is_nan": _is_nan,
+    "conversions": _conversions,
+    "lubridate_more": _lubridate_more,
+    "readr_more": _readr_more,
+    "readr_files": _readr_files,
+    "round_grid": _round_grid,
+    "readr_grid": _readr_grid,
+    "readr_rows": _readr_rows,
+    "lubridate_grid": _lubridate_grid,
 }
 
 

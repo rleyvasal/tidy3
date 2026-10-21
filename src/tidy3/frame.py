@@ -942,14 +942,17 @@ class TidyFrame:
         for every ``collect()``, plot, or ``to_numpy()``. Computing once keeps
         the result in memory; later verbs build on it. Groups, rowwise
         state, and the backend carry over. The pandas backend is already
-        eager, so it returns the frame unchanged. ``problems()`` still
-        describes the parse against the plan from before ``compute()``, so
-        collecting problems reads that source again rather than the cache.
+        eager, so it returns the frame unchanged. Parse failures are
+        computed in the same run, so ``problems()`` afterwards reads the
+        stored failures and does not read the source again.
         """
         _validate_execution_engine(engine, backend=self.backend)
         if self.backend == "pandas":
             return self
-        return self._with_lf(self._lf.collect(engine=engine).lazy(), groups=self._groups)
+        if self._problems is None:
+            return self._with_lf(self._lf.collect(engine=engine).lazy(), groups=self._groups)
+        data, found = pl.collect_all([self._lf, self._problems], engine=engine)
+        return self._with_lf(data.lazy(), groups=self._groups, problems=found.lazy())
 
     def collect(
         self,

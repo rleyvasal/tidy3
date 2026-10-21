@@ -37,6 +37,7 @@ from tidy3 import (
     is_numeric,
     locale,
     mdy,
+    mean,
     month,
     months,
     mutate,
@@ -193,7 +194,8 @@ def test_parsers_locale_and_problems_are_lazy(backend, monkeypatch):
         n=parse_number("x"),
         eu=parse_double("x", locale=euro),
     )
-    assert _col(out, "n") == [1234.5, None, None]
+    # readr skips grouping marks anywhere in parse_number: "1,5" is 15.
+    assert _col(out, "n") == [1234.5, None, 15.0]
     assert _col(out, "eu")[2] == 1.5
     if backend == "polars":
         calls = []
@@ -270,14 +272,15 @@ def test_floor_and_ceiling_dates(backend):
         date(2010, 1, 31),
         date(2009, 12, 27),
     ]
+    # lubridate rounds a Date up to the next boundary, even from one.
     assert _col(out, "cw") == [
-        date(2010, 1, 31),
+        date(2010, 2, 7),
         date(2010, 1, 31),
         date(2010, 2, 7),
         date(2010, 1, 3),
     ]
     assert _col(out, "cm")[0] == date(2010, 2, 1)
-    assert _col(out, "cm")[3] == date(2010, 1, 1)
+    assert _col(out, "cm")[3] == date(2010, 2, 1)
 
 
 def test_today_and_now_default_to_utc():
@@ -363,3 +366,212 @@ def test_excel_extra_is_optional(tmp_path: Path):
         return
     assert "Sheet1" in excel_sheets(path) or excel_sheets(path)
     assert read_excel(path).collect()["note"].to_list() == ["=1+1"]
+
+
+# ── regressions from the 0.7.9 review ───────────────────────────────────
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_parse_number_reads_a_minus_as_readr_does(backend):
+    # Checked against readr: a minus counts only right before the number.
+    frame = tidy(
+        {"price": ["-$1,234", "$-5", "USD -7.5", "Price - 12", "1,23", "1e3", "1.2.3"]},
+        backend=backend,
+    )
+    assert _col(frame >> mutate(n=parse_number("price")), "n") == [
+        None, -5.0, -7.5, None, 123.0, 1000.0, 1.2
+    ]
+
+
+def test_read_csv_trims_before_guessing_types_and_reads_na(tmp_path: Path):
+    path = tmp_path / "cars.csv"
+    path.write_text("model,mpg,cyl,am\nMazda RX4,21.0, 6,TRUE\nDatsun 710,NA,4 ,false\nValiant, NA , 6,\n")
+    cars = read_csv(path).collect()
+    assert cars.schema == {"model": pl.String, "mpg": pl.Float64, "cyl": pl.Int64, "am": pl.Boolean}
+    assert cars["mpg"].to_list() == [21.0, None, None]
+    assert cars["cyl"].to_list() == [6, 4, 6]
+    assert cars["am"].to_list() == [True, False, None]
+    kept = read_csv(path, col_types={"cyl": "character"}, na=[]).collect()
+    assert kept["cyl"].to_list() == ["6", "4", "6"]
+    assert kept["mpg"].to_list() == ["21.0", "NA", "NA"]
+    # scan_csv keeps Polars' own guessing, as before.
+    assert scan_csv(path).collect()["cyl"].dtype == pl.String
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_years_and_months_roll_back_once(backend):
+    # lubridate's add_with_rollback adds 12 * years + months in one step.
+    frame = tidy({"d": [date(2024, 2, 29), date(2024, 1, 31)]}, backend=backend)
+    out = frame >> mutate(
+        both=col("d") + (years(1) + months(1)),
+        back=col("d") - (years(1) + months(1)),
+        rolled=add_with_rollback("d", years(1) + months(1)),
+    )
+    assert _col(out, "both") == [date(2025, 3, 29), date(2025, 2, 28)]
+    assert _col(out, "back") == [date(2023, 1, 29), date(2022, 12, 31)]
+    assert _col(out, "rolled") == [date(2025, 3, 29), date(2025, 2, 28)]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_months_of_a_column(backend):
+    frame = tidy(
+        {"d": [date(2024, 1, 31), date(2024, 1, 31), date(2010, 3, 31)], "k": [1, None, -1]},
+        backend=backend,
+    )
+    out = frame >> mutate(
+        plus=col("d") + months(col("k")),
+        rolled=add_with_rollback("d", months(col("k"))),
+        both=col("d") + (years(col("k")) + months(1)),
+    )
+    assert _col(out, "plus") == [date(2024, 2, 29), None, date(2010, 2, 28)]
+    assert _col(out, "rolled") == [date(2024, 2, 29), None, date(2010, 2, 28)]
+    assert _col(out, "both") == [date(2025, 2, 28), None, date(2009, 4, 30)]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_week_floor_and_ceiling_start_at_midnight(backend):
+    frame = tidy(
+        {
+            "t": [
+                datetime(2026, 10, 21, 15, 30),
+                datetime(2026, 10, 18, 9, 0),
+                datetime(2026, 10, 18, 0, 0),
+            ]
+        },
+        backend=backend,
+    )
+    out = frame >> mutate(f=floor_date("t", "week"), c=ceiling_date("t", "week"))
+    assert _col(out, "f") == [datetime(2026, 10, 18)] * 3
+    assert _col(out, "c") == [datetime(2026, 10, 25), datetime(2026, 10, 25), datetime(2026, 10, 18)]
+
+
+_TRICKY = [
+    "1", " 2 ", "+3", "-4", "007", "1.", ".5", "-.5", "1e5", "1E-2", ".", "+", "", "  ",
+    "nan", "-NAN", "Inf", "+inf", "infinity", "1,234", "1,234.50", "12,34", "1.234,5",
+    "0,123", "1 234", "$5", "2.5", "2.0", "9223372036854775807", "9223372036854775808",
+    "1e400", "-0", "0x10", "1_000", "²", "abc", "1.2.3", ",5", None,
+]
+
+
+@pytest.mark.parametrize(
+    "name, marks",
+    [
+        ("as_double", None),
+        ("as_integer", None),
+        ("parse_double", None),
+        ("parse_double", (",", ".")),
+        ("parse_double", (".", " ")),
+    ],
+)
+@pytest.mark.parametrize(
+    "values, dtype",
+    [
+        (_TRICKY, pl.String),
+        ([1.0, 2.5, -0.0, float("nan"), float("inf"), 9.3e18, 2.0**63, None], pl.Float64),
+        ([1, -5, 0, None, 2**62], pl.Int64),
+        ([True, False, None], pl.Boolean),
+    ],
+)
+def test_native_conversion_matches_the_per_value_path(name, marks, values, dtype):
+    from tidy3 import convert
+
+    kwargs = {} if marks is None else {"decimal_mark": marks[0], "grouping_mark": marks[1]}
+    options = convert._options(name, kwargs)
+    series = pl.Series(values, dtype=dtype)
+    fast = convert._fast_convert(series, options)
+    assert fast is not None
+    expected, problems_found = convert.convert_batch(
+        values,
+        kind=options["kind"],
+        column="x",
+        expected="e",
+        decimal_mark=options["decimal_mark"],
+        grouping_mark=options["grouping_mark"],
+    )
+    failed = [False] * len(values)
+    for row in problems_found:
+        failed[row["row"] - 1] = True
+    assert fast[1].to_list() == failed
+    for got, want in zip(fast[0].to_list(), expected):
+        if isinstance(want, float) and want != want:
+            assert got != got
+        else:
+            assert got == want
+
+
+def test_native_conversion_skips_the_python_loop(monkeypatch):
+    from tidy3 import convert
+
+    def boom(*args, **kwargs):
+        raise AssertionError("per-value path used")
+
+    monkeypatch.setattr(convert, "convert_batch", boom)
+    cars = tidy({"mpg": ["21.0", "22.8", "n/a"], "cyl": ["6", "4", "8"], "disp": ["1234.5", "160", "x"]})
+    out = cars >> mutate(
+        mpg=as_double("mpg", strict=False),
+        cyl=as_integer("cyl"),
+        disp=parse_double("disp"),
+    )
+    data = out.collect()
+    assert data["mpg"].to_list() == [21.0, 22.8, None]
+    assert data["cyl"].to_list() == [6, 4, 8]
+    assert data["disp"].to_list() == [1234.5, 160.0, None]
+    found = problems(out).collect()
+    assert found["original"].to_list() == ["n/a", "x"]
+    assert found["row"].to_list() == [3, 3]
+    with pytest.raises(ConversionError, match="'n/a'"):
+        (cars >> mutate(mpg=as_double("mpg"))).collect()
+
+
+def test_unicode_digits_fall_back_to_the_per_value_path():
+    # Python reads Arabic-Indic digits; the native casts do not.
+    frame = tidy({"x": ["١٢", "3", "bad"]})
+    assert _col(frame >> mutate(n=as_double("x", strict=False)), "n") == [12.0, 3.0, None]
+    assert _col(frame >> mutate(n=as_integer("x", strict=False)), "n") == [12, 3, None]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_parsers_treat_empty_text_as_a_failure_not_a_crash(backend):
+    frame = tidy({"x": ["", "  ", "5"]}, backend=backend)
+    out = frame >> mutate(d=parse_double("x"), i=parse_integer("x"))
+    assert _col(out, "d") == [None, None, 5.0]
+    assert _col(out, "i") == [None, None, 5]
+
+
+def test_problems_after_read_csv_do_not_read_the_file_again(tmp_path: Path):
+    path = tmp_path / "cars.csv"
+    path.write_text("model,hp\nMazda RX4,110\nValiant,abc\n")
+    frame = read_csv(path, col_types={"hp": "integer"})
+    path.unlink()
+    found = problems(frame).collect()
+    # readr counts the header line: Valiant, the second data row, is row 3.
+    assert found["row"].to_list() == [3]
+    assert found["original"].to_list() == ["abc"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_as_integer_treats_a_missing_float_as_missing(backend):
+    # pandas stores the missing hp as NaN; that is NA, not a failure.
+    frame = tidy({"hp": [110.0, None, 93.0]}, backend=backend)
+    assert _col(frame >> mutate(n=as_integer("hp")), "n") == [110, None, 93]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_helpers_around_a_summary_give_one_value_per_group(backend):
+    cars = tidy({"cyl": [4, 4, 6], "hp": [93.0, 62.0, 110.0]}, backend=backend)
+    whole = cars >> summarise(m=round(mean("hp"), -1), low=pmin(mean("hp"), 80))
+    assert _col(whole, "m") == [90.0]
+    assert _col(whole, "low") == [80.0]
+    grouped = cars >> group_by("cyl") >> summarise(m=round(mean("hp"), -1), a=abs(mean("hp")))
+    assert _col(grouped, "m") == [80.0, 110.0]
+    assert _col(grouped, "a") == [77.5, 110.0]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_helpers_take_constants(backend):
+    cars = tidy({"hp": [110.0, 250.0], "cyl": [6, 8]}, backend=backend)
+    out = cars >> mutate(r=round(2.675, 2), capped=pmin("hp", 200), tens=round("cyl", -1))
+    assert _col(out, "r") == [2.67, 2.67]
+    assert _col(out, "capped") == [110.0, 200.0]
+    assert _col(out, "tens") == [10, 10]
+    assert out.collect()["tens"].dtype == pl.Int64

@@ -4,6 +4,32 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+The R oracle tests now cover the 0.7.9 helpers against R, readr, and lubridate, and the differences they found are fixed. Where tidy3 still differs on purpose, the reference lists it.
+
+### Fixed
+
+- `parse_number` reads text the way readr does. A minus counts only right before the number, so `"$-5"` is -5 but `"-$1,234"` and `"Price - 12"` are missing. Grouping marks are skipped anywhere in the whole part (`"1,23"` is 123), a second decimal mark ends the number (`"1.2.3"` is 1.2), and exponents work (`"1e3"` is 1000).
+- `parse_double` takes an exponent (`"1e3"`) and, as in readr, fails on grouping marks, `Inf`, and `NaN`: `"1,234.5"` is missing, so use `parse_number`. `parse_integer` fails on `"1,234"`.
+- `parse_double` and `parse_integer` no longer crash on empty or blank text; it is a recorded failure.
+- `as_logical` takes exactly `TRUE`, `true`, `True`, and `T` (and the `FALSE` forms), as R does; `"tRuE"` and `" TRUE"` are missing.
+- `round` follows R 4's rule: an exact tie goes to the even digit, and otherwise the nearer candidate to the stored number wins, so `round(2.675, 2)` is 2.67 and `round(0.15, 1)` is 0.1. Integer columns stay integers on both backends. Checked against R on about 17,000 values.
+- `pmin` and `pmax` leave text such as `"nan"` alone; only a float NaN counts as missing.
+- `ymd`, `mdy`, `dmy`, and `ym` read month names (`"Jan 31 2010"`) and ordinals (`"1st March 2010"`), and text with a time is missing, as in lubridate.
+- `ceiling_date` on a date moves to the next boundary even from one, as lubridate does: 2010-02-01 rounded up to a month is 2010-03-01. Datetimes on a boundary stay put.
+- `floor_date` and `ceiling_date` with `"week"` start the week at midnight, so a datetime with a time of day floors to 00:00.
+- `years()` and `months()` added together move by `12 * years + months` in one step, as lubridate's `add_with_rollback` does: 29 February 2024 plus `years(1) + months(1)` is 29 March 2025, not 28 March.
+- `months(col("n"))` and `years(col("n"))` work on the pandas backend; a missing count gives a missing date on both backends.
+- `problems()` after `read_csv` (or any `compute()`) no longer reads the file again; the failures are worked out in the same run as the data. For `read_csv`, `row` counts the header line, as readr does.
+- `read_csv`, `read_tsv`, and `read_delim` trim fields before guessing column types, so a padded `" 6"` in mtcars' `cyl` is a number, not text. They also read `NA` as missing by default (`na=["", "NA"]`, as readr does). `scan_csv` is unchanged.
+- On the pandas backend, `summarise(m = round(mean(hp), 1))` and other helpers around a summary give one value per group instead of an error, and conversions treat NaN as missing, so `as_integer` of a float column with a missing value works.
+
+### Changed
+
+- On Polars, `as_double`, `as_integer`, and `parse_double` on text and number columns run as native casts, about 30 times faster on a million rows. Results, failures, and `problems()` are the same as before; values the casts cannot settle, such as non-ASCII digits, still go through the per-value rules.
+- The R oracle job in CI installs lubridate and readr, so their cases run there instead of being skipped.
+
 ## 0.7.9 — 2026-10-21
 
 Column helpers, type conversion, calendar dates, readr-style parsers, and easier file reading. Each new expression compiles on the Polars and pandas backends.

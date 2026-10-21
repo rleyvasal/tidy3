@@ -187,9 +187,12 @@ for positive or negative infinity. On the pandas backend a missing float is
 stored as NaN, so that cell is both `is_na` and `is_nan`. The string
 `"nan"` is text, not a missing number.
 
-`round` uses half-to-even (IEEE 754), the same rule as R's `round()`:
-`round(0.5)` is 0, `round(1.5)` is 2, and `round(-1.5)` is -2. Negative
-`digits` round to tens (`round(123, digits=-1)` is 120). `pmin` and `pmax`
+`round` follows R's `round()` (R 4.0 and later). An exact tie goes to the
+even digit: `round(0.5)` is 0, `round(1.5)` is 2, and `round(0.125, 2)` is
+0.12. Otherwise the result is the candidate nearer to the number as
+stored, so `round(2.675, 2)` is 2.67 because 2.675 is stored as
+2.67499999.... Negative `digits` round to tens (`round(123, digits=-1)` is
+120), and integer columns stay integers. `pmin` and `pmax`
 are element-wise. With `na_rm=False`, any missing input makes that row
 missing. `row_sums(..., na_rm=True)` of an all-missing row is 0;
 `min_count=1` makes that row missing. `row_means` of an all-missing row is
@@ -205,30 +208,47 @@ pandas. The message names the column and shows up to five bad values.
 `strict=False` turns those values into missing and records them for
 `problems()`. `as_integer(2.5)` is an error; `2` and `2.0` succeed, and the
 strings `"2.0"` and `"2.5"` do not. `as_double` does not strip thousands
-separators. `as_logical` accepts `TRUE`/`FALSE`/`T`/`F` and numbers (`0` is
-false); the string `"1"` fails. `as_date` accepts ISO `YYYY-MM-DD`.
+separators. `as_logical` accepts exactly `TRUE`, `true`, `True`, and `T`
+(and the `FALSE` forms), as R does: `"tRuE"` and `" TRUE"` fail, and so
+does the string `"1"`. Numbers work (`0` is false). `as_date` accepts ISO `YYYY-MM-DD`.
 `as_datetime` accepts an ISO date or a time after a space or `T`, treats
 `Z` and numeric offsets as UTC, and returns a naive datetime of that UTC
 clock time.
 
 `parse_double`, `parse_integer`, `parse_logical`, `parse_date`,
 `parse_datetime`, and `parse_number` are permissive unless you pass
-`strict=True`. `parse_number("$1,234.50")` is `1234.5`. `parse_double`
-requires the whole string to be a number. Grouping must come in threes from
-the right. `locale(decimal_mark=",", grouping_mark=".")` switches the
-marks; the two marks are single characters and must differ.
+`strict=True`. They follow readr, checked against it in the R oracle
+tests. `parse_number` reads the first number in the text:
+`"$1,234.50"` is 1234.5, `"50%"` is 50, and `"1e3"` is 1000. Grouping
+marks are skipped anywhere in the whole part (`"1,23"` is 123), and a
+second decimal mark ends the number (`"1.2.3"` is 1.2). A minus counts only
+right before the number: `"$-5"` is -5, while `"-$5"` and `"- 5"` are
+missing. `parse_double` requires the whole string to be one number, with an
+optional exponent; grouping marks, `Inf`, and `NaN` fail (`"1,234.5"` is
+missing; use `parse_number`). `parse_integer` fails on `"1,234"`, `"2.5"`,
+and `"1e3"`, and is 64-bit, so it reads values past R's 32-bit limit.
+`locale(decimal_mark=",", grouping_mark=".")` switches the marks; the two
+marks are single characters and must differ.
+On Polars, `as_double`, `as_integer`, and `parse_double` on text and
+number columns run as native casts; they give the same results as the
+per-value rules above.
 `parse_logical` accepts `true`/`false`/`t`/`f`/`1`/`0`. `parse_date` and
 `parse_datetime` take a `strptime` format.
 
 `problems(frame)` returns a frame with columns `row` (1-based), `column`,
-`original`, and `expected`. On Polars that frame is a lazy plan captured
-when the parse was added. Calling `problems()` does not collect the data,
-and `compute()` keeps the plan pointed at the scan from before the compute,
-so collecting the problems reads that source again. `stop_for_problems()`
+`original`, and `expected`. As in readr, `row` is the position in the
+column that was parsed: after `filter`, row 1 is the first row that
+remains. For `read_csv`, `row` counts the header line, so the first data
+row is row 2; skipped and comment lines do not count. On Polars that frame is a lazy plan captured
+when the parse was added. Calling `problems()` does not collect the data.
+`compute()`, and so `read_csv`, works out the failures in the same run as
+the data, so `problems()` afterwards does not read the source again. `stop_for_problems()`
 collects the problems plan and raises `ConversionError` when any row failed.
 `ymd`, `mdy`, `dmy`, and `ym` use the same recorder. They default to
-permissive. Orders accept `-`, `/`, `.`, spaces, and compact digits
-(`20100131`). `ym` returns the first of the month. A two-digit year fails
+permissive. Orders accept `-`, `/`, `.`, spaces, compact digits
+(`20100131`), month names (`"Jan 31 2010"`, `"31 January 2010"`), and
+ordinals (`"1st March 2010"`). As in lubridate, text with a time such as
+`"2010-01-31 10:00"` is missing; use `as_datetime` for it. `ym` returns the first of the month. A two-digit year fails
 unless you pass `cutoff`: years up to and including the cutoff are 20xx,
 and the rest are 19xx, so `cutoff=68` reads `68` as 2068 and `69` as 1969.
 Four-digit years ignore the cutoff.
@@ -238,12 +258,19 @@ pipe, a bare `year` is still the column when penguins (or any frame) has
 one: `filter(year == 2007)` filters the column, and `year(date)` calls the
 function. `floor_date` and `ceiling_date` round to `second`, `minute`,
 `hour`, `day`, `week`, `month`, `quarter`, or `year`. Weeks start on Sunday
-(`week_start=7`); `1` is Monday. A value already on the boundary stays
-there under `ceiling_date`. `days_in_month` is 29 for 29 February 2012.
+(`week_start=7`); `1` is Monday. A week starts at midnight, so a datetime
+floors to 00:00 on the first day of its week. Under `ceiling_date`, as in
+lubridate, a datetime already on the boundary stays there, but a date moves
+to the next boundary: `ceiling_date` of 2010-02-01 to a month is
+2010-03-01, and of any date to a day is the next day. `days_in_month` is 29 for 29 February 2012.
 
 `date + months(1)` and `add_with_rollback` roll an impossible day back to
 the last real day of the destination month. 31 January 2010 plus one month
-is 28 February 2010. 29 February 2012 plus `years(1)` is 28 February 2013.
+is 28 February 2010. 29 February 2012 plus `years(1)` is 28 February 2013. A period with both
+parts moves by `12 * years + months` in one step, as lubridate's
+`add_with_rollback` does, so 29 February 2024 plus `years(1) + months(1)`
+is 29 March 2025. `months(col("n"))` takes a count per row; a missing
+count gives a missing date.
 Subtracting a date from `months()` or `years()` is an error. `today()` and
 `now()` are Python values taken when the pipe is built. The default
 timezone is UTC. `tzone="local"` uses the machine zone, and any other
@@ -264,8 +291,11 @@ read_csv(
 ```
 
 `read_csv`, `read_tsv`, and `read_delim` load a `TidyFrame` and share those
-options with `scan_csv`. `read_*` defaults `trim_ws=True`; `scan_csv`
-defaults it to `False`. `col_types` values `character`, `integer`,
+options with `scan_csv`. `read_*` use readr's defaults, `trim_ws=True` and
+`na=["", "NA"]`; `scan_csv` keeps `trim_ws=False` and Polars' null values.
+With `trim_ws=True`, fields are trimmed before column types are guessed
+(from the first `infer_schema_length` rows, 100 by default), so `" 6"` is
+the integer 6 and `" NA "` is missing. `col_types` values `character`, `integer`,
 `double`, `logical`, `date`, and `datetime` are read as text and then
 parsed, so an id column keeps leading zeros and a bad integer becomes
 missing with a row in `problems()`. Date columns are ISO `YYYY-MM-DD`.
@@ -273,6 +303,21 @@ missing with a row in `problems()`. Date columns are ISO `YYYY-MM-DD`.
 a glob. A non-UTF-8 `encoding` is available on `read_csv` for one file;
 `scan_csv` asks you to use `read_csv` for that. `read_excel(path, sheet=)`
 and `excel_sheets(path)` need `pip install 'tidy3[excel]'`.
+
+#### Where these differ from R on purpose
+
+The R oracle tests (`tests/test_r_oracle_parity.py`) check these helpers
+against R, dplyr, readr, and lubridate. These differences are deliberate:
+
+- `as_character` writes whole numbers in full: `100000` is `"100000"`,
+  where R gives `"1e+05"`. Ids and codes stay readable.
+- `as_integer` refuses `2.5` and the string `"2.0"`; R truncates them.
+- Integers are 64-bit, so `parse_integer("2147483648")` is a number, not NA.
+- A two-digit year needs an explicit `cutoff`; readr and lubridate assume 68.
+- `read_csv` guesses whole-number columns as integers (as Polars does);
+  readr guesses double. The values are the same.
+- On the pandas backend a missing float is NaN, so `is_nan` is true there
+  for missing values too.
 
 ### Tidy-select and column-wise operations
 

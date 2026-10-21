@@ -207,8 +207,9 @@ def floor_date(x: Any, unit: str = "day", *, week_start: int = 7) -> Expr:
 def ceiling_date(x: Any, unit: str = "day", *, week_start: int = 7) -> Expr:
     """Round a date up to a calendar boundary.
 
-    A value that is already on the boundary stays there: the first of a
-    month ceiling-rounded to a month is that same day.
+    As in lubridate, a datetime already on the boundary stays there, but a
+    date moves to the next one: ``ceiling_date`` of 2010-02-01 to a month
+    is 2010-03-01, and of any date to a day is the next day.
     """
     token = _unit("ceiling_date", unit)
     start = _week_start(week_start)
@@ -269,19 +270,30 @@ def _amount(value: Any, unit: str) -> Any:
     from tidy3.expr import to_polars
 
     compiled = value if isinstance(value, pl.Expr) else to_polars(value)
-    return pl.format("{}{}", compiled, pl.lit(unit))
+    return pl.format("{}{}", compiled.cast(pl.Int64), pl.lit(unit))
+
+
+def total_months(period: Period) -> Any:
+    """All of *period* in months: ``12 * years + months``.
+
+    lubridate's ``add_with_rollback`` adds a period this way, so the day
+    rolls back once, at the end. Adding years and then months would roll
+    29 February back to the 28th before the month moves.
+    """
+    years, months_ = period.years, period.months
+    if isinstance(years, int) and isinstance(months_, int):
+        return 12 * years + months_
+    if isinstance(years, int) and years == 0:
+        return months_
+    if isinstance(months_, int) and months_ == 0:
+        return years * 12
+    return years * 12 + months_
 
 
 def shift_polars(expr: pl.Expr, period: Period) -> pl.Expr:
-    """Move *expr* by *period*, years first, then months."""
-    result = expr
-    years_by = _amount(period.years, "y")
-    if years_by is not None:
-        result = result.dt.offset_by(years_by)
-    months_by = _amount(period.months, "mo")
-    if months_by is not None:
-        result = result.dt.offset_by(months_by)
-    return result
+    """Move *expr* by *period* as one count of months."""
+    by = _amount(total_months(period), "mo")
+    return expr if by is None else expr.dt.offset_by(by)
 
 
 def _floor_polars(expr: pl.Expr, unit: str, week_start: int) -> pl.Expr:
@@ -289,14 +301,28 @@ def _floor_polars(expr: pl.Expr, unit: str, week_start: int) -> pl.Expr:
         # Polars weekday is ISO: Monday 1 … Sunday 7. truncate("1w") is
         # Monday, so weeks are shifted onto week_start instead.
         shift = (expr.dt.weekday() - week_start) % 7
-        return expr.dt.offset_by(pl.format("-{}d", shift))
+        return expr.dt.truncate("1d").dt.offset_by(pl.format("-{}d", shift))
     return expr.dt.truncate(_TRUNC[unit])
 
 
+_SUB_DAY = frozenset({"second", "minute", "hour"})
+
+
 def _ceiling_polars(expr: pl.Expr, unit: str, week_start: int) -> pl.Expr:
-    floored = _floor_polars(expr, unit, week_start)
-    nudged = floored.dt.offset_by(_OFFSET[unit])
-    return pl.when(expr == floored).then(expr).otherwise(nudged)
+    def batch(series: pl.Series) -> pl.Series:
+        value = pl.col("v")
+        floored = _floor_polars(value, unit, week_start)
+        nudged = floored.dt.offset_by(_OFFSET[unit])
+        if series.dtype == pl.Date and unit not in _SUB_DAY:
+            # lubridate rounds a Date up to the next boundary even when it
+            # is on one: ceiling_date(ymd("2010-02-01"), "month") is March 1.
+            result = nudged
+        else:
+            result = pl.when(value == floored).then(value).otherwise(nudged)
+        return series.to_frame("v").select(result).to_series()
+
+    # The rule depends on the dtype (Date or Datetime), known per batch.
+    return expr.map_batches(batch, return_dtype=pl.dtype_of(expr), is_elementwise=True)
 
 
 def _period_of(node: Any) -> Period | None:
@@ -384,24 +410,28 @@ def _component(series: pd.Series, name: str) -> pd.Series:
 
 
 def shift_pandas(series: pd.Series, period: Period) -> pd.Series:
-    """Move *series* by *period*, years first, then months."""
+    """Move *series* by *period* as one count of months.
+
+    Column counts must already be evaluated to Series (see
+    :func:`tidy3.pandas_engine`). A missing count gives a missing date.
+    """
     date_only = _date_only(series)
     result = _temporal(series)
-
-    def apply_offset(current: pd.Series, count: Any, field: str) -> pd.Series:
-        if isinstance(count, int):
-            if count == 0:
-                return current
-            return current + pd.DateOffset(**{field: count})
-        counts = count if isinstance(count, pd.Series) else pd.Series(count, index=current.index)
-        moved = [
-            value + pd.DateOffset(**{field: 0 if pd.isna(step) else int(step)})
-            for value, step in zip(current.tolist(), counts.tolist())
-        ]
-        return pd.Series(moved, index=current.index)
-
-    result = apply_offset(result, period.years, "years")
-    result = apply_offset(result, period.months, "months")
+    count = total_months(period)
+    if isinstance(count, (Expr, pl.Expr)):
+        raise TypeError(
+            "months() or years() of a column must be evaluated before shifting"
+        )
+    if isinstance(count, int):
+        if count != 0:
+            result = result + pd.DateOffset(months=count)
+        return _restore(result, date_only)
+    counts = count if isinstance(count, pd.Series) else pd.Series(count, index=result.index)
+    moved = [
+        None if pd.isna(step) or pd.isna(value) else value + pd.DateOffset(months=int(step))
+        for value, step in zip(result.tolist(), counts.reindex(result.index).tolist())
+    ]
+    result = pd.Series(moved, index=result.index, dtype=result.dtype)
     return _restore(result, date_only)
 
 
@@ -421,13 +451,15 @@ def _floor_pandas(series: pd.Series, unit: str) -> pd.Series:
 
 
 def _week_floor(series: pd.Series, week_start: int) -> pd.Series:
-    stamped = _temporal(series)
+    stamped = _temporal(series).dt.normalize()
     iso = stamped.dt.dayofweek + 1
     shift = (iso - week_start) % 7
     return stamped - pd.to_timedelta(shift.fillna(0), unit="D")
 
 
-def _ceiling_pandas(series: pd.Series, unit: str, week_start: int) -> pd.Series:
+def _ceiling_pandas(
+    series: pd.Series, unit: str, week_start: int, date_only: bool = False
+) -> pd.Series:
     if unit == "week":
         floored = _week_floor(series, week_start)
         nudged = floored + pd.Timedelta(days=7)
@@ -447,6 +479,10 @@ def _ceiling_pandas(series: pd.Series, unit: str, week_start: int) -> pd.Series:
             nudged = floored + pd.DateOffset(months=3)
         else:
             nudged = floored + pd.DateOffset(years=1)
+    if date_only and unit not in _SUB_DAY:
+        # A date moves to the next boundary even when it is on one; see
+        # _ceiling_polars.
+        return nudged
     stamped = _temporal(series)
     same = stamped.eq(floored) | stamped.isna()
     return stamped.where(same, nudged)
@@ -480,7 +516,9 @@ def eval_pandas(
         )
         return _restore(floored, date_only)
     if name == "ceiling_date":
-        ceiling = _ceiling_pandas(source, kwargs["unit"], int(kwargs["week_start"]))
+        ceiling = _ceiling_pandas(
+            source, kwargs["unit"], int(kwargs["week_start"]), date_only
+        )
         return _restore(ceiling, date_only)
     if name == "add_with_rollback":
         return shift_pandas(source, kwargs["period"])

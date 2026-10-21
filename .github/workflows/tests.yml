@@ -43,7 +43,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends r-base r-base-dev
-          sudo Rscript -e 'install.packages(c("dplyr", "tidyr", "jsonlite"), repos = "https://cloud.r-project.org")'
+          sudo Rscript -e 'install.packages(c("dplyr", "tidyr", "jsonlite", "lubridate", "readr"), repos = "https://cloud.r-project.org")'
       - name: Install tidy3
         run: python -m pip install -e ".[dev]"
       - name: Run R oracle parity tests
