@@ -15,6 +15,8 @@ from tidy3 import (
     across,
     add_with_rollback,
     as_character,
+    as_numeric,
+    as_string,
     as_date,
     as_datetime,
     as_double,
@@ -183,7 +185,7 @@ def test_as_double_logical_and_character(backend):
     parsed = tidy({"x": ["true", "1", "0", "yes"]}, backend=backend)
     assert _col(parsed >> mutate(n=parse_logical("x")), "n") == [True, True, False, None]
     logical = tidy({"x": [True, False]}, backend=backend)
-    assert _col(logical >> mutate(c=as_character("x")), "c") == ["TRUE", "FALSE"]
+    assert _col(logical >> mutate(c=as_character("x")), "c") == ["true", "false"]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -575,3 +577,75 @@ def test_helpers_take_constants(backend):
     assert _col(out, "capped") == [110.0, 200.0]
     assert _col(out, "tens") == [10, 10]
     assert out.collect()["tens"].dtype == pl.Int64
+
+
+@pytest.mark.parametrize("convert", [as_character, as_string])
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_text_follows_the_column_type(backend, convert):
+    cars = tidy(
+        {
+            "mpg": [21.0, 0.1 + 0.2, None],
+            "cyl": [6, 4, 8],
+            "am": [True, False, None],
+            "day": [date(2010, 1, 31), None, date(2010, 2, 1)],
+            "at": [datetime(2010, 1, 31, 15, 30), datetime(2010, 1, 31, 15, 30, 0, 250000), None],
+        },
+        backend=backend,
+    )
+    out = cars >> mutate(
+        mpg=convert("mpg"),
+        cyl=convert("cyl"),
+        am_py=convert("am", true="True", false="False"),
+        am_r=convert("am", true="TRUE", false="FALSE"),
+        am=convert("am"),
+        day=convert("day"),
+        at=convert("at"),
+    )
+    assert _col(out, "mpg") == ["21.0", "0.30000000000000004", None]
+    assert _col(out, "cyl") == ["6", "4", "8"]
+    assert _col(out, "am") == ["true", "false", None]
+    assert _col(out, "am_py") == ["True", "False", None]
+    assert _col(out, "am_r") == ["TRUE", "FALSE", None]
+    assert _col(out, "day") == ["2010-01-31", None, "2010-02-01"]
+    assert _col(out, "at") == ["2010-01-31 15:30:00", "2010-01-31 15:30:00.250", None]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_text_keeps_float32_and_reads_back_exactly(backend):
+    data = pl.DataFrame({"wt": pl.Series([22.8, 0.1], dtype=pl.Float32)})
+    frame = tidy(data if backend == "polars" else data.to_pandas(), backend=backend)
+    assert _col(frame >> mutate(wt=as_string("wt")), "wt") == ["22.8", "0.1"]
+    # An id stored as a float: convert to an integer first for "1001".
+    ids = tidy({"id": [1001.0, 1002.0]}, backend=backend)
+    assert _col(ids >> mutate(id=as_string(as_integer("id"))), "id") == ["1001", "1002"]
+    assert _col(ids >> mutate(id=as_string("id")), "id") == ["1001.0", "1002.0"]
+
+
+def test_text_nan_and_time_zone_on_polars():
+    frame = tidy({"x": [float("nan"), float("inf")]})
+    assert _col(frame >> mutate(x=as_string("x")), "x") == ["NaN", "inf"]
+    zoned = pl.DataFrame({"at": [datetime(2010, 1, 31, 15, 30, tzinfo=timezone.utc)]}).with_columns(
+        pl.col("at").dt.convert_time_zone("America/Los_Angeles")
+    )
+    assert _col(tidy(zoned) >> mutate(at=as_string("at")), "at") == ["2010-01-31 07:30:00-08:00"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_text_of_constants_and_summaries(backend):
+    cars = tidy({"cyl": [4, 4, 6], "hp": [93.0, 62.0, 110.0]}, backend=backend)
+    assert _col(cars >> mutate(k=as_string(5.0)), "k") == ["5.0"] * 3
+    grouped = cars >> group_by("cyl") >> summarise(m=as_string(mean("hp")))
+    assert _col(grouped, "m") == ["77.5", "110.0"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_aliases_name_themselves_in_errors(backend):
+    frame = tidy({"x": ["1.5", "abc"]}, backend=backend)
+    with pytest.raises(ConversionError, match=r"^as_numeric\(\)"):
+        (frame >> mutate(y=as_numeric("x"))).collect()
+    with pytest.raises(ConversionError, match=r"^as_double\(\)"):
+        (frame >> mutate(y=as_double("x"))).collect()
+    with pytest.raises(TypeError, match=r"as_string\(\) true must be a string"):
+        as_string("x", true=1)
+    with pytest.raises(TypeError, match=r"as_character\(\) false must be a string"):
+        as_character("x", false=None)

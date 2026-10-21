@@ -282,24 +282,14 @@ def _pandas_flags(series: pd.Series) -> dict[str, pd.Series]:
     false = pd.Series(False, index=index)
     missing = series.isna()
     if pd.api.types.is_float_dtype(series):
-        raw = series.tolist()
-        nan = pd.Series(
-            [isinstance(value, float) and math.isnan(value) for value in raw],
-            index=index,
-        )
-        infinite = pd.Series(
-            [isinstance(value, float) and math.isinf(value) for value in raw],
-            index=index,
-        )
-        finite = pd.Series(
-            [
-                isinstance(value, (int, float))
-                and not isinstance(value, bool)
-                and math.isfinite(value)
-                for value in raw
-            ],
-            index=index,
-        )
+        values = series.to_numpy(dtype=float, na_value=np.nan)
+        nan_values = np.isnan(values)
+        if isinstance(series.dtype, pd.api.extensions.ExtensionDtype):
+            # A nullable Float64 keeps NA apart from NaN: NA is not NaN.
+            nan_values &= ~missing.to_numpy()
+        nan = pd.Series(nan_values, index=index)
+        infinite = pd.Series(np.isinf(values), index=index)
+        finite = pd.Series(np.isfinite(values), index=index)
         # float64 stores null as NaN, so those rows are both is_na and is_nan.
         return {
             "is_na": missing | nan,
@@ -470,12 +460,27 @@ def _as_series(value: Any, index: pd.Index) -> pd.Series:
     return pd.Series(value, index=index)
 
 
+def _nan_as_missing(frame: pd.DataFrame) -> pd.DataFrame:
+    """NaN counts as missing, as in R.
+
+    NumPy float and object columns already treat NaN as missing; only a
+    nullable Float64 column keeps NaN apart from NA, so only it changes.
+    """
+    positions = [
+        position for position, dtype in enumerate(frame.dtypes)
+        if isinstance(dtype, pd.api.extensions.ExtensionDtype) and pd.api.types.is_float_dtype(dtype)
+    ]
+    if not positions:
+        return frame
+    frame = frame.copy()
+    for position in positions:
+        column = frame.iloc[:, position]
+        frame.isetitem(position, column.mask(np.isnan(column.to_numpy(dtype=float, na_value=np.nan))))
+    return frame
+
+
 def _pandas_pair(name: str, args: tuple[Any, ...], na_rm: bool, index: pd.Index) -> pd.Series:
-    frame = pd.concat([_as_series(arg, index) for arg in args], axis=1)
-    # NaN counts as missing, as in R.
-    frame = frame.mask(frame.apply(
-        lambda column: column.map(lambda value: isinstance(value, float) and math.isnan(value))
-    ))
+    frame = _nan_as_missing(pd.concat([_as_series(arg, index) for arg in args], axis=1))
     result = frame.min(axis=1, skipna=na_rm) if name == "pmin" else frame.max(axis=1, skipna=na_rm)
     return result
 
@@ -491,10 +496,7 @@ def _pandas_rows(
     if not args:
         fill = np.nan if operation == "mean" or min_count else 0
         return pd.Series(fill, index=index)
-    frame = pd.concat([_as_series(arg, index) for arg in args], axis=1)
-    frame = frame.mask(frame.apply(
-        lambda column: column.map(lambda value: isinstance(value, float) and math.isnan(value))
-    ))
+    frame = _nan_as_missing(pd.concat([_as_series(arg, index) for arg in args], axis=1))
     present = frame.notna().sum(axis=1)
     if na_rm:
         total = frame.sum(axis=1, min_count=0)

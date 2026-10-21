@@ -102,10 +102,11 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 | Frame | `tidy`, `scan_parquet`, `scan_csv`, `scan_ipc`, `read_csv`, `read_tsv`, `read_delim`, `read_excel`, `excel_sheets`, `TidyFrame` |
 | Output | `collect`, `to_numpy`, `TidyFrame.write_parquet`, `TidyFrame.write_csv`, `TidyFrame.write_ipc`, `TidyFrame.write_excel` |
 | Helpers | `is_na`, `is_nan`, `is_finite`, `is_infinite`, `abs`, `floor`, `ceiling`, `round`, `pmin`, `pmax`, `row_sums`, `row_means` |
-| Convert | `as_numeric`/`as_double`, `as_integer`, `as_character`, `as_logical`, `as_date`, `as_datetime`, `ConversionError` |
+| Convert | `as_numeric`/`as_double`, `as_integer`, `as_character`/`as_string`, `as_logical`, `as_date`, `as_datetime`, `ConversionError` |
 | Parse | `parse_double`, `parse_integer`, `parse_logical`, `parse_date`, `parse_datetime`, `parse_number`, `locale`, `problems`, `stop_for_problems` |
-| Dates | `ymd`, `mdy`, `dmy`, `ym`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `days_in_month`, `months`, `years`, `add_with_rollback`, `today`, `now` |
+| Dates | `ymd`, `mdy`, `dmy`, `ym`, `ymd_hms`, `ymd_hm`, `mdy_hms`, `dmy_hms`, `with_tz`, `force_tz`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `days_in_month`, `months`, `years`, `add_with_rollback`, `today`, `now`, `excel_numeric_to_date` |
 | Factors | `fct_relevel`, `fct_reorder`, `fct_infreq`, `fct_rev` |
+| Cleaning | `clean_names`, `make_clean_names`, `set_names`, `get_dupes`, `remove_empty`, `remove_constant`, `row_to_names`, `find_header`, `compare_df_cols`, `compare_df_cols_same`, `describe_class` |
 | Rows | `filter`, `filter_out`, `arrange`, `distinct`, `slice`, `slice_head`, `slice_tail`, `slice_min`, `slice_max`, `slice_sample`, `head`, `sample_n`, `sample_frac` |
 | Columns | `mutate`, `transmute`, `select`, `drop`, `rename`, `rename_with`, `relocate`, `pull`, `glimpse` |
 | Groups | `group_by`, `rowwise`, `ungroup`, `with_groups`, `group_split`, `group_map`, `group_modify`, `group_walk`, `group_nest`, `nest_by`, `group_data`, `group_keys`, `group_rows`, `group_size`, `group_indices`, `group_vars`, `groups`, `n_groups`, `group_trim`, `summarise`, `reframe`, `count`, `tally`, `add_count`, `add_tally` |
@@ -166,6 +167,118 @@ pandas, with dplyr window semantics after `group_by` on both. The pandas
 backend covers the documented verb/expression subset; anything
 polars-specific raises a clear error pointing back to `backend="polars"`.
 
+### Duplicate records
+
+`get_dupes` follows janitor's duplicate inspection helper. It returns every
+record sharing the selected key combination, including the first occurrence,
+and adds `dupe_count` with the number of records in that combination.
+
+```python
+observations = tidy({"id": [1, 2, 1], "mass": [3500, 3800, 3550]})
+observations >> get_dupes("id")  # both id=1 records, each with dupe_count=2
+observations >> get_dupes()      # compare all columns
+```
+
+Accepts multiple names, lists, and tidyselect helpers such as
+`get_dupes(starts_with("key_"))`. `observations.get_dupes("id")` also works.
+Notebook pipes accept bare names, for example `get_dupes(id)`.
+Selected keys appear first, followed by `dupe_count`, then the remaining
+original columns. Results sort by decreasing count and ascending keys;
+factor keys use their recorded level order, missing keys sort last, and
+rows tied on these keys retain their input order. Missing keys match each
+other. No matches returns an empty table with the output columns intact.
+An explicit selector that selects no keys treats the whole table as one
+key combination; omitting arguments instead checks all columns.
+
+Duplicate detection spans the whole table even after `group_by`. Original
+grouping, group-drop settings, factor metadata, and parsing diagnostics are
+preserved. Polars remains lazy. The helper does not print janitor's status
+messages. Unlike janitor, an existing `dupe_count` column raises an error;
+rename it first to keep its values.
+
+### Empty columns, headers, and class checks
+
+`remove_empty` drops rows and columns that are entirely missing. `""` is a
+value, so convert blanks to missing first if those should go too.
+`cutoff=1` (the default) keeps a row or column with any non-missing value.
+A smaller cutoff keeps it only when the share of non-missing values is
+strictly greater than `cutoff`, and that cutoff cannot be combined with
+both rows and columns. Rows are removed before columns. A zero-row frame
+has no non-missing values, so `which="cols"` drops every column.
+`remove_empty("rows")` on Polars is a lazy filter. Choosing which columns
+to drop counts missing values first, so the surviving columns depend on
+the data.
+
+`remove_constant` drops a column with fewer than two distinct values.
+Missing counts as its own value unless `na_rm=True`. A column that is
+entirely missing is removed either way. On Polars, null and NaN are
+different, so a column of only those two is kept when `na_rm=False`.
+Pandas stores both as NaN in a float column, so that column is removed.
+Unused factor levels do not count. The check reads the current values and
+is global, not per group.
+
+```python
+raw = tidy({"a": ["id", "a", None], "b": [None, None, None], "c": ["n", "", "x"]})
+raw >> row_to_names(1) >> remove_empty()
+```
+
+`row_to_names(row_number)` uses that 1-based row as the column names.
+`row_number="find_header"` calls `find_header`. With no value, the header
+is the first row with no missing cells. `find_header(data, value="Total", column="name")`
+searches one column; `column` is a name or a 1-based position. The name
+row and the rows above it are removed by default. A missing header cell
+becomes the string `"NA"`, including NaN. janitor leaves a missing name as
+`NA` (and `as.character(NaN)` is `"NaN"`); a string name can be stored on
+both backends. Each cell is converted on its own: `1.0` becomes `"1"` and
+`TRUE` becomes `"TRUE"`. janitor 2.2.1 instead coerces the whole header
+row with `unlist` before converting, so a row of `1` and `TRUE` becomes
+two `"1"` names there. Duplicate names are made unique (`id`, `id_2`)
+because a frame cannot repeat column names; janitor only warns. Reading
+the name row runs the plan up to this verb. Grouping and factor levels
+follow the new names. A group column that is removed is dropped from the
+grouping; if none remain, the frame is ungrouped.
+
+`compare_df_cols(old=old, new=new)` returns `column_name` plus one class
+column per frame. Pass frames by keyword, in a mapping, or in a list
+(`pair=[old, new]` becomes `pair_1`, `pair_2`). Positional frames are
+named `..1`, `..2`. No input may be named `column_name`.
+`return_="match"` or `"mismatch"` filters the rows. With
+`bind_method="bind_rows"` (the default), a column missing from some frames
+still matches when every present class agrees. `"rbind"` requires every
+frame to have the column and the same class. Two or more frames sort
+column names by code point; one frame keeps its column order. R's `merge`
+sorts in the session locale, so this comparison is locked for ASCII names.
+`strict_description=True` includes factor levels. `compare_df_cols_same`
+returns true when there is no mismatch and does not print the table.
+`verbose` is accepted and ignored. One frame is not the same as another
+frame, so a single frame with columns returns `False`, as janitor does.
+janitor 2.2.1 errors on `compare_df_cols_same` of zero-column frames;
+tidy3 returns `True`.
+
+Class names follow R: `integer`, `numeric`, `logical`, `character`,
+`Date`, and `POSIXct, POSIXt`. A Python `int` is `integer`; pass a float
+for `numeric`. Descriptions use dtypes and recorded factor levels. A
+Polars Enum that has no recorded levels is treated as ordered. A pandas
+object column may be read far enough to tell a date from text. A frame
+with no columns is omitted.
+
+These helpers do not print janitor's removal messages. `cutoff` other
+than 1 needs a positive number of rows when dropping columns, and a
+positive number of columns when dropping rows; a zero denominator raises
+rather than following R's `NA` mask. A Polars frame that loses every
+column also loses its rows, because Polars cannot store a row count
+without a column. Pandas keeps that row count, as janitor does.
+
+`excel_numeric_to_date(42370)` is 2016-01-01. Serial 60 is missing on
+both date systems: Excel treated 1900 as a leap year, and janitor applies
+that adjustment before choosing the origin, including for
+`date_system="mac pre-2011"`. Mac serial 1 is therefore 1904-01-03, and
+Mac serial 0 is 1904-01-02. `include_time=False` ignores the fraction.
+`round_seconds=True` rounds seconds the way R's `round` does. The default
+zone is UTC, not the machine zone. A quoted string is a column name inside
+`mutate`. A number or list is converted immediately. Leap seconds are not
+applied, and values below 1 are converted without a warning.
+
 ### Column helpers, dates, and readers
 
 These work inside `mutate`, `filter`, `summarise`, and `across` on both
@@ -202,10 +315,12 @@ returns 0 for an empty row. Pass `na_rm=True` or `min_count` to `sum` of a
 selection to use the `row_sums` rule. `sum(..., min_count=)` on a column
 does the same for a group.
 
-`as_double` (also `as_numeric`), `as_integer`, `as_character`, `as_logical`,
-`as_date`, and `as_datetime` share one converter. `strict=True` raises
-`ConversionError` at collect time on Polars and when `mutate` runs on
-pandas. The message names the column and shows up to five bad values.
+`as_double` (also `as_numeric`), `as_integer`, `as_character` (also
+`as_string`), `as_logical`, `as_date`, and `as_datetime` share one
+converter. `strict=True` raises `ConversionError` at collect time on Polars
+and when `mutate` runs on pandas. The message names the function you
+called (`as_numeric` or `as_double`, `as_string` or `as_character`), the
+column, and up to five bad values.
 `strict=False` turns those values into missing and records them for
 `problems()`. `as_integer(2.5)` is an error; `2` and `2.0` succeed, and the
 strings `"2.0"` and `"2.5"` do not. `as_double` does not strip thousands
@@ -215,6 +330,18 @@ does the string `"1"`. Numbers work (`0` is false). `as_date` accepts ISO `YYYY-
 `as_datetime` accepts an ISO date or a time after a space or `T`, treats
 `Z` and numeric offsets as UTC, and returns a naive datetime of that UTC
 clock time.
+
+`as_character` and `as_string` write each value as its column type shows
+it, the same way on both backends: a float stays a float (`21.0` is
+`"21.0"`, a `float32` `22.8` is `"22.8"`), an integer is `"21"`, a date is
+`"2010-01-31"`, and a datetime is `"2010-01-31 15:30:00"`, with fractional
+seconds only when it has them and an offset (`"-08:00"`) when it has a
+time zone. Numbers are never rounded, so the text reads back as exactly
+the same number. Logical values are `"true"` and `"false"` by default;
+`true=` and `false=` set the spelling, such as `true="TRUE",
+false="FALSE"` for R or `true="True", false="False"` for Python's `str()`.
+For an id stored as a float, convert to an integer first:
+`as_string(as_integer(id))` is `"1001"`, not `"1001.0"`.
 
 `parse_double`, `parse_integer`, `parse_logical`, `parse_date`,
 `parse_datetime`, and `parse_number` are permissive unless you pass
@@ -234,7 +361,11 @@ On Polars, `as_double`, `as_integer`, and `parse_double` on text and
 number columns run as native casts; they give the same results as the
 per-value rules above.
 `parse_logical` accepts `true`/`false`/`t`/`f`/`1`/`0`. `parse_date` and
-`parse_datetime` take a `strptime` format.
+`parse_datetime` take a `strptime` format. `parse_datetime` returns a naive
+datetime. A `%z` offset is converted to UTC and the zone is dropped, as
+`as_datetime` does and as readr shows the instant in UTC:
+`2024-01-01 12:00:00+0200` is 10:00 and `2024-01-01 12:00:00-0500` is 17:00.
+Mixed offsets in one column parse. `ymd_hms` is the timezone-aware parser.
 
 `problems(frame)` returns a frame with columns `row` (1-based), `column`,
 `original`, and `expected`. As in readr, `row` is the position in the
@@ -249,10 +380,67 @@ collects the problems plan and raises `ConversionError` when any row failed.
 permissive. Orders accept `-`, `/`, `.`, spaces, compact digits
 (`20100131`), month names (`"Jan 31 2010"`, `"31 January 2010"`), and
 ordinals (`"1st March 2010"`). As in lubridate, text with a time such as
-`"2010-01-31 10:00"` is missing; use `as_datetime` for it. `ym` returns the first of the month. A two-digit year fails
+`"2010-01-31 10:00"` is missing; use `ymd_hm` for it. `ym` returns the first of the month. A two-digit year fails
 unless you pass `cutoff`: years up to and including the cutoff are 20xx,
 and the rest are 19xx, so `cutoff=68` reads `68` as 2068 and `69` as 1969.
 Four-digit years ignore the cutoff.
+
+`ymd_hms`, `ymd_hm`, `mdy_hms`, and `dmy_hms` parse dates with times on both
+backends. They return timezone-aware datetimes in `tz="UTC"` by default;
+`tz="America/New_York"` interprets unzoned text as that local clock. A `Z`
+or numeric offset (`+05:30`, `-0400`, `-05`) preserves the instant and
+converts its display to `tz`. They accept English month names, ordinals,
+AM/PM, and compact fields with four-digit years (`20240229123456`, also
+as a number). Fractions are truncated to microseconds. `ymd_hm` rejects
+seconds rather than discarding them. Two-digit years in separated text
+require `cutoff`, and failures use the same `problems` recorder and
+`strict=True` option as the date parsers.
+Signs (`+` and `-`) after the calendar date are reserved for offsets;
+use `T`, spaces, or punctuation such as `:` and `.` to separate time fields.
+
+Missing time fields require `truncated`: for `ymd_hms`, 1 permits a missing
+second, 2 permits just an hour, and 3 permits a date alone. For `ymd_hm`,
+1 permits just an hour and 2 a date alone. Omitted time fields become zero.
+The `mdy_hms` and `dmy_hms` options follow `ymd_hms`. A nonexistent clock
+during a spring daylight saving change fails; a repeated autumn clock
+chooses its later occurrence. Supply an offset to select either occurrence.
+Polars expressions stay lazy, including their diagnostics.
+
+These parsers deliberately avoid two R guessing behaviors: a four-digit
+year is never split into a two-digit year and an hour to rescue incomplete
+input, and `ymd_hm` always honors offsets (R's helper can drop `Z` or reject
+numeric offsets). English month names are fixed rather than locale-dependent;
+arbitrary words around a timestamp, timezone abbreviations such as `EST`,
+and truncating the calendar date itself are unsupported. Existing
+`as_datetime` continues to return naive UTC clocks.
+
+`with_tz(x, tzone="UTC")` displays the same instant in another zone.
+`force_tz(x, tzone="UTC")` keeps the local clock fields and interprets them
+in a new zone, changing the instant. For example, noon in New York in
+January becomes 17:00 UTC with `with_tz`, or 12:00 UTC with `force_tz`.
+Both helpers accept date/datetime columns and expressions; parse text first.
+Naive datetimes use UTC for `with_tz`; dates begin at midnight UTC.
+`force_tz` interprets naive clocks and date midnights directly in `tzone`.
+Both preserve missing values and existing datetime precision, including
+nanoseconds. Polars plans remain lazy; discovering the target dtype does
+not read source rows. Timezone names must be valid; unknown or empty names
+raise instead of using a local zone or silently falling back to UTC.
+
+`force_tz(..., roll_dst=("NA", "post"))` matches R's default: skipped spring
+clocks become missing and repeated autumn clocks choose the later occurrence.
+Supply one policy string for both cases, or a pair for skipped/repeated
+clocks separately. `"pre"` and `"post"` choose the instant before/after
+the transition; for skipped clocks, they move the clock backward/forward
+by the size of the gap. `"boundary"` chooses the transition itself,
+and `"NA"` returns missing. When a source clock is already a resolved
+repeat and the target clock also repeats, its occurrence is preserved.
+These rules also cover half-hour transitions and a skipped calendar day.
+
+Two subsecond details intentionally differ from R: `"boundary"` always
+returns the exact whole-second transition, including when paired with a
+different repeat policy; preserving an already resolved repeat also
+preserves its fractions, even if `roll_dst="boundary"` was requested.
+R can retain fractions in the former case and discard them in the latter.
 
 `year`, `month`, and `day` pull those fields as integers. In a notebook
 pipe, a bare `year` is still the column when penguins (or any frame) has
@@ -286,6 +474,14 @@ floors to 00:00 on the first day of its week. Under `ceiling_date`, as in
 lubridate, a datetime already on the boundary stays there, but a date moves
 to the next boundary: `ceiling_date` of 2010-02-01 to a month is
 2010-03-01, and of any date to a day is the next day. `days_in_month` is 29 for 29 February 2012.
+
+Timezone-aware `floor_date` and `ceiling_date` keep the zone and round to
+local boundaries on both backends, including weeks and daylight saving
+transitions. Both occurrences of a repeated hour stay distinct. Flooring
+`2024-11-03 01:30:00.125-04:00` to a second keeps that occurrence and drops
+the fraction. Ceiling the first 01:30 of an autumn fallback to an hour
+lands on the second 01:00, the next hour. lubridate's `ceiling_date` lands
+on 02:00 for that one hour; the other units match it.
 
 `date + months(1)` and `add_with_rollback` roll an impossible day back to
 the last real day of the destination month. 31 January 2010 plus one month
@@ -335,8 +531,10 @@ and `excel_sheets(path)` need `pip install 'tidy3[excel]'`.
 The R oracle tests (`tests/test_r_oracle_parity.py`) check these helpers
 against R, dplyr, readr, and lubridate. These differences are deliberate:
 
-- `as_character` writes whole numbers in full: `100000` is `"100000"`,
-  where R gives `"1e+05"`. Ids and codes stay readable.
+- `as_character` writes values as their column type shows them: `21.0`
+  is `"21.0"` where R gives `"21"`, `100000.0` is `"100000.0"` where R
+  gives `"1e+05"`, and nothing is rounded to 15 digits. Logical values are
+  `"true"` / `"false"` unless you pass `true="TRUE", false="FALSE"`.
 - `as_integer` refuses `2.5` and the string `"2.0"`; R truncates them.
 - Integers are 64-bit, so `parse_integer("2147483648")` is a number, not NA.
 - A two-digit year needs an explicit `cutoff`; readr and lubridate assume 68.
@@ -386,7 +584,14 @@ A list, pandas categorical/Series, or Polars Series runs immediately and
 returns a pandas categorical. Character input starts with levels sorted in
 Unicode order; R's character-to-factor sorting depends on locale. Existing
 categorical input preserves its order. `fct_infreq(ordered=)` controls the
-pandas ordered flag; Polars Enums always carry an explicit sort order.
+pandas ordered flag; Polars Enums always carry an explicit sort order. The
+ordered flag is stored with the level names, so `collect(as_="pandas")`
+still reports `ordered=False` after `fct_infreq(ordered=False)`.
+
+An imported pandas factor keeps unused levels, level order, and its ordered
+flag on the frame. Collecting a Polars plan with `as_="pandas"` writes those
+levels back. `arrange` orders factor columns by that level list on both
+backends. Missing keys stay last, and ties keep the previous row order.
 
 ### Tidy-select and column-wise operations
 
@@ -801,6 +1006,14 @@ Advanced specifications work with left/right/inner/full/semi/anti joins.
 Polars uses its native inequality-join plan when no equality partition is
 needed; equality-partitioned inequalities first reduce candidates by key.
 
+Joins return rows in dplyr's order on both backends: x's rows in order, each
+followed by its matches in y's order, and then, for `right_join` and
+`full_join`, the rows of y that matched nothing, in y's order. So
+`islands >> right_join(penguins, by="island")` lists penguins grouped by the
+order of `islands`, not in their own order; pandas' `merge(how="right")`
+keeps y's order instead. Use `penguins >> left_join(islands, by="island")`
+to keep the penguins in their own order.
+
 ### Per-operation grouping and portable helpers
 
 Use `by=` when grouping is needed for one operation only. It accepts the same
@@ -965,8 +1178,14 @@ How this differs from R:
 - `str_glue` fills in names only (`{price}`, not `{price * 2}`); a column
   wins over a notebook variable of the same name, as in dplyr.
 - `str_split_fixed` returns a list column of `n` pieces rather than a matrix.
-- `coll()` matches literal text without locale rules; `boundary()` supports
-  `"character"` and `"word"` only.
+- `str_equal` compares Unicode NFC, after lowercasing when `ignore_case` is
+  set, so `é` and `e\u0301` are equal. It is not stringi collation: `ﬁ` is
+  not equal to `fi` (stringr's `ignore_case` says they are), and a joined
+  family emoji is not equal to the same emoji without ZWJ.
+- `coll()` matches literal text without locale rules. `boundary()` supports
+  `"character"` and `"word"` only. `boundary("character")` splits code
+  points, so a combining accent and the parts of a joined emoji are separate
+  pieces; stringr keeps each grapheme together.
 - On Polars, regular expressions use Rust's syntax, which has no
   look-around. `str_locate_all`, `str_match_all`, `str_width`, `str_wrap`,
   `str_conv`, `word` with a regex separator, and `str_split` with both a regex

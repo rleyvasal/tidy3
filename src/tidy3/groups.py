@@ -150,7 +150,12 @@ def _keys_frame(tf: Any, names: list[str], keys: list[tuple]) -> Any:
             levels = _levels(tf, name)
             if levels is not None:
                 # Keep unused levels (empty groups) that the data never shows.
-                frame[name] = pd.Categorical(frame[name], categories=levels)
+                recorded = tf._category_levels.get(name)
+                frame[name] = pd.Categorical(
+                    frame[name],
+                    categories=levels,
+                    ordered=bool(getattr(recorded, "ordered", False)),
+                )
                 continue
             try:
                 frame[name] = frame[name].astype(tf._pdf[name].dtype)
@@ -241,6 +246,8 @@ def group_trim(data: Any = _MISSING):
     names = list(tf._groups or [])
     if not names:
         return tf
+    from tidy3.frame import FactorLevels
+
     levels = dict(tf._category_levels)
     pdf = tf._pdf if tf._backend == "pandas" else None
     for name in names:
@@ -253,7 +260,11 @@ def group_trim(data: Any = _MISSING):
                 pdf = pdf.assign(**{name: pdf[name].cat.remove_unused_categories()})
         else:
             used = set(tf._lf.select(pl.col(name).drop_nulls().unique()).collect().to_series().to_list())
-        levels[name] = [level for level in current if level in used]
+        recorded = tf._category_levels.get(name)
+        levels[name] = FactorLevels(
+            [level for level in current if level in used],
+            ordered=bool(getattr(recorded, "ordered", False)),
+        )
     if pdf is not None:
         return tf._with_pdf(pdf, groups=names, category_levels=levels)
     return tf._with_lf(tf._lf, groups=names, category_levels=levels)

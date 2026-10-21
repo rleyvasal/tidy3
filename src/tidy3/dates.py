@@ -13,14 +13,14 @@ Pass ``tzone="local"`` or a zone name such as ``"America/Los_Angeles"``.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import polars as pl
 
-from tidy3.convert import dmy, mdy, ym, ymd
+from tidy3.convert import dmy, dmy_hms, mdy, mdy_hms, ym, ymd, ymd_hm, ymd_hms
 from tidy3.expr import Expr, _func, col
 
 __all__ = [
@@ -39,15 +39,22 @@ __all__ = [
     "hour",
     "minute",
     "second",
+    "with_tz",
+    "force_tz",
     "floor_date",
     "ceiling_date",
     "days_in_month",
     "today",
     "now",
+    "excel_numeric_to_date",
     "ymd",
     "mdy",
     "dmy",
     "ym",
+    "ymd_hms",
+    "ymd_hm",
+    "mdy_hms",
+    "dmy_hms",
 ]
 
 FUNCTIONS = frozenset(
@@ -63,10 +70,13 @@ FUNCTIONS = frozenset(
         "hour",
         "minute",
         "second",
+        "with_tz",
+        "force_tz",
         "floor_date",
         "ceiling_date",
         "days_in_month",
         "add_with_rollback",
+        "excel_numeric_to_date",
     }
 )
 _UNITS = ("second", "minute", "hour", "day", "week", "month", "quarter", "year")
@@ -243,6 +253,38 @@ def minute(x: Any) -> Expr:
 def second(x: Any) -> Expr:
     """Seconds of local clock time, including the fractional part."""
     return _func("second", _value(x))
+
+
+def with_tz(x: Any, tzone: str = "UTC") -> Expr:
+    """Display the same instant in *tzone*. Naive clocks and dates use UTC.
+
+    Dates become datetimes at midnight UTC before changing zones. Unknown
+    zone names raise instead of silently falling back to UTC.
+    """
+    from tidy3._timezones import validate_zone
+
+    return _func("with_tz", _value(x), tzone=validate_zone(tzone))
+
+
+def force_tz(
+    x: Any, tzone: str = "UTC", *, roll_dst: str | tuple[str, str] = ("NA", "post")
+) -> Expr:
+    """Keep local clock fields, interpreting them in a new timezone.
+
+    *roll_dst* controls skipped and repeated times, respectively. A string
+    applies to both; a pair supplies separate policies. ``NA`` returns
+    missing, ``pre``/``post`` choose before/after the transition, and
+    ``boundary`` chooses the transition itself. Defaults match lubridate:
+    skipped clocks become missing, and repeated clocks choose the later
+    occurrence. An already resolved repeated clock keeps its occurrence.
+    Dates become local midnight. Unlike :func:`with_tz`, this changes the
+    instant being represented. Both helpers default to UTC.
+    """
+    from tidy3._timezones import validate_roll, validate_zone
+
+    return _func(
+        "force_tz", _value(x), tzone=validate_zone(tzone), roll_dst=validate_roll(roll_dst)
+    )
 
 
 def _weekday_labels(abbr: bool, week_start: int) -> list[str]:
@@ -460,9 +502,248 @@ def _quarter_polars(value: pl.Expr, kind: str, start: int) -> pl.Expr:
     return beginning if kind == "date_first" else beginning.dt.offset_by("3mo").dt.offset_by("-1d")
 
 
+_EXCEL_ORIGINS = {
+    "modern": date(1899, 12, 30),
+    "mac pre-2011": date(1904, 1, 1),
+}
+
+
+def _excel_zone(tz: str) -> ZoneInfo:
+    if not isinstance(tz, str) or not tz:
+        raise TypeError("excel_numeric_to_date() tz must be a time zone name")
+    try:
+        return ZoneInfo(tz)
+    except Exception as error:
+        raise ValueError(
+            f"excel_numeric_to_date() unknown time zone {tz!r}"
+        ) from error
+
+
+def _excel_flags(
+    date_system: str, include_time: bool, round_seconds: bool, tz: str
+) -> tuple[str, bool, bool, str]:
+    if date_system not in _EXCEL_ORIGINS:
+        raise ValueError(
+            "excel_numeric_to_date() date_system must be 'modern' or 'mac pre-2011'"
+        )
+    if not isinstance(include_time, bool) or not isinstance(round_seconds, bool):
+        raise TypeError(
+            "excel_numeric_to_date() include_time and round_seconds must be booleans"
+        )
+    _excel_zone(tz)
+    return date_system, include_time, round_seconds, tz
+
+
+def _excel_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and value != value:
+        return True
+    try:
+        import pandas as pd
+
+        if value is pd.NA or value is pd.NaT:
+            return True
+    except ImportError:
+        pass
+    return False
+
+
+def _excel_numbers(values: Any) -> Any:
+    import numpy as np
+
+    if isinstance(values, pl.Series):
+        values = values.to_list()
+    elif hasattr(values, "tolist") and not isinstance(values, (str, bytes)):
+        values = values.tolist()
+    numeric = (int, float, np.integer, np.floating)
+    numbers = np.empty(len(values), dtype=np.float64)
+    for index, value in enumerate(values):
+        if isinstance(value, bool) or not isinstance(value, numeric):
+            if _excel_missing(value):
+                numbers[index] = np.nan
+                continue
+            raise TypeError("excel_numeric_to_date() date_num must be numeric")
+        numbers[index] = float(value)
+    return numbers
+
+
+def _excel_convert(
+    values: Any,
+    *,
+    date_system: str,
+    include_time: bool,
+    round_seconds: bool,
+    tz: str,
+) -> list[Any]:
+    """Janitor's serial conversion, including the 1900 leap-day adjustment.
+
+    The adjustment runs for both date systems, as in janitor: serial 60 is
+    missing, and serials before 60 move forward one day. ``59`` is
+    1900-02-28, ``60`` is missing, and ``61`` is 1900-03-01.
+    """
+    import math
+
+    import numpy as np
+
+    origin = _EXCEL_ORIGINS[date_system]
+    zone = _excel_zone(tz)
+    numbers = _excel_numbers(values)
+    days = np.floor((numbers * 86400.0 + 0.001) / 86400.0)
+    plain = np.floor(numbers)
+    seconds = (numbers - days) * 86400.0
+    seconds = np.where(np.isfinite(numbers) & (days > plain), 0.0, seconds)
+    if round_seconds:
+        seconds = np.round(seconds)
+    leap = np.isfinite(days) & (np.floor(days) == 60)
+    before = np.isfinite(days) & (np.floor(days) < 60)
+    days = days.copy()
+    days[leap] = np.nan
+    days[before] = days[before] + 1
+    converted: list[Any] = []
+    for day, second in zip(days, seconds):
+        if not math.isfinite(float(day)):
+            converted.append(None)
+            continue
+        stamp = origin + timedelta(days=int(day))
+        if not include_time:
+            converted.append(stamp)
+            continue
+        clock = datetime(stamp.year, stamp.month, stamp.day, tzinfo=zone)
+        extra = float(second) if math.isfinite(float(second)) else 0.0
+        converted.append(clock + timedelta(seconds=extra))
+    return converted
+
+
+def _excel_scalar(value: Any) -> bool:
+    if isinstance(value, (str, bytes, list, tuple, range, pl.Series, pl.Expr, Expr)):
+        return False
+    try:
+        import pandas as pd
+
+        if isinstance(value, (pd.Series, pd.Index)):
+            return False
+    except ImportError:
+        pass
+    try:
+        import numpy as np
+
+        if isinstance(value, np.ndarray):
+            return False
+    except ImportError:
+        pass
+    return True
+
+
+def excel_numeric_to_date(
+    date_num: Any,
+    *,
+    date_system: str = "modern",
+    include_time: bool = False,
+    round_seconds: bool = True,
+    tz: str = "UTC",
+) -> Any:
+    """Convert Excel serial numbers to dates (R **janitor::excel_numeric_to_date**).
+
+    ``42370`` is 2016-01-01 in the modern system. Serial 60 is missing on
+    both systems: Excel treated 1900 as a leap year, and janitor applies
+    that adjustment to the Mac system as well, so Mac serial 1 is
+    1904-01-03. ``date_system="mac pre-2011"`` uses the 1904 origin;
+    ``40908`` is 2016-01-01 there. ``include_time=False`` ignores the
+    fraction. ``round_seconds=True`` rounds the seconds to an integer the
+    way R's ``round`` does. The default zone is UTC, not the machine zone.
+    A quoted string is a column name. A number or list is converted
+    immediately. Leap seconds are not applied, and no coercion warning is
+    printed.
+    """
+    date_system, include_time, round_seconds, tz = _excel_flags(
+        date_system, include_time, round_seconds, tz
+    )
+    if isinstance(date_num, (str, Expr, pl.Expr)):
+        return _func(
+            "excel_numeric_to_date",
+            _value(date_num),
+            date_system=date_system,
+            include_time=include_time,
+            round_seconds=round_seconds,
+            tz=tz,
+        )
+    scalar = _excel_scalar(date_num)
+    converted = _excel_convert(
+        [date_num] if scalar else date_num,
+        date_system=date_system,
+        include_time=include_time,
+        round_seconds=round_seconds,
+        tz=tz,
+    )
+    if scalar:
+        return converted[0]
+    try:
+        import pandas as pd
+
+        if isinstance(date_num, pd.Series):
+            if include_time:
+                return pd.Series(
+                    converted,
+                    index=date_num.index,
+                    dtype=pd.DatetimeTZDtype("us", tz),
+                )
+            return pd.Series(converted, index=date_num.index, dtype="object")
+    except ImportError:
+        pass
+    if isinstance(date_num, pl.Series):
+        dtype = pl.Datetime("us", tz) if include_time else pl.Date
+        return pl.Series(converted, dtype=dtype)
+    return converted
+
+
+def _excel_polars(
+    value: pl.Expr,
+    *,
+    date_system: str,
+    include_time: bool,
+    round_seconds: bool,
+    tz: str,
+) -> pl.Expr:
+    dtype = pl.Datetime("us", tz) if include_time else pl.Date
+
+    def batch(series: pl.Series) -> pl.Series:
+        converted = _excel_convert(
+            series,
+            date_system=date_system,
+            include_time=include_time,
+            round_seconds=round_seconds,
+            tz=tz,
+        )
+        return pl.Series(converted, dtype=dtype)
+
+    return value.map_batches(batch, return_dtype=dtype, is_elementwise=True)
+
+
+def _excel_pandas(source: pd.Series, **kwargs: Any) -> pd.Series:
+    converted = _excel_convert(source, **kwargs)
+    if kwargs["include_time"]:
+        return pd.Series(
+            converted,
+            index=source.index,
+            dtype=pd.DatetimeTZDtype("us", kwargs["tz"]),
+        )
+    return pd.Series(converted, index=source.index, dtype="object")
+
+
 def compile_polars(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> pl.Expr:
     """Compile a date helper to a Polars expression."""
     value = args[0]
+    if name == "excel_numeric_to_date":
+        return _excel_polars(value, **kwargs)
+    if name in {"with_tz", "force_tz"}:
+        from tidy3._timezones import transform
+
+        # Polars infers the output on a dummy Series, preserving the input
+        # time unit while changing its zone. No source rows are collected.
+        return value.map_batches(
+            lambda series: transform(series, name, **kwargs), is_elementwise=True
+        )
     if name == "year":
         return value.dt.year().cast(pl.Int64)
     if name == "month":
@@ -587,12 +868,50 @@ def shift_pandas(series: pd.Series, period: Period) -> pd.Series:
     return _restore(result, date_only)
 
 
+def _dtype_zone(series: pd.Series):
+    return getattr(series.dtype, "tz", None)
+
+
+def _relocalize(wall: pd.Series, template: pd.Series) -> pd.Series:
+    """Attach *template*'s zone to naive wall-clock times.
+
+    Rounding runs on the local clock, so a day is a calendar date rather
+    than 24 hours. An ambiguous result keeps the source row's occurrence:
+    a true flag is the daylight-saving one. Unambiguous clocks ignore it.
+    """
+    zone = _dtype_zone(template)
+    if zone is None:
+        return wall
+    # pandas 3 has no Series.dt.dst(). Each instant's own dst() still says
+    # which repeated clock it is; True keeps the daylight-saving one.
+    ambiguous = [
+        isinstance(value, datetime) and not pd.isna(value) and bool(value.dst())
+        for value in template.dt.to_pydatetime()
+    ]
+    located = wall.dt.tz_localize(zone, ambiguous=ambiguous)
+    return located.astype(template.dtype)
+
+
+def _floor_wall(wall: pd.Series, unit: str) -> pd.Series:
+    if unit in _PANDAS_FREQ:
+        return wall.dt.floor(_PANDAS_FREQ[unit])
+    if unit == "month":
+        return wall.dt.to_period("M").dt.to_timestamp()
+    if unit == "quarter":
+        return wall.dt.to_period("Q").dt.to_timestamp()
+    if unit == "year":
+        return wall.dt.to_period("Y").dt.to_timestamp()
+    raise ValueError(f"unknown unit: {unit}")
+
+
 def _floor_pandas(series: pd.Series, unit: str) -> pd.Series:
     stamped = _temporal(series)
-    if unit in _PANDAS_FREQ:
-        return stamped.dt.floor(_PANDAS_FREQ[unit])
     if unit == "week":
         return stamped
+    if _dtype_zone(stamped) is not None:
+        return _relocalize(_floor_wall(stamped.dt.tz_localize(None), unit), stamped)
+    if unit in _PANDAS_FREQ:
+        return stamped.dt.floor(_PANDAS_FREQ[unit])
     if unit == "month":
         return stamped.dt.to_period("M").dt.to_timestamp()
     if unit == "quarter":
@@ -603,10 +922,23 @@ def _floor_pandas(series: pd.Series, unit: str) -> pd.Series:
 
 
 def _week_floor(series: pd.Series, week_start: int) -> pd.Series:
-    stamped = _temporal(series).dt.normalize()
-    iso = stamped.dt.dayofweek + 1
+    stamped = _temporal(series)
+    zone = _dtype_zone(stamped)
+    wall = stamped.dt.tz_localize(None) if zone is not None else stamped
+    wall = wall.dt.normalize()
+    iso = wall.dt.dayofweek + 1
     shift = (iso - week_start) % 7
-    return stamped - pd.to_timedelta(shift.fillna(0), unit="D")
+    floored = wall - pd.to_timedelta(shift.fillna(0), unit="D")
+    if zone is None:
+        return floored
+    return _relocalize(floored, stamped)
+
+
+def _calendar_days(floored: pd.Series, days: int) -> pd.Series:
+    """Move *days* on the calendar. A fixed duration misses local midnight across DST."""
+    if _dtype_zone(floored) is None:
+        return floored + pd.Timedelta(days=days)
+    return floored + pd.DateOffset(days=days)
 
 
 def _ceiling_pandas(
@@ -614,7 +946,7 @@ def _ceiling_pandas(
 ) -> pd.Series:
     if unit == "week":
         floored = _week_floor(series, week_start)
-        nudged = floored + pd.Timedelta(days=7)
+        nudged = _calendar_days(floored, 7)
     else:
         floored = _floor_pandas(series, unit)
         if unit == "second":
@@ -624,13 +956,17 @@ def _ceiling_pandas(
         elif unit == "hour":
             nudged = floored + pd.Timedelta(hours=1)
         elif unit == "day":
-            nudged = floored + pd.Timedelta(days=1)
+            nudged = _calendar_days(floored, 1)
         elif unit == "month":
             nudged = floored + pd.DateOffset(months=1)
         elif unit == "quarter":
             nudged = floored + pd.DateOffset(months=3)
         else:
             nudged = floored + pd.DateOffset(years=1)
+    if _dtype_zone(floored) is not None:
+        origin = _temporal(series).dtype
+        floored = floored.astype(origin)
+        nudged = nudged.astype(origin)
     if date_only and unit not in _SUB_DAY:
         # A date moves to the next boundary even when it is on one; see
         # _ceiling_polars.
@@ -650,6 +986,16 @@ def eval_pandas(
     source = args[0]
     if not isinstance(source, pd.Series):
         source = pd.Series(source, index=df.index)
+    if name == "excel_numeric_to_date":
+        return _excel_pandas(source, **kwargs)
+    if name in {"with_tz", "force_tz"}:
+        from tidy3._timezones import transform
+
+        # Use the same native timezone kernels and DST rules on both
+        # backends; Arrow carries the original datetime precision through.
+        result = transform(pl.from_pandas(source), name, **kwargs).to_pandas()
+        result.index = source.index
+        return result
     if name == "year":
         return _component(source, "year")
     if name == "month":

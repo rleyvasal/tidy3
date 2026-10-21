@@ -61,6 +61,233 @@ base <- tibble(
 
 result <- switch(
   case_name,
+  reshape_metadata = {
+    x <- tibble(g=factor(c("b", "a", "b"), levels=c("a", "b", "unused"), ordered=TRUE),
+                code=c("x-y", "p-q", "r-s"), x=c(2L, 4L, 8L)) %>% group_by(g, .drop=FALSE)
+    operations <- list(
+      pack=function(d) pack(d, packed=x), unpack=function(d) unpack(d, record),
+      hoist=function(d) hoist(d, record, nested_value="nested_value"),
+      wider_delim=function(d) separate_wider_delim(d, code, names=c("left", "right"), delim="-"),
+      wider_regex=function(d) separate_wider_regex(d, code, c(left="[a-z]", "-", right="[a-z]")),
+      wider_position=function(d) separate_wider_position(d, code, widths=c(left=1L, 1L, right=1L)),
+      longer_delim=function(d) separate_longer_delim(d, code, delim="-"),
+      longer_position=function(d) separate_longer_position(d, code, width=2)
+    )
+    result <- list()
+    for (name in names(operations)) for (empty in c(FALSE, TRUE)) {
+      data <- x
+      data$record <- if (name == "unpack") tibble(nested_value=c(10L,20L,30L)) else
+        list(list(nested_value=10L), list(nested_value=20L), list(nested_value=30L))
+      if (empty) data <- head(data, 0)
+      out <- operations[[name]](data)
+      result[[paste0(name, if (empty) "_empty" else "_rows")]] <- list(
+        groups=group_vars(out), drop=group_by_drop_default(out), levels=levels(out$g),
+        # Compare summary labels/counts; factor levels are checked above.
+        summary=summarise(out, rows=n(), .groups="drop") %>% mutate(g=as.character(g))
+      )
+    }
+    result
+  },
+  janitor_dupes = {
+    if (!requireNamespace("janitor", quietly=TRUE)) {
+      list(skip=TRUE, reason="janitor is not installed")
+    } else {
+      x <- tibble(g=c("x", "x", "y", "z", "y", "x", "a", "b"),
+                  key_id=c("b", "a", "b", "c", "a", "a", NA, NA),
+                  key_sub=c(1L, 2L, 1L, 3L, 2L, 9L, 4L, 4L), row=1:8)
+      full <- tibble(a=c("b", "a", "b", "a", "x"), b=c(1L, 2L, 1L, 2L, 3L))
+      grouped <- x %>% group_by(g) %>% janitor::get_dupes(key_id)
+      factors <- tibble(key=factor(c("a", "b", "a", "b", NA, NA), levels=c("b", "a", "unused")), row=0:5)
+      list(
+        single=janitor::get_dupes(x, key_id),
+        composite=janitor::get_dupes(x, key_id, key_sub),
+        selector=janitor::get_dupes(x, starts_with("key")),
+        all=suppressMessages(janitor::get_dupes(full)),
+        empty=suppressMessages(janitor::get_dupes(x[FALSE, ], key_id)),
+        none=suppressMessages(janitor::get_dupes(x, row)),
+        empty_selection=janitor::get_dupes(x, any_of(character())),
+        grouped=grouped, group_names=group_vars(grouped),
+        factors=janitor::get_dupes(factors, key)
+      )
+    }
+  },
+  timezone_conversion = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      result <- list()
+      x <- lubridate::ymd_hms(c("2024-01-02 12:34:56.125", "2024-07-02 12:34:56.5", "2024-11-03 05:30:00", "2024-11-03 06:30:00", NA_character_))
+      zones <- c("UTC", "America/New_York", "Europe/Dublin", "Australia/Sydney", "Asia/Kathmandu")
+      for (source in zones) for (target in zones) for (name in c("with_tz", "force_tz")) {
+        f <- getExportedValue("lubridate", name)
+        output <- f(lubridate::with_tz(x, source), target)
+        result[[paste(source, target, name, sep="_")]] <- list(
+          epochs=as.numeric(output), clocks=format(output, "%Y-%m-%d %H:%M:%S %z", tz=target)
+        )
+      }
+      dates <- as.Date(c("2024-01-02", "2024-03-10", "2024-11-03", NA_character_))
+      for (target in zones) for (name in c("with_tz", "force_tz")) {
+        output <- getExportedValue("lubridate", name)(dates, target)
+        result[[paste("dates", target, name, sep="_")]] <- list(
+          epochs=as.numeric(output), clocks=format(output, "%Y-%m-%d %H:%M:%S %z", tz=target)
+        )
+      }
+      result
+    }
+  },
+  timezone_dst = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      inputs <- list(
+        "America/New_York"=c("2024-03-10 01:59:59.125", "2024-03-10 02:30:00.125", "2024-03-10 03:00:00", "2024-11-03 01:30:00.125", "2024-11-03 02:00:00", NA_character_),
+        "Europe/Dublin"=c("2024-03-31 01:30:00.125", "2024-10-27 01:30:00.125", "2024-01-01 12:34:56", NA_character_),
+        "Australia/Lord_Howe"=c("2024-04-07 01:45:00.125", "2024-10-06 02:15:00.125", "2024-01-01 12:34:56", NA_character_),
+        "Pacific/Apia"=c("2011-12-29 12:30:00.125", "2011-12-30 12:30:00.125", "2011-12-31 12:30:00.125", NA_character_)
+      )
+      policies <- list(NA_both="NA", pre="pre", post="post", boundary="boundary", default=c("NA", "post"), mixed=c("boundary", "pre"))
+      result <- list()
+      for (target in names(inputs)) for (policy in names(policies)) {
+        x <- lubridate::ymd_hms(inputs[[target]])
+        # R retains subseconds for a skipped "boundary" when the repeated
+        # policy is "pre". Compare whole-second inputs for that pair;
+        # tidy3's exact-boundary rule is tested separately.
+        if (policy == "mixed") x <- lubridate::floor_date(x, "second")
+        output <- lubridate::force_tz(x, target, roll_dst=policies[[policy]])
+        result[[paste(target, policy, sep="_")]] <- list(
+          epochs=as.numeric(output), clocks=format(output, "%Y-%m-%d %H:%M:%S %z", tz=target)
+        )
+      }
+      result
+    }
+  },
+  timezone_resolved_repeats = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      x <- lubridate::ymd_hms(c("2024-11-03 04:30:00.125", "2024-11-03 05:30:00.125", "2024-11-03 06:30:00.125", "2024-10-27 00:30:00.125", "2024-10-27 01:30:00.125", NA_character_))
+      result <- list()
+      for (source in c("UTC", "America/Toronto", "America/Halifax", "Europe/Dublin")) {
+        for (target in c("UTC", "America/New_York", "America/Toronto", "Europe/Dublin")) {
+          for (policy in c("NA", "pre", "post", "boundary")) {
+            # R discards a resolved repeat's subseconds with "boundary".
+            # Compare whole seconds here; tidy3 preserves that occurrence
+            # and its original precision, covered by regression tests.
+            values <- if (policy == "boundary") lubridate::floor_date(x, "second") else x
+            output <- lubridate::force_tz(lubridate::with_tz(values, source), target, roll_dst=policy)
+            result[[paste(source, target, policy, sep="_")]] <- list(
+              epochs=as.numeric(output), clocks=format(output, "%Y-%m-%d %H:%M:%S %z", tz=target)
+            )
+          }
+        }
+      }
+      result
+    }
+  },
+  formatted_offsets = {
+    if (!requireNamespace("readr", quietly=TRUE)) {
+      list(skip=TRUE, reason="readr is not installed")
+    } else {
+      suppressPackageStartupMessages(library(readr))
+      x <- parse_datetime(
+        c("2024-01-01 12:00:00+0200", "2024-01-01 12:00:00-0500",
+          "2024-01-01 12:00:00+02:00", "2024-01-01 12:00:00Z",
+          "2024-06-01 00:30:00-0530", "bad", NA_character_),
+        format="%Y-%m-%d %H:%M:%S%z"
+      )
+      list(clocks=format(x, "%Y-%m-%d %H:%M:%S", tz="UTC"))
+    }
+  },
+  calendar_rounding = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      suppressPackageStartupMessages(library(lubridate))
+      zone <- "America/New_York"
+      x <- ymd_hms(c(
+        "2024-03-11 12:00:00", "2024-03-10 01:30:00", "2024-11-03 01:30:00.125",
+        "2024-11-03T01:30:00.125-04:00", "2024-11-03T01:00:00-04:00", NA_character_
+      ), tz=zone)
+      # Hour ceiling of the first fallback 01:30 is 02:00 in lubridate and
+      # the second 01:00 in tidy3. That unit is covered by the regression
+      # tests, not this comparison.
+      units <- c("second", "minute", "day", "week", "month", "quarter", "year")
+      result <- list()
+      for (unit in units) for (name in c("floor_date", "ceiling_date")) {
+        output <- getExportedValue("lubridate", name)(x, unit)
+        result[[paste(unit, name, sep="_")]] <- list(
+          epochs=as.numeric(output),
+          clocks=format(output, "%Y-%m-%d %H:%M:%S %z", tz=zone)
+        )
+      }
+      monday <- floor_date(x, "week", week_start=1)
+      result[["week_monday"]] <- list(
+        epochs=as.numeric(monday),
+        clocks=format(monday, "%Y-%m-%d %H:%M:%S %z", tz=zone)
+      )
+      result
+    }
+  },
+  datetime_parsers = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      result <- list()
+      calendars <- c(ymd_hms="2024-02-29", ymd_hm="2024-02-29", mdy_hms="02/29/2024", dmy_hms="29/02/2024")
+      named <- c(ymd_hms="2024 February 29", ymd_hm="2024 February 29", mdy_hms="February 29th 2024", dmy_hms="29th February 2024")
+      compact <- c(ymd_hms="20240229", ymd_hm="20240229", mdy_hms="02292024", dmy_hms="29022024")
+      for (name in names(calendars)) {
+        parser <- getExportedValue("lubridate", name)
+        clock <- if (name == "ymd_hm") "12:34" else "12:34:56"
+        digits <- if (name == "ymd_hm") "1234" else "123456"
+        x <- c(paste(calendars[[name]], clock), paste(named[[name]], clock), paste0(compact[[name]], digits),
+               paste0(calendars[[name]], "T", clock, "Z"), paste0(calendars[[name]], " ", clock, "+05:30"),
+               paste(calendars[[name]], clock, "PM"), paste(calendars[[name]], clock, "AM"), "bad", NA_character_)
+        if (name != "ymd_hm") x <- c(x, paste0(calendars[[name]], " ", clock, ".125"))
+        for (zone in c("UTC", "America/New_York", "Asia/Kolkata")) {
+          parsed <- suppressMessages(suppressWarnings(parser(x, tz=zone, locale="C")))
+          if (name == "ymd_hm") {
+            # R's hm parser drops Z and rejects some offsets. Compare the
+            # intended instants to hms with zero seconds for these two rows.
+            offset_text <- sub(clock, paste0(clock, ":00"), x[c(4, 5)], fixed=TRUE)
+            parsed[c(4, 5)] <- suppressMessages(lubridate::ymd_hms(offset_text, tz=zone))
+          }
+          result[[paste(name, zone, sep="_")]] <- as.numeric(parsed)
+        }
+        result[[paste0(name, "_numeric")]] <- as.numeric(suppressWarnings(parser(as.numeric(paste0(compact[[name]], digits)))))
+      }
+      result
+    }
+  },
+  datetime_truncation = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      result <- list()
+      for (name in c("ymd_hms", "ymd_hm", "mdy_hms", "dmy_hms")) {
+        parser <- getExportedValue("lubridate", name)
+        # A year ending in 99 cannot be reinterpreted as an hour by R's
+        # two-digit-year fallback; tidy3 never makes that reinterpretation.
+        calendar <- switch(name, mdy_hms="01/02/1999", dmy_hms="02/01/1999", "1999-01-02")
+        x <- c(paste(calendar, "12:34:56"), paste(calendar, "12:34"), paste(calendar, "12"), calendar, "bad", NA_character_)
+        maximum <- if (name == "ymd_hm") 2 else 3
+        for (truncated in 0:maximum) {
+          result[[paste0(name, "_", truncated)]] <- as.numeric(suppressWarnings(parser(x, truncated=truncated)))
+        }
+      }
+      result
+    }
+  },
+  datetime_dst = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      x <- c("2024-03-10 01:59:59.5", "2024-03-10 02:30:00", "2024-03-10 03:30:00", "2024-11-03 01:30:00",
+             "2024-11-03T01:30:00-04:00", "2024-11-03T01:30:00-05", "2024-01-01T12:00:00Z",
+             "2024-02-29 24:00:00", "2024-02-29 23:59:60", "2023-02-29 12:00:00", NA_character_)
+      as.numeric(suppressMessages(suppressWarnings(lubridate::ymd_hms(x, tz="America/New_York"))))
+    }
+  },
   date_components = {
     if (!requireNamespace("lubridate", quietly=TRUE)) {
       list(skip=TRUE, reason="lubridate is not installed")
@@ -601,8 +828,11 @@ result <- switch(
     as_logical_text=as.logical(c("TRUE", "true", "T", "True", "FALSE", "false", "F", "tRuE", "yes", "1")),
     as_logical_num=as.logical(c(0, 2, -1, NaN, NA)),
     as_logical_exact=as.logical(c(" TRUE", "TRUE ", "yes", "True", "T", "false", "F")),
-    # 1e5 is "1e+05" in R; tidy3 writes whole numbers in full (see the reference).
-    as_character=as.character(c(1, 1.5, 123456, 0.25, -3, 100001)),
+    # tidy3 writes a float as its type shows it ("21.0" where R gives "21"),
+    # so compare integers and fractional doubles, where the two agree.
+    as_character_int=as.character(c(1L, 123456L, -3L, 100001L)),
+    as_character=as.character(c(1.5, 0.25, -3.75, 22.8)),
+    # R spells logical values TRUE / FALSE; tidy3 does when asked.
     as_character_logical=as.character(c(TRUE, FALSE, NA)),
     as_date=format(as.Date(c("2010-01-31", NA)), "%Y-%m-%d")
   ),
@@ -612,7 +842,7 @@ result <- switch(
     } else {
       suppressPackageStartupMessages(library(lubridate))
       day_text <- function(x) format(x, "%Y-%m-%d")
-      time_text <- function(x) format(x, "%Y-%m-%dT%H:%M:%S", tz="UTC")
+      time_text <- function(x) format(x, "%Y-%m-%d %H:%M:%S", tz="UTC")
       d <- as.Date(c("2024-02-29", "2024-01-31", "2010-03-31"))
       t <- ymd_hms(c("2026-10-21 15:30:00", "2026-10-18 09:00:00", "2026-10-18 00:00:00"))
       list(
@@ -798,6 +1028,161 @@ result <- switch(
         floor_week=day_text(floor_date(d, "week"))
       )
     }
+  },
+  factor_sort = {
+    payload <- function(d) list(
+      values=as.character(d$f),
+      rows=d$row,
+      levels=levels(d$f),
+      ordered=is.ordered(d$f)
+    )
+    f <- factor(c("a", "b", "a", NA, "b"), levels=c("b", "a", "unused"), ordered=TRUE)
+    d <- tibble(f=f, row=1:5)
+    u <- tibble(f=factor(c("a", "b", "a", NA, "b"), levels=c("b", "a", "unused")), row=1:5)
+    empty <- tibble(f=factor(character(), levels=c("b", "a", "unused"), ordered=TRUE), row=integer())
+    missing <- tibble(f=factor(c(NA, NA), levels=c("b", "a")), row=1:2)
+    list(
+      ascending=payload(arrange(d, f)),
+      descending=payload(arrange(d, desc(f))),
+      grouped=payload(ungroup(arrange(group_by(d, f), row, .by_group=TRUE))),
+      unordered=payload(arrange(u, f)),
+      empty=payload(empty),
+      missing=payload(arrange(missing, f))
+    )
+  },
+  string_equal = {
+    if (!requireNamespace("stringr", quietly=TRUE)) {
+      list(skip=TRUE, reason="stringr is not installed")
+    } else {
+      tibble(
+        x=c("\u00e9", "\u00c9", "e", NA, "a", "\u212b"),
+        y=c("e\u0301", "e\u0301", "e", NA, "b", "\u00c5")
+      ) %>% mutate(
+        equal=stringr::str_equal(x, y),
+        ignore=stringr::str_equal(x, y, ignore_case=TRUE)
+      )
+    }
+  },
+  janitor_cleaning = {
+    if (!requireNamespace("janitor", quietly=TRUE)) {
+      list(skip=TRUE, reason="janitor is not installed")
+    } else {
+      fmt_date <- function(x) format(x, "%Y-%m-%d")
+      fmt_time <- function(x) format(x, "%Y-%m-%dT%H:%M:%OS6")
+      suppressWarnings(suppressMessages({
+        cleaning <- tibble(
+          a=c(1, NA_real_, 2, NA_real_),
+          b=c(NA_real_, NA_real_, NA_real_, NA_real_),
+          c=c("x", NA_character_, "", "y"),
+          d=c(NA_real_, NA_real_, 1, NA_real_)
+        )
+        constant <- tibble(
+          mix=c(1, 1, NA_real_), vary=c(1, 2, 1),
+          const=c(5, 5, 5), allna=c(NA_real_, NA_real_, NA_real_)
+        )
+        zero <- tibble(a=numeric(), b=character())
+        old <- tibble(Z=1.5, A=2.5, B=1L)
+        new <- tibble(M=3.5, A=4.5, B=5.0, C="x")
+        one <- tibble(Z=1.5, A=1L)
+        fac <- tibble(f=factor(c("y", "x"), levels=c("y", "x"), ordered=TRUE))
+        headers <- tibble(a=c("id", "1"), b=c("code", "x"))
+        numbers <- tibble(a=c(1.0, 9))
+        flags <- tibble(a=c(TRUE, FALSE))
+        sheet <- tibble(a=c(NA, "h1", "1"), b=c("a", "h2", "2"))
+        seek <- tibble(a=c("skip", "header", "data"), b=c("no", "yes", "row"))
+        list(
+          empty=janitor::remove_empty(cleaning, which=c("rows", "cols")),
+          rows_cutoff=janitor::remove_empty(cleaning, which="rows", cutoff=0.5),
+          cols_cutoff=janitor::remove_empty(cleaning, which="cols", cutoff=0.5),
+          constant=janitor::remove_constant(constant),
+          constant_na=janitor::remove_constant(constant, na.rm=TRUE),
+          zero_cols=janitor::remove_empty(zero, which="cols"),
+          zero_constant=janitor::remove_constant(zero),
+          classes=janitor::compare_df_cols(old=old, new=new),
+          matched=janitor::compare_df_cols(old=old, new=new, return="match"),
+          mismatched=janitor::compare_df_cols(old=old, new=new, return="mismatch"),
+          bound=janitor::compare_df_cols(old=old, new=new, return="mismatch", bind_method="rbind"),
+          one_classes=janitor::compare_df_cols(one=one),
+          strict=janitor::compare_df_cols(fac=fac, strict_description=TRUE),
+          loose=janitor::compare_df_cols(fac=fac, strict_description=FALSE),
+          same_bind=janitor::compare_df_cols_same(data.frame(A=1), data.frame(B=2), verbose=FALSE),
+          same_rbind=janitor::compare_df_cols_same(data.frame(A=1), data.frame(B=2), bind_method="rbind", verbose=FALSE),
+          same_one=janitor::compare_df_cols_same(one, verbose=FALSE),
+          headers=janitor::row_to_names(headers, 1),
+          numbers=janitor::row_to_names(numbers, 1),
+          flags=janitor::row_to_names(flags, 1),
+          found=janitor::row_to_names(sheet, "find_header"),
+          complete=janitor::find_header(seek),
+          header_value=janitor::find_header(seek, "header"),
+          by_name=janitor::find_header(seek, yes="b"),
+          by_pos=janitor::find_header(seek, yes=2),
+          excel_modern=tibble(value=fmt_date(janitor::excel_numeric_to_date(c(-1, 0, 1, 59, 60, 61, 42370, 40000, 40000.5)))),
+          excel_mac=tibble(value=fmt_date(janitor::excel_numeric_to_date(c(0, 1, 60, 40908), date_system="mac pre-2011"))),
+          excel_time=tibble(value=fmt_time(janitor::excel_numeric_to_date(c(40000.5, 40000.521, 60.5, 1.999999999), include_time=TRUE))),
+          excel_noround=tibble(value=fmt_time(janitor::excel_numeric_to_date(40000.521, include_time=TRUE, round_seconds=FALSE)))
+        )
+      }))
+    }
+  },
+  factor_combine = {
+    if (!requireNamespace("forcats", quietly=TRUE)) {
+      list(skip=TRUE, reason="forcats is not installed")
+    } else {
+      suppressPackageStartupMessages(library(forcats))
+      q <- function(x) suppressMessages(suppressWarnings(x))
+      # One column described by its type, values, and levels, so factor
+      # metadata is compared, not only the values.
+      describe <- function(x) list(
+        type=if (is.factor(x)) "factor" else class(x)[[1]],
+        values=I(as.character(x)),
+        levels=I(if (is.factor(x)) levels(x) else character())
+      )
+      p <- tibble(species=c("Adelie", "Gentoo", "Adelie", "Chinstrap", NA),
+                  mass=c(3750, 5000, 3800, 3700, 4000)) |>
+        mutate(species=fct_infreq(species))
+      text_lookup <- tibble(species=c("Adelie", "Gentoo", "Emperor"), w=c(1, 2, 3))
+      other_levels <- tibble(species=factor(c("Gentoo", "Emperor"), levels=c("Gentoo", "Emperor")), w=c(2, 3))
+      same_levels <- tibble(species=factor(c("Gentoo", "Adelie"), levels=levels(p$species)), w=c(2, 1))
+      emperor <- tibble(species=fct_rev(factor("Emperor")), mass=1)
+      years <- tibble(species=factor(c("Adelie", "Gentoo", NA), levels=c("Gentoo", "Chinstrap", "Adelie")),
+                      year=c(2007, 2008, 2008), n=c(1, 2, 3))
+      key <- function(x, name="species") describe(x[[name]])
+      list(
+        left_text=key(q(left_join(p, text_lookup, by="species"))),
+        left_text_w=I(q(left_join(p, text_lookup, by="species"))$w),
+        inner_text=key(q(inner_join(p, text_lookup, by="species"))),
+        full_text=key(q(full_join(p, text_lookup, by="species"))),
+        right_text=key(q(right_join(text_lookup, p, by="species"))),
+        semi_text=key(q(semi_join(p, text_lookup, by="species"))),
+        anti_text=key(q(anti_join(p, text_lookup, by="species"))),
+        left_other=key(q(left_join(p, other_levels, by="species"))),
+        full_other=key(q(full_join(p, other_levels, by="species"))),
+        left_same=key(q(left_join(p, same_levels, by="species"))),
+        bind_factors=key(q(bind_rows(p, emperor))),
+        bind_factors_reversed=key(q(bind_rows(emperor, p))),
+        bind_text=key(q(bind_rows(p, tibble(species="Emperor", mass=1)))),
+        bind_missing_column=key(q(bind_rows(p, tibble(mass=1)))),
+        complete_species_year=key(q(complete(years, species, year))),
+        complete_species_year_n=I(q(complete(years, species, year))$n),
+        complete_species=key(q(complete(years, species))),
+        complete_nesting=key(q(complete(years, nesting(species), year))),
+        expand_species=key(q(expand(years, species))),
+        complete_grouped=key(q(years |> group_by(year) |> complete(species) |> ungroup()))
+      )
+    }
+  },
+  right_join_order = {
+    q <- function(x) suppressMessages(suppressWarnings(x))
+    x <- tibble(island=c("Torgersen", "Biscoe", "Dream", "Biscoe"), from_x=c("x1", "x2", "x3", "x4"))
+    y <- tibble(island=c("Biscoe", "Anvers", "Torgersen", "Biscoe", NA), from_y=c("y1", "y2", "y3", "y4", "y5"))
+    list(
+      plain=q(right_join(x, y, by="island")),
+      # tidy3 spells dplyr's .x / .y suffixes as _x / _y.
+      keep=q(right_join(x, y, by="island", keep=TRUE, suffix=c("_x", "_y"))),
+      first=q(right_join(x, y, by="island", multiple="first")),
+      by_spec=q(right_join(x, y, by=join_by(island))),
+      swapped=q(right_join(y, x, by="island"))
+    )
   },
   stop(sprintf("unknown oracle case: %s", case_name))
 )

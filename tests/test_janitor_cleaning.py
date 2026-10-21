@@ -1,0 +1,439 @@
+"""Janitor cleaning helpers on both backends.
+
+Row-only ``remove_empty`` stays lazy. Dropping columns, constant checks, and
+``row_to_names`` read the current values. Blank strings are kept. Nothing
+here prints janitor's status lines.
+"""
+
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+import polars as pl
+import pytest
+
+import tidy3 as t
+from tidy3.expr import Expr
+
+
+BACKENDS = ["polars", "pandas"]
+UTC = ZoneInfo("UTC")
+
+
+def _clock(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    return value
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_remove_empty_keeps_blanks_and_drops_missing(backend, capsys):
+    frame = t.tidy(
+        {
+            "a": [1.0, None, 2.0, None],
+            "b": [None, None, None, None],
+            "c": ["x", None, "", "y"],
+            "d": [None, None, 1.0, None],
+        },
+        backend=backend,
+    )
+    out = (frame >> t.remove_empty()).collect()
+    assert capsys.readouterr().out == ""
+    assert out.columns == ["a", "c", "d"]
+    assert out["a"].to_list() == [1.0, 2.0, None]
+    assert out["c"].to_list() == ["x", "", "y"]
+    assert out["d"].to_list() == [None, 1.0, None]
+    rows = frame >> t.remove_empty("rows", cutoff=0.5)
+    assert rows.collect()["a"].to_list() == [2.0]
+    cols = (frame >> t.remove_empty("cols", cutoff=0.5)).collect()
+    assert cols.columns == ["c"]
+    assert cols["c"].to_list() == ["x", None, "", "y"]
+    assert frame.remove_empty("cols").columns == ["a", "c", "d"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_remove_empty_cutoff_rules_and_zero_frames(backend):
+    with pytest.raises(ValueError, match="only one"):
+        t.remove_empty(cutoff=0.5)
+    with pytest.raises(ValueError, match="cutoff"):
+        t.remove_empty(cutoff=0)
+    empty = t.tidy(pd.DataFrame(), backend=backend)
+    with pytest.raises(ValueError, match="at least one column"):
+        empty >> t.remove_empty("rows", cutoff=0.5)
+    no_rows = t.tidy(
+        pd.DataFrame({"a": pd.Series([], dtype="float64")}), backend=backend
+    )
+    with pytest.raises(ValueError, match="at least one row"):
+        no_rows >> t.remove_empty("cols", cutoff=0.5)
+    dropped = no_rows >> t.remove_empty("cols")
+    assert dropped.shape == (0, 0)
+    blank = t.tidy({"a": ["", ""], "b": [None, None]}, backend=backend)
+    assert (blank >> t.remove_empty()).collect()["a"].to_list() == ["", ""]
+
+
+def test_remove_empty_zero_column_pandas_rows():
+    frame = t.tidy(pd.DataFrame(index=range(3)), backend="pandas")
+    assert frame.shape == (3, 0)
+    assert (frame >> t.remove_empty("rows")).shape == (0, 0)
+    assert t.find_header(frame) == 1
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_remove_constant_na_and_factors(backend):
+    frame = t.tidy(
+        pd.DataFrame(
+            {
+                "mix": pd.Series([1.0, 1.0, None], dtype="float64"),
+                "vary": pd.Series([1.0, 2.0, 1.0], dtype="float64"),
+                "const": pd.Series([5.0, 5.0, 5.0], dtype="float64"),
+                "allna": pd.Series([None, None, None], dtype="float64"),
+            }
+        ),
+        backend=backend,
+    )
+    assert (frame >> t.remove_constant()).columns == ["mix", "vary"]
+    assert frame.remove_constant(na_rm=True).columns == ["vary"]
+    source = pd.DataFrame(
+        {
+            "only": pd.Categorical(["a", "a"], categories=["a", "b", "c"]),
+            "both": pd.Categorical(
+                ["a", "b"], categories=["a", "b", "c"], ordered=True
+            ),
+        }
+    )
+    kept = t.tidy(source, backend=backend) >> t.remove_constant()
+    assert kept.columns == ["both"]
+    assert kept._category_levels["both"] == ["a", "b", "c"]
+    assert kept._category_levels["both"].ordered is True
+    assert "only" not in kept._category_levels
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_remove_constant_all_missing_nan_follows_the_backend(backend):
+    if backend == "polars":
+        frame = t.tidy(pl.DataFrame({"a": [float("nan"), None], "b": [1.0, 2.0]}))
+        assert (frame >> t.remove_constant()).columns == ["a", "b"]
+    else:
+        frame = t.tidy(
+            pd.DataFrame({"a": [float("nan"), None], "b": [1.0, 2.0]}),
+            backend="pandas",
+        )
+        assert (frame >> t.remove_constant()).columns == ["b"]
+    assert (frame >> t.remove_constant(na_rm=True)).columns == ["b"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_dropping_every_column_keeps_pandas_rows_only(backend):
+    emptied = t.tidy({"a": [1, 1], "b": ["x", "x"]}, backend=backend) >> t.remove_constant()
+    removed = (
+        t.tidy({"a": [None, None], "b": [None, None]}, backend=backend)
+        >> t.remove_empty("cols")
+    )
+    if backend == "pandas":
+        assert emptied.shape == (2, 0)
+        assert removed.shape == (2, 0)
+    else:
+        assert emptied.shape == (0, 0)
+        assert removed.shape == (0, 0)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_cleaning_preserves_groups_levels_and_problems(backend):
+    source = pd.DataFrame(
+        {
+            "g": pd.Categorical(
+                ["b", "a"], categories=["a", "b", "unused"], ordered=True
+            ),
+            "x": [1.0, 2.0],
+            "empty": [None, None],
+            "raw": ["1", "bad"],
+        }
+    )
+    frame = (
+        t.tidy(source, backend=backend)
+        >> t.group_by("g", drop=False)
+        >> t.mutate(parsed=t.parse_integer("raw"))
+    )
+    out = frame >> t.remove_empty("cols")
+    assert out.columns == ["g", "x", "raw", "parsed"]
+    assert out._groups == ["g"]
+    assert out._group_drop is False
+    assert out._rowwise is False
+    assert out._category_levels["g"] == ["a", "b", "unused"]
+    assert out._category_levels["g"].ordered is True
+    assert t.problems(out).collect()["original"].to_list() == ["bad"]
+    grouped = t.tidy({"g": ["a", "a"], "x": [1, 2]}, backend=backend) >> t.group_by(
+        "g", "x", drop=False
+    )
+    dropped = grouped >> t.remove_constant()
+    assert dropped.columns == ["x"]
+    assert dropped._groups == ["x"]
+    assert dropped._group_drop is False
+    rowwise = t.tidy({"a": [1.0, None], "b": ["x", "y"]}, backend=backend) >> t.rowwise()
+    assert (rowwise >> t.remove_empty("rows"))._rowwise is True
+
+
+def test_remove_empty_rows_stays_lazy(monkeypatch):
+    frame = t.tidy({"a": [1.0, None], "b": [None, "x"]})
+
+    def no_collect(*args, **kwargs):
+        raise AssertionError("remove_empty('rows') must not collect")
+
+    monkeypatch.setattr(pl.LazyFrame, "collect", no_collect)
+    out = frame >> t.remove_empty("rows")
+    assert out.columns == ["a", "b"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_compare_df_cols_match_rules_and_order(backend, capsys):
+    old = t.tidy(
+        pd.DataFrame(
+            {
+                "Z": pd.Series([1.5], dtype="float64"),
+                "A": pd.Series([2.5], dtype="float64"),
+                "B": pd.Series([1], dtype="int64"),
+            }
+        ),
+        backend=backend,
+    )
+    new = t.tidy(
+        pd.DataFrame(
+            {
+                "M": pd.Series([3.5], dtype="float64"),
+                "A": pd.Series([4.5], dtype="float64"),
+                "B": pd.Series([5.0], dtype="float64"),
+                "C": pd.Series(["x"], dtype="string"),
+            }
+        ),
+        backend=backend,
+    )
+    compared = t.compare_df_cols(old=old, new=new).collect()
+    assert capsys.readouterr().out == ""
+    assert compared.columns == ["column_name", "old", "new"]
+    assert compared["column_name"].to_list() == ["A", "B", "C", "M", "Z"]
+    assert compared["old"].to_list() == ["numeric", "integer", None, None, "numeric"]
+    assert compared["new"].to_list() == ["numeric", "numeric", "character", "numeric", None]
+    matched = t.compare_df_cols(old=old, new=new, return_="match").collect()
+    assert matched["column_name"].to_list() == ["A", "C", "M", "Z"]
+    mismatched = t.compare_df_cols(
+        old=old, new=new, return_="mismatch", bind_method="rbind"
+    ).collect()
+    assert mismatched["column_name"].to_list() == ["B", "C", "M", "Z"]
+    one = old.compare_df_cols().collect()
+    assert one.columns == ["column_name", "..1"]
+    assert one["column_name"].to_list() == ["Z", "A", "B"]
+    listed = t.compare_df_cols(pair=[old, new])
+    assert listed.columns == ["column_name", "pair_1", "pair_2"]
+    with pytest.raises(ValueError, match="column_name"):
+        t.compare_df_cols(column_name=old)
+    with pytest.warns(UserWarning, match="zero columns"):
+        empty = t.compare_df_cols(old=t.tidy(pd.DataFrame(), backend=backend), new=new)
+    assert empty.columns == ["column_name", "new"]
+    assert t.compare_df_cols_same(
+        t.tidy({"A": [1.0]}, backend=backend),
+        t.tidy({"B": [2.0]}, backend=backend),
+        verbose=True,
+    ) is True
+    assert capsys.readouterr().out == ""
+    assert (
+        t.compare_df_cols_same(
+            t.tidy({"A": [1.0]}, backend=backend),
+            t.tidy({"B": [2.0]}, backend=backend),
+            bind_method="rbind",
+            verbose=False,
+        )
+        is False
+    )
+    with pytest.warns(UserWarning, match="Only one data frame"):
+        assert t.compare_df_cols_same(one=old, verbose=False) is False
+    with pytest.warns(UserWarning, match="zero columns"):
+        assert (
+            t.compare_df_cols_same(
+                t.tidy(pd.DataFrame(), backend=backend),
+                t.tidy(pd.DataFrame(), backend=backend),
+                verbose=False,
+            )
+            is True
+        )
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_compare_df_cols_strict_factors_and_describe_class(backend):
+    fac = t.tidy(
+        pd.DataFrame(
+            {
+                "f": pd.Categorical(
+                    ["y", "x"], categories=["y", "x"], ordered=True
+                )
+            }
+        ),
+        backend=backend,
+    )
+    strict = t.compare_df_cols(fac=fac, strict_description=True).collect()
+    loose = t.compare_df_cols(fac=fac).collect()
+    assert strict["fac"].to_list() == ['ordered, factor(levels=c("y", "x"))']
+    assert loose["fac"].to_list() == ["factor"]
+    dates = t.tidy({"d": [date(2020, 1, 2), None]}, backend=backend)
+    assert t.compare_df_cols(dates=dates).collect()["dates"].to_list() == ["Date"]
+    assert t.describe_class(1) == "integer"
+    assert t.describe_class(1.0) == "numeric"
+    assert t.describe_class(True) == "logical"
+    assert t.describe_class("a") == "character"
+    assert t.describe_class(date(2020, 1, 2)) == "Date"
+    assert t.describe_class(datetime(2020, 1, 2, 3, 4)) == "POSIXct, POSIXt"
+    assert t.describe_class(None) == "logical"
+    with pytest.raises(TypeError, match="not a frame"):
+        t.describe_class(fac)
+
+
+def test_describe_class_polars_enum_without_recorded_levels():
+    series = pl.Series("f", ["y"], dtype=pl.Enum(["y", "x"]))
+    assert t.describe_class(series) == 'ordered, factor(levels=c("y", "x"))'
+    assert t.describe_class(series, strict_description=False) == "factor"
+
+
+def test_compare_df_cols_does_not_collect(monkeypatch):
+    def no_collect(*args, **kwargs):
+        raise AssertionError("compare_df_cols must not collect")
+
+    monkeypatch.setattr(pl.LazyFrame, "collect", no_collect)
+    old = t.tidy({"Z": [1.0], "A": [1]})
+    new = t.tidy({"A": [1.0]})
+    out = t.compare_df_cols(old=old, new=new)
+    assert out.columns == ["column_name", "old", "new"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_row_to_names_and_find_header(backend):
+    headers = t.tidy(
+        pd.DataFrame(
+            {
+                "a": pd.Series(["id", "1"], dtype="string"),
+                "b": pd.Series([None, "x"], dtype="string"),
+            }
+        ),
+        backend=backend,
+    )
+    named = headers >> t.row_to_names(1)
+    assert named.columns == ["id", "NA"]
+    assert named.collect()["id"].to_list() == ["1"]
+    assert named.collect()["NA"].to_list() == ["x"]
+    numbers = t.tidy(
+        pd.DataFrame({"n": pd.Series([1.0, 9.0], dtype="float64")}), backend=backend
+    )
+    assert (numbers >> t.row_to_names(1)).columns == ["1"]
+    flags = t.tidy(pd.DataFrame({"flag": [True, False]}), backend=backend)
+    assert (flags >> t.row_to_names(1)).columns == ["TRUE"]
+    assert (flags >> t.row_to_names(1)).collect()["TRUE"].to_list() == [False]
+    duplicated = t.tidy({"a": ["id", "v"], "b": ["id", "w"]}, backend=backend)
+    with pytest.warns(UserWarning, match="unique"):
+        repaired = duplicated.row_to_names(1)
+    assert repaired.columns == ["id", "id_2"]
+    sheet = t.tidy(
+        {"a": [None, "h1", "1"], "b": ["a", "h2", "2"]}, backend=backend
+    )
+    assert sheet.find_header() == 2
+    assert t.find_header(sheet, value="h2", column="b") == 2
+    assert t.find_header(sheet, value="h2", column=2) == 2
+    found = sheet >> t.row_to_names("find_header")
+    assert found.columns == ["h1", "h2"]
+    assert found.collect()["h1"].to_list() == ["1"]
+    kept = t.tidy({"a": ["skip", "id", "v"]}, backend=backend) >> t.row_to_names(
+        2, remove_rows_above=False
+    )
+    assert kept.collect()["id"].to_list() == ["skip", "v"]
+    with pytest.raises(ValueError, match="outside"):
+        numbers >> t.row_to_names(3)
+    with pytest.raises(TypeError, match="find_header"):
+        t.row_to_names(1, value="id")
+    with pytest.raises(ValueError, match="No complete rows"):
+        t.find_header(t.tidy({"a": [None, None]}, backend=backend))
+    with pytest.warns(UserWarning, match="found 2 times"):
+        assert t.find_header(t.tidy({"a": ["q", "q", "z"]}, backend=backend), value="q") == 1
+
+
+def test_excel_numeric_to_date_serials_and_mutate():
+    assert t.excel_numeric_to_date(1) == date(1900, 1, 1)
+    assert t.excel_numeric_to_date(59) == date(1900, 2, 28)
+    assert t.excel_numeric_to_date(60) is None
+    assert t.excel_numeric_to_date(61) == date(1900, 3, 1)
+    assert t.excel_numeric_to_date(42370) == date(2016, 1, 1)
+    assert t.excel_numeric_to_date(40000) == date(2009, 7, 6)
+    assert t.excel_numeric_to_date(40000.5) == date(2009, 7, 6)
+    assert t.excel_numeric_to_date(0) == date(1899, 12, 31)
+    assert t.excel_numeric_to_date(0, date_system="mac pre-2011") == date(1904, 1, 2)
+    assert t.excel_numeric_to_date(1, date_system="mac pre-2011") == date(1904, 1, 3)
+    assert t.excel_numeric_to_date(60, date_system="mac pre-2011") is None
+    assert t.excel_numeric_to_date(40908, date_system="mac pre-2011") == date(2016, 1, 1)
+    assert _clock(t.excel_numeric_to_date(40000.5, include_time=True)) == datetime(
+        2009, 7, 6, 12, 0
+    )
+    assert _clock(t.excel_numeric_to_date(40000.521, include_time=True)) == datetime(
+        2009, 7, 6, 12, 30, 14
+    )
+    assert _clock(
+        t.excel_numeric_to_date(40000.521, include_time=True, round_seconds=False)
+    ) == datetime(2009, 7, 6, 12, 30, 14, 400000)
+    assert t.excel_numeric_to_date(60.5, include_time=True) is None
+    assert _clock(t.excel_numeric_to_date(1.999999999, include_time=True)) == datetime(
+        1900, 1, 2
+    )
+    zoned = t.excel_numeric_to_date(40000.5, include_time=True)
+    assert zoned.tzinfo == UTC
+    with pytest.raises(TypeError, match="numeric"):
+        t.excel_numeric_to_date(True)
+    with pytest.raises(TypeError, match="numeric"):
+        t.excel_numeric_to_date([1, "2"])
+    assert isinstance(t.excel_numeric_to_date("serial"), Expr)
+    with pytest.raises(ValueError, match="date_system"):
+        t.excel_numeric_to_date(1, date_system="windows")
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_excel_numeric_to_date_in_mutate(backend):
+    frame = t.tidy(
+        {"g": ["a", "a"], "serial": [42370.0, 60.0]}, backend=backend
+    ) >> t.group_by("g")
+    out = frame >> t.mutate(d=t.excel_numeric_to_date("serial"))
+    assert out._groups == ["g"]
+    assert out.collect()["d"].to_list() == [date(2016, 1, 1), None]
+    timed = (
+        t.tidy({"serial": [40000.5]}, backend=backend)
+        >> t.mutate(d=t.excel_numeric_to_date("serial", include_time=True))
+    ).collect()
+    assert _clock(timed["d"].to_list()[0]) == datetime(2009, 7, 6, 12, 0)
+    mac = (
+        t.tidy({"serial": [1.0]}, backend=backend)
+        >> t.mutate(
+            d=t.excel_numeric_to_date("serial", date_system="mac pre-2011")
+        )
+    ).collect()
+    assert mac["d"].to_list() == [date(1904, 1, 3)]
+
+    def convert():
+        return (
+            t.tidy({"label": ["1"]}, backend=backend)
+            >> t.mutate(d=t.excel_numeric_to_date("label"))
+        ).collect()
+
+    with pytest.raises(TypeError, match="numeric"):
+        convert()
+
+
+def test_excel_numeric_to_date_notebook_bare_name():
+    namespace = {name: getattr(t, name) for name in t.__all__}
+    namespace["frame"] = t.tidy({"min": [42370.0], "label": ["x"]})
+    exec(
+        "out = " + t.transform_source(
+            "frame >> mutate(d=excel_numeric_to_date(min))"
+        ).strip(),
+        namespace,
+    )
+    assert namespace["out"].collect()["d"].to_list() == [date(2016, 1, 1)]
+    exec(
+        "cleaned = " + t.transform_source("frame >> remove_empty('rows')").strip(),
+        namespace,
+    )
+    assert namespace["cleaned"].columns == ["min", "label"]

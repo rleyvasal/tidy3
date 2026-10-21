@@ -1209,15 +1209,16 @@ def _conversions(backend: str):
         "as_logical_num": _column(
             backend, [0.0, 2.0, -1.0, float("nan"), None], t3.as_logical("x")
         ),
-        "as_character": _column(
-            backend, [1.0, 1.5, 123456.0, 0.25, -3.0, 100001.0], t3.as_character("x")
-        ),
+        "as_character_int": _column(backend, [1, 123456, -3, 100001], t3.as_character("x")),
+        "as_character": _column(backend, [1.5, 0.25, -3.75, 22.8], t3.as_character("x")),
         "as_logical_exact": _column(
             backend,
             [" TRUE", "TRUE ", "yes", "True", "T", "false", "F"],
             t3.as_logical("x", strict=False),
         ),
-        "as_character_logical": _column(backend, [True, False, None], t3.as_character("x")),
+        "as_character_logical": _column(
+            backend, [True, False, None], t3.as_character("x", true="TRUE", false="FALSE")
+        ),
         "as_date": _column(
             backend,
             ["2010-01-31", None],
@@ -1358,6 +1359,353 @@ def _readr_files(backend: str):
         "problem_rows": found["row"],
         "problem_values": found["original"],
     }
+
+
+def _reshape_metadata(backend: str):
+    source = pd.DataFrame({
+        "g": pd.Categorical(["b", "a", "b"], categories=["a", "b", "unused"], ordered=True),
+        "code": ["x-y", "p-q", "r-s"], "x": [2, 4, 8],
+        "record": [{"nested_value": 10}, {"nested_value": 20}, {"nested_value": 30}],
+    })
+    frame = tidy(source, backend=backend) >> group_by("g", drop=False)
+    operations = {
+        "pack": tidy3.pack("packed", "x"), "unpack": tidy3.unpack("record"),
+        "hoist": tidy3.hoist("record", nested_value="nested_value"),
+        "wider_delim": tidy3.separate_wider_delim("code", names=["left", "right"], delim="-"),
+        "wider_regex": tidy3.separate_wider_regex("code", [("left", "[a-z]"), "-", ("right", "[a-z]")]),
+        "wider_position": tidy3.separate_wider_position("code", [("left", 1), 1, ("right", 1)]),
+        "longer_delim": tidy3.separate_longer_delim("code", "-"),
+        "longer_position": tidy3.separate_longer_position("code", 2),
+    }
+    result = {}
+    for name, operation in operations.items():
+        for empty in (False, True):
+            out = (frame >> head(0) if empty else frame) >> operation
+            result[f"{name}_{'empty' if empty else 'rows'}"] = {
+                "groups": out._groups[0], "drop": out._group_drop,
+                "levels": pl.Series(out._category_levels["g"]),
+                "summary": (out >> summarise(rows=n(), groups="drop")
+                            >> mutate(g=tidy3.as_character("g"))),
+            }
+    return result
+
+
+def _quiet_same(*frames, **kwargs):
+    """``compare_df_cols_same`` of one frame warns and returns False."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        return tidy3.compare_df_cols_same(*frames, verbose=False, **kwargs)
+
+
+def _excel_text(backend: str, values, **kwargs):
+    from datetime import datetime
+
+    converted = tidy3.excel_numeric_to_date(list(values), **kwargs)
+    text = []
+    for value in converted:
+        if value is None:
+            text.append(None)
+        elif isinstance(value, datetime):
+            text.append(value.strftime("%Y-%m-%dT%H:%M:%S.%f"))
+        else:
+            text.append(value.isoformat())
+    return tidy(
+        pd.DataFrame({"value": pd.Series(text, dtype="string")}), backend=backend
+    )
+
+
+def _janitor_cleaning(backend: str):
+    cleaning = tidy(
+        pd.DataFrame(
+            {
+                "a": pd.Series([1.0, None, 2.0, None], dtype="float64"),
+                "b": pd.Series([None, None, None, None], dtype="float64"),
+                "c": pd.Series(["x", None, "", "y"], dtype="string"),
+                "d": pd.Series([None, None, 1.0, None], dtype="float64"),
+            }
+        ),
+        backend=backend,
+    )
+    constant = tidy(
+        pd.DataFrame(
+            {
+                "mix": pd.Series([1.0, 1.0, None], dtype="float64"),
+                "vary": pd.Series([1.0, 2.0, 1.0], dtype="float64"),
+                "const": pd.Series([5.0, 5.0, 5.0], dtype="float64"),
+                "allna": pd.Series([None, None, None], dtype="float64"),
+            }
+        ),
+        backend=backend,
+    )
+    zero = tidy(
+        pd.DataFrame(
+            {
+                "a": pd.Series([], dtype="float64"),
+                "b": pd.Series([], dtype="string"),
+            }
+        ),
+        backend=backend,
+    )
+    old = tidy(
+        pd.DataFrame(
+            {
+                "Z": pd.Series([1.5], dtype="float64"),
+                "A": pd.Series([2.5], dtype="float64"),
+                "B": pd.Series([1], dtype="int64"),
+            }
+        ),
+        backend=backend,
+    )
+    new = tidy(
+        pd.DataFrame(
+            {
+                "M": pd.Series([3.5], dtype="float64"),
+                "A": pd.Series([4.5], dtype="float64"),
+                "B": pd.Series([5.0], dtype="float64"),
+                "C": pd.Series(["x"], dtype="string"),
+            }
+        ),
+        backend=backend,
+    )
+    one = tidy(
+        pd.DataFrame(
+            {
+                "Z": pd.Series([1.5], dtype="float64"),
+                "A": pd.Series([1], dtype="int64"),
+            }
+        ),
+        backend=backend,
+    )
+    fac = tidy(
+        pd.DataFrame(
+            {"f": pd.Categorical(["y", "x"], categories=["y", "x"], ordered=True)}
+        ),
+        backend=backend,
+    )
+    headers = tidy(
+        pd.DataFrame(
+            {
+                "a": pd.Series(["id", "1"], dtype="string"),
+                "b": pd.Series(["code", "x"], dtype="string"),
+            }
+        ),
+        backend=backend,
+    )
+    numbers = tidy(
+        pd.DataFrame({"a": pd.Series([1.0, 9.0], dtype="float64")}), backend=backend
+    )
+    flags = tidy(pd.DataFrame({"a": [True, False]}), backend=backend)
+    sheet = tidy(
+        pd.DataFrame(
+            {
+                "a": pd.Series([None, "h1", "1"], dtype="string"),
+                "b": pd.Series(["a", "h2", "2"], dtype="string"),
+            }
+        ),
+        backend=backend,
+    )
+    seek = tidy(
+        pd.DataFrame(
+            {
+                "a": pd.Series(["skip", "header", "data"], dtype="string"),
+                "b": pd.Series(["no", "yes", "row"], dtype="string"),
+            }
+        ),
+        backend=backend,
+    )
+    return {
+        "empty": cleaning >> tidy3.remove_empty(["rows", "cols"]),
+        "rows_cutoff": cleaning >> tidy3.remove_empty("rows", cutoff=0.5),
+        "cols_cutoff": cleaning >> tidy3.remove_empty("cols", cutoff=0.5),
+        "constant": constant >> tidy3.remove_constant(),
+        "constant_na": constant >> tidy3.remove_constant(na_rm=True),
+        "zero_cols": zero >> tidy3.remove_empty("cols"),
+        "zero_constant": zero >> tidy3.remove_constant(),
+        "classes": tidy3.compare_df_cols(old=old, new=new),
+        "matched": tidy3.compare_df_cols(old=old, new=new, return_="match"),
+        "mismatched": tidy3.compare_df_cols(old=old, new=new, return_="mismatch"),
+        "bound": tidy3.compare_df_cols(
+            old=old, new=new, return_="mismatch", bind_method="rbind"
+        ),
+        "one_classes": tidy3.compare_df_cols(one=one),
+        "strict": tidy3.compare_df_cols(fac=fac, strict_description=True),
+        "loose": tidy3.compare_df_cols(fac=fac, strict_description=False),
+        "same_bind": tidy3.compare_df_cols_same(
+            tidy({"A": [1.0]}, backend=backend),
+            tidy({"B": [2.0]}, backend=backend),
+            verbose=False,
+        ),
+        "same_rbind": tidy3.compare_df_cols_same(
+            tidy({"A": [1.0]}, backend=backend),
+            tidy({"B": [2.0]}, backend=backend),
+            bind_method="rbind",
+            verbose=False,
+        ),
+        "same_one": _quiet_same(one=one),
+        "headers": headers >> tidy3.row_to_names(1),
+        "numbers": numbers >> tidy3.row_to_names(1),
+        "flags": flags >> tidy3.row_to_names(1),
+        "found": sheet >> tidy3.row_to_names("find_header"),
+        "complete": tidy3.find_header(seek),
+        "header_value": tidy3.find_header(seek, value="header"),
+        "by_name": tidy3.find_header(seek, value="yes", column="b"),
+        "by_pos": tidy3.find_header(seek, value="yes", column=2),
+        "excel_modern": _excel_text(
+            backend, [-1, 0, 1, 59, 60, 61, 42370, 40000, 40000.5]
+        ),
+        "excel_mac": _excel_text(
+            backend, [0, 1, 60, 40908], date_system="mac pre-2011"
+        ),
+        "excel_time": _excel_text(
+            backend,
+            [40000.5, 40000.521, 60.5, 1.999999999],
+            include_time=True,
+        ),
+        "excel_noround": _excel_text(
+            backend, [40000.521], include_time=True, round_seconds=False
+        ),
+    }
+
+
+def _janitor_dupes(backend: str):
+    x = tidy({"g": ["x", "x", "y", "z", "y", "x", "a", "b"],
+              "key_id": ["b", "a", "b", "c", "a", "a", None, None],
+              "key_sub": [1, 2, 1, 3, 2, 9, 4, 4], "row": list(range(1, 9))}, backend=backend)
+    full = tidy({"a": ["b", "a", "b", "a", "x"], "b": [1, 2, 1, 2, 3]}, backend=backend)
+    grouped = x >> group_by("g") >> tidy3.get_dupes("key_id")
+    factors = tidy(pd.DataFrame({"key": pd.Categorical(["a", "b", "a", "b", None, None], categories=["b", "a", "unused"]), "row": range(6)}), backend=backend)
+    return {
+        "single": x >> tidy3.get_dupes("key_id"),
+        "composite": x >> tidy3.get_dupes("key_id", "key_sub"),
+        "selector": x >> tidy3.get_dupes(tidy3.starts_with("key")),
+        "all": full >> tidy3.get_dupes(),
+        "empty": x >> head(0) >> tidy3.get_dupes("key_id"),
+        "none": x >> tidy3.get_dupes("row"),
+        "empty_selection": x >> tidy3.get_dupes(tidy3.any_of([])),
+        "grouped": grouped, "group_names": grouped._groups[0],
+        "factors": factors >> tidy3.get_dupes("key"),
+    }
+
+
+def _timezone_payload(frame):
+    out = frame.collect()["at"]
+    return {
+        "epochs": pl.Series([v.timestamp() if v is not None else None for v in out], dtype=pl.Float64),
+        "clocks": out.dt.strftime("%Y-%m-%d %H:%M:%S %z"),
+    }
+
+
+def _timezone_conversion(backend: str):
+    from datetime import date
+
+    frame = tidy({"text": ["2024-01-02 12:34:56.125", "2024-07-02 12:34:56.5", "2024-11-03 05:30:00", "2024-11-03 06:30:00", None]}, backend=backend) >> mutate(x=tidy3.ymd_hms("text"))
+    zones = ["UTC", "America/New_York", "Europe/Dublin", "Australia/Sydney", "Asia/Kathmandu"]
+    result = {}
+    for source in zones:
+        local = frame >> mutate(x=tidy3.with_tz("x", source))
+        for target in zones:
+            for name in ["with_tz", "force_tz"]:
+                result[f"{source}_{target}_{name}"] = _timezone_payload(local >> mutate(at=getattr(tidy3, name)("x", target)))
+    dates = tidy({"x": [date(2024, 1, 2), date(2024, 3, 10), date(2024, 11, 3), None]}, backend=backend)
+    for target in zones:
+        for name in ["with_tz", "force_tz"]:
+            result[f"dates_{target}_{name}"] = _timezone_payload(dates >> mutate(at=getattr(tidy3, name)("x", target)))
+    return result
+
+
+def _timezone_dst(backend: str):
+    inputs = {
+        "America/New_York": ["2024-03-10 01:59:59.125", "2024-03-10 02:30:00.125", "2024-03-10 03:00:00", "2024-11-03 01:30:00.125", "2024-11-03 02:00:00", None],
+        "Europe/Dublin": ["2024-03-31 01:30:00.125", "2024-10-27 01:30:00.125", "2024-01-01 12:34:56", None],
+        "Australia/Lord_Howe": ["2024-04-07 01:45:00.125", "2024-10-06 02:15:00.125", "2024-01-01 12:34:56", None],
+        "Pacific/Apia": ["2011-12-29 12:30:00.125", "2011-12-30 12:30:00.125", "2011-12-31 12:30:00.125", None],
+    }
+    policies = {"NA_both": "NA", "pre": "pre", "post": "post", "boundary": "boundary", "default": ("NA", "post"), "mixed": ("boundary", "pre")}
+    result = {}
+    for target, values in inputs.items():
+        frame = tidy({"text": values}, backend=backend) >> mutate(x=tidy3.ymd_hms("text"))
+        for key, policy in policies.items():
+            source = frame >> mutate(x=tidy3.floor_date("x", "second")) if key == "mixed" else frame
+            result[f"{target}_{key}"] = _timezone_payload(source >> mutate(at=tidy3.force_tz("x", target, roll_dst=policy)))
+    return result
+
+
+def _timezone_resolved_repeats(backend: str):
+    frame = tidy({"text": ["2024-11-03 04:30:00.125", "2024-11-03 05:30:00.125", "2024-11-03 06:30:00.125", "2024-10-27 00:30:00.125", "2024-10-27 01:30:00.125", None]}, backend=backend) >> mutate(x=tidy3.ymd_hms("text"))
+    result = {}
+    for source in ["UTC", "America/Toronto", "America/Halifax", "Europe/Dublin"]:
+        local = frame >> mutate(x=tidy3.with_tz("x", source))
+        for target in ["UTC", "America/New_York", "America/Toronto", "Europe/Dublin"]:
+            for policy in ["NA", "pre", "post", "boundary"]:
+                values = (frame >> mutate(x=tidy3.floor_date("x", "second"))
+                          >> mutate(x=tidy3.with_tz("x", source))) if policy == "boundary" else local
+                result[f"{source}_{target}_{policy}"] = _timezone_payload(values >> mutate(at=tidy3.force_tz("x", target, roll_dst=policy)))
+    return result
+
+
+def _formatted_offsets(backend: str):
+    values = ["2024-01-01 12:00:00+0200", "2024-01-01 12:00:00-0500",
+              "2024-01-01 12:00:00+02:00", "2024-01-01 12:00:00Z",
+              "2024-06-01 00:30:00-0530", "bad", None]
+    out = (tidy({"x": values}, backend=backend)
+           >> mutate(at=tidy3.parse_datetime("x", "%Y-%m-%d %H:%M:%S%z")))
+    return {"clocks": out.collect()["at"].dt.strftime("%Y-%m-%d %H:%M:%S")}
+
+
+def _calendar_rounding(backend: str):
+    values = ["2024-03-11 12:00:00", "2024-03-10 01:30:00", "2024-11-03 01:30:00.125",
+              "2024-11-03T01:30:00.125-04:00", "2024-11-03T01:00:00-04:00", None]
+    frame = tidy({"x": values}, backend=backend) >> mutate(x=tidy3.ymd_hms("x", tz="America/New_York"))
+    result = {}
+    for unit in ("second", "minute", "day", "week", "month", "quarter", "year"):
+        for name in ("floor_date", "ceiling_date"):
+            result[f"{unit}_{name}"] = _timezone_payload(frame >> mutate(at=getattr(tidy3, name)("x", unit)))
+    result["week_monday"] = _timezone_payload(frame >> mutate(at=tidy3.floor_date("x", "week", week_start=1)))
+    return result
+
+
+def _datetime_epochs(backend: str, values: list, parser: Callable, **kwargs):
+    out = (tidy({"x": values}, backend=backend) >> mutate(at=parser("x", **kwargs))).collect()["at"]
+    return pl.Series([value.timestamp() if value is not None else None for value in out], dtype=pl.Float64)
+
+
+def _datetime_parsers(backend: str):
+    result = {}
+    for name, calendar, named, compact in [
+        ("ymd_hms", "2024-02-29", "2024 February 29", "20240229"),
+        ("ymd_hm", "2024-02-29", "2024 February 29", "20240229"),
+        ("mdy_hms", "02/29/2024", "February 29th 2024", "02292024"),
+        ("dmy_hms", "29/02/2024", "29th February 2024", "29022024"),
+    ]:
+        parser = getattr(tidy3, name)
+        clock, digits = ("12:34", "1234") if name == "ymd_hm" else ("12:34:56", "123456")
+        values = [f"{calendar} {clock}", f"{named} {clock}", compact + digits,
+                  f"{calendar}T{clock}Z", f"{calendar} {clock}+05:30",
+                  f"{calendar} {clock} PM", f"{calendar} {clock} AM", "bad", None]
+        if name != "ymd_hm":
+            values.append(f"{calendar} {clock}.125")
+        for zone in ("UTC", "America/New_York", "Asia/Kolkata"):
+            result[f"{name}_{zone}"] = _datetime_epochs(backend, values, parser, tz=zone)
+        result[f"{name}_numeric"] = _datetime_epochs(backend, [int(compact + digits)], parser)[0]
+    return result
+
+
+def _datetime_truncation(backend: str):
+    result = {}
+    for name, calendar in [("ymd_hms", "1999-01-02"), ("ymd_hm", "1999-01-02"), ("mdy_hms", "01/02/1999"), ("dmy_hms", "02/01/1999")]:
+        values = [f"{calendar} 12:34:56", f"{calendar} 12:34", f"{calendar} 12", calendar, "bad", None]
+        for truncated in range(3 if name == "ymd_hm" else 4):
+            result[f"{name}_{truncated}"] = _datetime_epochs(backend, values, getattr(tidy3, name), truncated=truncated)
+    return result
+
+
+def _datetime_dst(backend: str):
+    values = ["2024-03-10 01:59:59.5", "2024-03-10 02:30:00", "2024-03-10 03:30:00", "2024-11-03 01:30:00",
+              "2024-11-03T01:30:00-04:00", "2024-11-03T01:30:00-05", "2024-01-01T12:00:00Z",
+              "2024-02-29 24:00:00", "2024-02-29 23:59:60", "2023-02-29 12:00:00", None]
+    return _datetime_epochs(backend, values, tidy3.ymd_hms, tz="America/New_York")
 
 
 def _date_components(backend: str):
@@ -1610,6 +1958,69 @@ def _readr_rows(backend: str):
     return result
 
 
+def _factor_sort(backend: str):
+    ordered = tidy(pd.DataFrame({
+        "f": pd.Categorical(
+            ["a", "b", "a", None, "b"],
+            categories=["b", "a", "unused"],
+            ordered=True,
+        ),
+        "row": [1, 2, 3, 4, 5],
+    }), backend=backend)
+    unordered = tidy(pd.DataFrame({
+        "f": pd.Categorical(
+            ["a", "b", "a", None, "b"],
+            categories=["b", "a", "unused"],
+        ),
+        "row": [1, 2, 3, 4, 5],
+    }), backend=backend)
+    empty = tidy(pd.DataFrame({
+        "f": pd.Categorical([], categories=["b", "a", "unused"], ordered=True),
+        "row": pd.Series([], dtype="int64"),
+    }), backend=backend)
+    missing = tidy(pd.DataFrame({
+        "f": pd.Categorical([None, None], categories=["b", "a"]),
+        "row": [1, 2],
+    }), backend=backend)
+
+    def payload(frame):
+        collected = frame.collect(as_="pandas")
+        factor = collected["f"]
+        return {
+            "values": pl.Series(
+                [None if pd.isna(value) else value for value in factor], dtype=pl.String
+            ),
+            "rows": pl.Series(collected["row"].tolist(), dtype=pl.Int64),
+            "levels": pl.Series(list(factor.cat.categories), dtype=pl.String),
+            "ordered": bool(factor.cat.ordered),
+        }
+
+    return {
+        "ascending": payload(ordered >> arrange("f")),
+        "descending": payload(ordered >> arrange(tidy3.desc("f"))),
+        "grouped": payload(
+            ordered >> group_by("f") >> arrange("row", by_group=True) >> ungroup()
+        ),
+        "unordered": payload(unordered >> arrange("f")),
+        "empty": payload(empty),
+        "missing": payload(missing >> arrange("f")),
+    }
+
+
+def _string_equal(backend: str):
+    frame = tidy(
+        {
+            "x": ["\u00e9", "\u00c9", "e", None, "a", "\u212b"],
+            "y": ["e\u0301", "e\u0301", "e", None, "b", "\u00c5"],
+        },
+        backend=backend,
+    )
+    return frame >> mutate(
+        equal=tidy3.str_equal("x", col("y")),
+        ignore=tidy3.str_equal("x", col("y"), ignore_case=True),
+    )
+
+
 def _lubridate_grid(backend: str):
     import tidy3 as t3
     from datetime import date
@@ -1631,7 +2042,91 @@ def _lubridate_grid(backend: str):
     }
 
 
+def _factor_combine(backend: str):
+    import tidy3 as t3
+
+    def describe(frame: Any, name: str = "species") -> dict[str, Any]:
+        column = frame.collect(as_="pandas")[name]
+        factor = isinstance(column.dtype, pd.CategoricalDtype)
+        return {
+            "type": "factor" if factor else "character",
+            "values": pl.Series(
+                [None if pd.isna(value) else str(value) for value in column.tolist()], dtype=pl.String
+            ),
+            "levels": pl.Series(
+                [str(level) for level in column.cat.categories] if factor else [], dtype=pl.String
+            ),
+        }
+
+    def frame(data: dict[str, Any]) -> Any:
+        return tidy(data, backend=backend)
+
+    p = frame({"species": ["Adelie", "Gentoo", "Adelie", "Chinstrap", None],
+               "mass": [3750.0, 5000.0, 3800.0, 3700.0, 4000.0]}) >> mutate(species=t3.fct_infreq("species"))
+    text_lookup = frame({"species": ["Adelie", "Gentoo", "Emperor"], "w": [1.0, 2.0, 3.0]})
+    other_levels = frame({"species": ["Gentoo", "Emperor"], "w": [2.0, 3.0]}) >> mutate(
+        species=t3.fct_relevel("species", "Gentoo", "Emperor")
+    )
+    # Unused levels: relevel with every value, then filter one value out.
+    same_levels = frame({"species": ["Gentoo", "Adelie", "Chinstrap"], "w": [2.0, 1.0, None]}) >> mutate(
+        species=t3.fct_relevel("species", "Adelie", "Chinstrap", "Gentoo")
+    ) >> t3.filter(~t3.is_na("w"))
+    emperor = frame({"species": ["Emperor"], "mass": [1.0]}) >> mutate(species=t3.fct_rev("species"))
+    years = frame({"species": ["Adelie", "Gentoo", "Chinstrap", None], "year": [2007.0, 2008.0, 2008.0, 2008.0],
+                   "n": [1.0, 2.0, None, 3.0]}) >> mutate(
+        species=t3.fct_relevel("species", "Gentoo", "Chinstrap", "Adelie")
+    ) >> t3.filter(~t3.is_na("n"))
+    completed = years >> t3.complete("species", "year")
+    return {
+        "left_text": describe(p >> t3.left_join(text_lookup, by="species")),
+        "left_text_w": (p >> t3.left_join(text_lookup, by="species")).collect()["w"],
+        "inner_text": describe(p >> t3.inner_join(text_lookup, by="species")),
+        "full_text": describe(p >> t3.full_join(text_lookup, by="species")),
+        "right_text": describe(text_lookup >> t3.right_join(p, by="species")),
+        "semi_text": describe(p >> t3.semi_join(text_lookup, by="species")),
+        "anti_text": describe(p >> t3.anti_join(text_lookup, by="species")),
+        "left_other": describe(p >> t3.left_join(other_levels, by="species")),
+        "full_other": describe(p >> t3.full_join(other_levels, by="species")),
+        "left_same": describe(p >> t3.left_join(same_levels, by="species")),
+        "bind_factors": describe(p >> t3.bind_rows(emperor)),
+        "bind_factors_reversed": describe(emperor >> t3.bind_rows(p)),
+        "bind_text": describe(p >> t3.bind_rows(frame({"species": ["Emperor"], "mass": [1.0]}))),
+        "bind_missing_column": describe(p >> t3.bind_rows(frame({"mass": [1.0]}))),
+        "complete_species_year": describe(completed),
+        "complete_species_year_n": completed.collect()["n"],
+        "complete_species": describe(years >> t3.complete("species")),
+        "complete_nesting": describe(years >> t3.complete(t3.nesting("species"), "year")),
+        "expand_species": describe(years >> t3.expand("species")),
+        "complete_grouped": describe(years >> t3.group_by("year") >> t3.complete("species") >> t3.ungroup()),
+    }
+
+
+def _right_join_order(backend: str):
+    import tidy3 as t3
+
+    x = tidy({"island": ["Torgersen", "Biscoe", "Dream", "Biscoe"], "from_x": ["x1", "x2", "x3", "x4"]}, backend=backend)
+    y = tidy({"island": ["Biscoe", "Anvers", "Torgersen", "Biscoe", None], "from_y": ["y1", "y2", "y3", "y4", "y5"]}, backend=backend)
+    return {
+        "plain": x >> t3.right_join(y, by="island"),
+        "keep": x >> t3.right_join(y, by="island", keep=True),
+        "first": x >> t3.right_join(y, by="island", multiple="first"),
+        "by_spec": x >> t3.right_join(y, by=t3.join_by("island")),
+        "swapped": y >> t3.right_join(x, by="island"),
+    }
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
+    "reshape_metadata": _reshape_metadata,
+    "janitor_dupes": _janitor_dupes,
+    "janitor_cleaning": _janitor_cleaning,
+    "timezone_conversion": _timezone_conversion,
+    "timezone_dst": _timezone_dst,
+    "timezone_resolved_repeats": _timezone_resolved_repeats,
+    "formatted_offsets": _formatted_offsets,
+    "calendar_rounding": _calendar_rounding,
+    "datetime_parsers": _datetime_parsers,
+    "datetime_truncation": _datetime_truncation,
+    "datetime_dst": _datetime_dst,
     "date_components": _date_components,
     "weekday_labels": _weekday_labels,
     "fiscal_quarters": _fiscal_quarters,
@@ -1705,16 +2200,24 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "readr_more": _readr_more,
     "readr_files": _readr_files,
     "round_grid": _round_grid,
+    "factor_combine": _factor_combine,
+    "right_join_order": _right_join_order,
     "round_extremes": _round_extremes,
     "string_summaries": _string_summaries,
     "inferred_csv_failures": _inferred_csv_failures,
     "readr_grid": _readr_grid,
     "readr_rows": _readr_rows,
     "lubridate_grid": _lubridate_grid,
+    "factor_sort": _factor_sort,
+    "string_equal": _string_equal,
 }
 
 
 CASE_VERBS = {
+    "reshape_metadata": {
+        "pack", "unpack", "hoist", "separate_wider_delim", "separate_wider_regex",
+        "separate_wider_position", "separate_longer_delim", "separate_longer_position",
+    },
     "filter_missing": {"filter"},
     "filter_out_missing": {"filter_out"},
     "mutate_sequential": {"mutate"},
@@ -1798,11 +2301,9 @@ def test_every_public_frame_verb_has_a_parity_classification():
         "group_by",
         "group_map",
         "with_groups",
-        "pack",
-        "unpack",
     }
     # Column-name helpers from janitor and rlang, not dplyr or tidyr.
-    not_dplyr = {"clean_names", "make_clean_names", "set_names"}
+    not_dplyr = {"clean_names", "make_clean_names", "set_names", "get_dupes"}
     assert public == differential | expected_gap_verbs | INVARIANT_ONLY | not_dplyr
 
 

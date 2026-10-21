@@ -54,6 +54,71 @@ def _dplyr_sort_expressions(
     return expressions
 
 
+def _factor_rank(name: str, levels: Any) -> pl.Expr:
+    """Sort key for a recorded factor: level index, unknowns and missings last."""
+    return pl.col(name).replace_strict(
+        {value: index for index, value in enumerate(levels)},
+        default=None,
+        return_dtype=pl.Int64,
+    )
+
+
+def _arrange_polars_key(levels: dict[str, Any], key: Any) -> tuple[Any, bool]:
+    """A Polars sort expression and whether it is descending.
+
+    Column names and ``desc(column)`` that name a recorded factor sort by
+    level order. Expressions that are already Polars expressions, including
+    the ranks ``get_dupes`` used to build itself, pass through.
+    """
+    node = key.node if isinstance(key, Expr) else None
+    if isinstance(node, tuple) and node and node[0] == "desc":
+        inner = node[1]
+        if isinstance(inner, tuple) and inner and inner[0] == "col" and inner[1] in levels:
+            return _factor_rank(inner[1], levels[inner[1]]), True
+        return to_polars(Expr(inner)), True
+    if isinstance(key, str) and key in levels:
+        return _factor_rank(key, levels[key]), False
+    if isinstance(node, tuple) and node and node[0] == "col" and node[1] in levels:
+        return _factor_rank(node[1], levels[node[1]]), False
+    return _plx(key), False
+
+
+def _factor_levels(levels: Any, *, ordered: bool | None = None) -> Any:
+    from tidy3.frame import FactorLevels, _as_levels
+
+    if isinstance(levels, FactorLevels) and ordered is None:
+        return levels
+    return _as_levels(levels, ordered)
+
+
+def _levels_from_series(series: Any) -> Any:
+    return _factor_levels(
+        series.cat.categories.tolist(), ordered=bool(series.cat.ordered)
+    )
+
+
+def _enum_ordered(
+    name: str,
+    produced: dict[str, bool],
+    assignments: Any,
+    previous: dict[str, Any],
+) -> bool:
+    """Ordered flag for an Enum column after mutate.
+
+    Factor expressions report their own flag. A new Enum from another
+    expression, such as ``wday(label=True)``, is ordered. An Enum that this
+    mutate did not assign keeps the flag already recorded.
+    """
+    if name in produced:
+        return produced[name]
+    if name in assignments:
+        return True
+    recorded = previous.get(name)
+    if recorded is None:
+        return True
+    return bool(getattr(recorded, "ordered", True))
+
+
 def _pe():
     from tidy3 import pandas_engine
 
@@ -976,13 +1041,19 @@ def mutate(
                 pdf = pdf.drop(columns=deletions, errors="ignore")
             problems = merge_pandas_problems(getattr(tf, "_problems", None), found)
             category_levels = (
-                {name: series.cat.categories.tolist() for name, series in pdf.items()
-                 if str(series.dtype) == "category"}
-                if has_factors else dict(tf._category_levels)
+                {
+                    str(name): _levels_from_series(series)
+                    for name, series in pdf.items()
+                    if str(series.dtype) == "category"
+                }
+                if has_factors else {
+                    name: _factor_levels(levels)
+                    for name, levels in tf._category_levels.items()
+                }
             )
             for name in assignments:
                 if name in pdf and str(pdf[name].dtype) == "category":
-                    category_levels[name] = pdf[name].cat.categories.tolist()
+                    category_levels[name] = _levels_from_series(pdf[name])
             result = tf._with_pdf(
                 pdf, groups=None if transient else tf._groups, problems=problems,
                 category_levels=category_levels,
@@ -1005,11 +1076,15 @@ def mutate(
         from tidy3.convert import merge_problem_plans, output_column, problem_plans
 
         plans = []
+        produced_ordered: dict[str, bool] = {}
         if tf._rowwise:
             marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
             lf = tf._lf.with_row_index(marker)
             for stage in stages:
-                lf, stage = prepare_polars(tf, lf, stage, [marker], sort_groups=False)
+                lf, stage, stage_ordered = prepare_polars(
+                    tf, lf, stage, [marker], sort_groups=False
+                )
+                produced_ordered.update(stage_ordered)
                 for name, value in stage.items():
                     if isinstance(value, Expr):
                         plans.extend(problem_plans(lf, value.node, name))
@@ -1022,7 +1097,10 @@ def mutate(
         else:
             lf = tf._lf
             for stage in stages:
-                lf, stage = prepare_polars(tf, lf, stage, groups, sort_groups=not transient)
+                lf, stage, stage_ordered = prepare_polars(
+                    tf, lf, stage, groups, sort_groups=not transient
+                )
+                produced_ordered.update(stage_ordered)
                 cached, stage, cache_columns = (
                     _aggregate_cache_plan(stage, lf.collect_schema().names())
                     if groups
@@ -1051,13 +1129,20 @@ def mutate(
             existing = lf.collect_schema().names()
             lf = lf.drop(*[name for name in deletions if name in existing])
         problems = merge_problem_plans(getattr(tf, "_problems", None), plans)
-        category_levels = dict(tf._category_levels)
+        category_levels = {
+            name: _factor_levels(levels) for name, levels in tf._category_levels.items()
+        }
         if has_factors:
             for name in assignments:
                 category_levels.pop(name, None)
         for name, dtype in lf.collect_schema().items():
             if isinstance(dtype, pl.Enum):
-                category_levels[name] = dtype.categories.to_list()
+                category_levels[name] = _factor_levels(
+                    dtype.categories.to_list(),
+                    ordered=_enum_ordered(
+                        name, produced_ordered, assignments, category_levels
+                    ),
+                )
         result = tf._with_lf(
             lf, groups=None if transient else tf._groups, problems=problems,
             category_levels=category_levels,
@@ -1688,13 +1773,9 @@ def arrange(*keys: Any, by_group: bool = False) -> Verb:
         expressions = []
         descending = []
         for key in effective_keys:
-            node = key.node if isinstance(key, Expr) else None
-            if node is not None and node[0] == "desc":
-                expressions.append(to_polars(Expr(node[1])))
-                descending.append(True)
-            else:
-                expressions.append(_plx(key))
-                descending.append(False)
+            expression, is_descending = _arrange_polars_key(wide._category_levels, key)
+            expressions.append(expression)
+            descending.append(is_descending)
         expressions = _dplyr_sort_expressions(wide._lf, expressions)
         out = wide._with_lf(
             wide._lf.sort(
@@ -1762,6 +1843,42 @@ def distinct(
         )
 
     return Verb(_apply, "distinct")
+
+
+def get_dupes(*cols: Any) -> Verb:
+    """Return every row in a duplicated key group, with ``dupe_count``.
+
+    Keys accept tidyselect; omitting them checks all columns. Keys come
+    first, followed by the count and remaining columns. Rows sort by
+    decreasing count, then keys, keeping input order within ties.
+    Duplicate detection is global, as in janitor, even on grouped input;
+    grouping and other frame metadata are preserved. Polars stays lazy.
+    An existing ``dupe_count`` column must be renamed first.
+    """
+    from tidy3.expr import col, desc
+
+    def _apply(tf):
+        columns = _frame_columns(tf)
+        if "dupe_count" in columns:
+            raise ValueError("get_dupes() would replace 'dupe_count'; rename it first")
+        keys = resolve_selection(tf, cols) if cols else columns
+        # arrange ranks recorded factors by level order, on both backends.
+        sort_keys: list[Any] = list(keys)
+        out = (
+            tf >> ungroup() >> add_count(*keys, name="dupe_count")
+            >> filter(col("dupe_count") > 1)
+            >> select(*keys, "dupe_count", *(name for name in columns if name not in keys))
+            >> arrange(desc("dupe_count"), *sort_keys)
+        )
+        if out._backend == "pandas":
+            return out._with_pdf(
+                out._pdf, groups=tf._groups, rowwise=tf._rowwise, group_drop=tf._group_drop
+            )
+        return out._with_lf(
+            out._lf, groups=tf._groups, rowwise=tf._rowwise, group_drop=tf._group_drop
+        )
+
+    return Verb(_apply, "get_dupes")
 
 
 def _slice_positions(rows: tuple[Any, ...]) -> tuple[int, ...]:
@@ -3174,6 +3291,129 @@ def slice_sample(
     return Verb(_apply, "slice_sample")
 
 
+def _is_factor_dtype(dtype: Any) -> bool:
+    return isinstance(dtype, (pl.Enum, pl.Categorical))
+
+
+def _union_levels(*level_lists: list[Any]) -> list[Any]:
+    """Levels in order of first appearance, as vctrs combines factors."""
+    seen: dict[Any, None] = {}
+    for levels in level_lists:
+        for level in levels:
+            seen.setdefault(level, None)
+    return list(seen)
+
+
+def _align_factor_keys(
+    tf: Any, right: pl.LazyFrame, pairs: list[tuple[str, str]], *, filtering: bool
+) -> tuple[Any, pl.LazyFrame, Any]:
+    """Make factor join keys comparable on Polars, as dplyr does.
+
+    A factor joined to text compares as text, and a mutating join returns
+    the key as text. Two factors with different levels compare on the union
+    of their levels, x's first. A filtering join returns x unchanged, so its
+    keys go back to x's own type afterwards. Returns the aligned left frame,
+    the aligned right frame, and a function that finishes the joined frame.
+    """
+    left_schema = tf._lf.collect_schema()
+    right_schema = right.collect_schema()
+    left_casts: dict[str, Any] = {}
+    right_casts: dict[str, Any] = {}
+    for left_name, right_name in pairs:
+        left_type, right_type = left_schema[left_name], right_schema[right_name]
+        if left_type == right_type or not (
+            _is_factor_dtype(left_type) or _is_factor_dtype(right_type)
+        ):
+            continue
+        if isinstance(left_type, pl.Enum) and isinstance(right_type, pl.Enum):
+            union = pl.Enum(_union_levels(
+                left_type.categories.to_list(), right_type.categories.to_list()
+            ))
+            left_casts[left_name] = right_casts[right_name] = union
+        elif left_type in (pl.Null,) or right_type in (pl.Null,):
+            continue
+        else:
+            left_casts[left_name] = right_casts[right_name] = pl.String
+    if not left_casts and not right_casts:
+        return tf, right, lambda result: result
+    original = {name: left_schema[name] for name in left_casts}
+    levels = dict(tf._category_levels)
+    for name, dtype in left_casts.items():
+        if isinstance(dtype, pl.Enum):
+            previous = levels.get(name)
+            ordered = bool(getattr(previous, "ordered", False))
+            levels[name] = _factor_levels(dtype.categories.to_list(), ordered=ordered)
+        else:
+            levels.pop(name, None)
+    aligned = tf._with_lf(
+        tf._lf.with_columns(pl.col(name).cast(dtype) for name, dtype in left_casts.items()),
+        groups=tf._groups,
+        category_levels=levels,
+    )
+    right = right.with_columns(
+        pl.col(name).cast(dtype) for name, dtype in right_casts.items()
+    )
+    if not filtering:
+        return aligned, right, lambda result: result
+
+    def restore(result: Any) -> Any:
+        return result._with_lf(
+            result._lf.with_columns(
+                pl.col(name).cast(dtype) for name, dtype in original.items()
+            ),
+            groups=result._groups,
+            category_levels=tf._category_levels,
+        )
+
+    return aligned, right, restore
+
+
+def _align_pandas_factor_keys(
+    left: Any, right: Any, pairs: list[tuple[str, str]]
+) -> tuple[Any, Any]:
+    """Two factor keys with different levels compare on the union, x's first.
+
+    A factor joined to text already merges as text on pandas, as in dplyr.
+    """
+    import pandas as pd
+
+    for left_name, right_name in pairs:
+        left_type, right_type = left[left_name].dtype, right[right_name].dtype
+        if (
+            isinstance(left_type, pd.CategoricalDtype)
+            and isinstance(right_type, pd.CategoricalDtype)
+            and list(left_type.categories) != list(right_type.categories)
+        ):
+            dtype = pd.CategoricalDtype(
+                _union_levels(list(left_type.categories), list(right_type.categories))
+            )
+            left = left.assign(**{left_name: left[left_name].astype(dtype)})
+            right = right.assign(**{right_name: right[right_name].astype(dtype)})
+    return left, right
+
+
+def _pandas_factor_levels(pdf: Any) -> dict[str, Any]:
+    import pandas as pd
+
+    return {
+        str(name): _levels_from_series(pdf[name])
+        for name in pdf.columns
+        if isinstance(pdf[name].dtype, pd.CategoricalDtype)
+    }
+
+
+def _restore_pandas_keys(result: Any, source: Any, names: list[str]) -> Any:
+    """A filtering join returns x's rows, so x's keys keep x's own type."""
+    import pandas as pd
+
+    restored = {
+        name: result[name].astype(source[name].dtype)
+        for name in names
+        if isinstance(source[name].dtype, pd.CategoricalDtype)
+    }
+    return result.assign(**restored) if restored else result
+
+
 def _right_frame(right: Any, backend: str) -> Any:
     """Resolve the right side of a join for the given backend."""
     from tidy3.frame import TidyFrame, tidy
@@ -3389,11 +3629,9 @@ def _polars_join_by(
         )
         pieces.append(missing_right)
     combined = pl.concat(pieces, how="diagonal_relaxed")
-    combined = combined.sort(
-        [right_id, left_id] if how == "right" else [left_id, right_id],
-        nulls_last=True,
-        maintain_order=True,
-    )
+    # dplyr's order for every join: x's rows in order, each with its matches
+    # in y's order, then y's unmatched rows (right and full joins) in order.
+    combined = combined.sort([left_id, right_id], nulls_last=True, maintain_order=True)
 
     equality_map = {condition.left: condition.right for condition in equality}
     equality_right = {condition.right for condition in equality}
@@ -3490,8 +3728,10 @@ def _join_by_operation(
         )
     resolved = _right_frame(right, tf._backend)
     if tf._backend == "pandas":
+        pairs = [(condition.left, condition.right) for condition in spec.equality]
+        left, resolved = _align_pandas_factor_keys(tf._pdf, resolved, pairs)
         pdf = _pe().do_join_by(
-            tf._pdf,
+            left,
             resolved,
             spec,
             how,
@@ -3502,9 +3742,20 @@ def _join_by_operation(
             unmatched=unmatched,
             relationship=relationship,
         )
-        return tf._with_pdf(pdf, groups=tf._groups)
-    return _polars_join_by(
+        if how in {"semi", "anti"}:
+            pdf = _restore_pandas_keys(pdf, tf._pdf, [left_name for left_name, _ in pairs])
+            return tf._with_pdf(pdf, groups=tf._groups)
+        return tf._with_pdf(
+            pdf, groups=tf._groups, category_levels=_pandas_factor_levels(pdf)
+        )
+    aligned, resolved, finish = _align_factor_keys(
         tf,
+        resolved,
+        [(condition.left, condition.right) for condition in spec.equality],
+        filtering=how in {"semi", "anti"},
+    )
+    return finish(_polars_join_by(
+        aligned,
         resolved,
         spec,
         how,
@@ -3514,7 +3765,7 @@ def _join_by_operation(
         multiple=multiple,
         unmatched=unmatched,
         relationship=relationship,
-    )
+    ))
 
 
 def _mutating_join(
@@ -3534,23 +3785,27 @@ def _mutating_join(
         if set(kwargs) <= {"suffix"}:
             suffix = _join_suffix(kwargs.get("suffix"))
             if tf._backend == "pandas":
+                key_list = [keys] if isinstance(keys, str) else list(keys)
+                left, r = _align_pandas_factor_keys(
+                    tf._pdf, r, [(key, key) for key in key_list]
+                )
+                pdf = _pe().do_join(left, r, keys, pandas_how or how, suffix=suffix)
                 return tf._with_pdf(
-                    _pe().do_join(tf._pdf, r, keys, pandas_how or how, suffix=suffix),
-                    groups=tf._groups,
+                    pdf, groups=tf._groups, category_levels=_pandas_factor_levels(pdf)
                 )
             params: dict[str, Any] = {
                 "nulls_equal": True,
-                "maintain_order": (
-                    "right_left"
-                    if how == "right"
-                    else "left_right"
-                    if how == "full"
-                    else "left"
-                ),
+                # dplyr's order: x's rows in order with their matches,
+                # then y's unmatched rows (for right and full joins).
+                "maintain_order": "left_right" if how in {"right", "full"} else "left",
             }
             if how == "full":
                 params["coalesce"] = True
             tag = _pe().RIGHT_TAG
+            key_list = [keys] if isinstance(keys, str) else list(keys)
+            tf, r, _finish = _align_factor_keys(
+                tf, r, [(key, key) for key in key_list], filtering=False
+            )
             lf = tf._lf.join(r, on=keys, how=how, suffix=tag, **params)
             left_columns = tf._lf.collect_schema().names()
             right_columns = r.collect_schema().names()
@@ -3772,16 +4027,25 @@ def _filter_join(
         keys = _join_keys(tf._pdf if tf._backend == "pandas" else tf._lf, r, on)
         if na_matches == "na":
             if tf._backend == "pandas":
-                pdf = _pe().do_filter_join(tf._pdf, r, keys, anti=anti)
+                key_list = [keys] if isinstance(keys, str) else list(keys)
+                left, r = _align_pandas_factor_keys(
+                    tf._pdf, r, [(key, key) for key in key_list]
+                )
+                pdf = _pe().do_filter_join(left, r, keys, anti=anti)
+                pdf = _restore_pandas_keys(pdf, tf._pdf, key_list)
                 return tf._with_pdf(pdf, groups=tf._groups)
-            lf = tf._lf.join(
+            key_list = [keys] if isinstance(keys, str) else list(keys)
+            aligned, r, finish = _align_factor_keys(
+                tf, r, [(key, key) for key in key_list], filtering=True
+            )
+            lf = aligned._lf.join(
                 r,
                 on=keys,
                 how="anti" if anti else "semi",
                 nulls_equal=True,
                 maintain_order="left",
             )
-            return tf._with_lf(lf, groups=tf._groups)
+            return finish(aligned._with_lf(lf, groups=tf._groups))
         key_names = [keys] if isinstance(keys, str) else list(keys)
         return _join_by_operation(
             tf,
@@ -3856,6 +4120,73 @@ def cross_join(right: Any, **kwargs: Any) -> Verb:
     return Verb(_apply, "cross_join")
 
 
+def _bind_polars_factors(
+    frames: list[pl.LazyFrame], recorded: dict[str, Any]
+) -> tuple[list[pl.LazyFrame], dict[str, Any]]:
+    """Combine factor columns before ``bind_rows``, as vctrs does.
+
+    Factors with different levels become one factor with every level, in
+    order of first appearance. A factor bound to text becomes text. A frame
+    without the column keeps the factor.
+    """
+    schemas = [frame.collect_schema() for frame in frames]
+    names = _union_levels(*(list(schema.names()) for schema in schemas))
+    casts: dict[str, Any] = {}
+    levels = dict(recorded)
+    for name in names:
+        types = [schema[name] for schema in schemas if name in schema and schema[name] != pl.Null]
+        if not any(isinstance(dtype, pl.Enum) for dtype in types):
+            continue
+        if all(isinstance(dtype, pl.Enum) for dtype in types):
+            union = _union_levels(*(dtype.categories.to_list() for dtype in types))
+            if any(dtype.categories.to_list() != union for dtype in types):
+                casts[name] = pl.Enum(union)
+                levels[name] = _factor_levels(union, ordered=False)
+        else:
+            casts[name] = pl.String
+            levels.pop(name, None)
+    if not casts:
+        return frames, levels
+    aligned = [
+        frame.with_columns(
+            pl.col(name).cast(dtype) for name, dtype in casts.items() if name in schema
+        )
+        for frame, schema in zip(frames, schemas)
+    ]
+    return aligned, levels
+
+
+def _bind_pandas_factors(frames: list[Any]) -> list[Any]:
+    """:func:`_bind_polars_factors` for pandas, whose concat drops differing factors."""
+    import pandas as pd
+
+    names = _union_levels(*(list(frame.columns) for frame in frames))
+    out = list(frames)
+    for name in names:
+        present = [frame[name] for frame in frames if name in frame.columns]
+        factors = [series for series in present if isinstance(series.dtype, pd.CategoricalDtype)]
+        if not factors:
+            continue
+        others = [
+            series for series in present
+            if not isinstance(series.dtype, pd.CategoricalDtype) and series.notna().any()
+        ]
+        if others:
+            continue  # a factor bound to text is text, which concat already gives
+        union = _union_levels(*(series.cat.categories.tolist() for series in factors))
+        same = all(series.cat.categories.tolist() == union for series in factors)
+        ordered = same and all(series.cat.ordered for series in factors)
+        dtype = pd.CategoricalDtype(union, ordered=ordered)
+        out = [
+            frame.assign(**{name: (
+                frame[name].astype(dtype) if name in frame.columns
+                else pd.Series(pd.Categorical([None] * len(frame), dtype=dtype), index=frame.index)
+            )})
+            for frame in out
+        ]
+    return out
+
+
 def bind_rows(*others: Any, id: str | None = None) -> Verb:  # noqa: A002
     """Append frames, taking the union of their columns."""
     if not others:
@@ -3876,8 +4207,15 @@ def bind_rows(*others: Any, id: str | None = None) -> Verb:  # noqa: A002
                     ]
                     for index, frame in enumerate(frames, start=1)
                 ]
-            pdf = pd.concat(frames, ignore_index=True, sort=False)
-            return tf._with_pdf(pdf, groups=tf._groups)
+            order = _union_levels(*(list(frame.columns) for frame in frames))
+            frames = _bind_pandas_factors(frames)
+            pdf = pd.concat(frames, ignore_index=True, sort=False).loc[:, order]
+            levels = {
+                str(name): _levels_from_series(pdf[name])
+                for name in pdf.columns
+                if isinstance(pdf[name].dtype, pd.CategoricalDtype)
+            }
+            return tf._with_pdf(pdf, groups=tf._groups, category_levels=levels)
         if id is not None:
             frames = [
                 frame.with_columns(pl.lit(str(index)).alias(id)).select(
@@ -3886,8 +4224,11 @@ def bind_rows(*others: Any, id: str | None = None) -> Verb:  # noqa: A002
                 )
                 for index, frame in enumerate(frames, start=1)
             ]
+        frames, levels = _bind_polars_factors(frames, tf._category_levels)
         return tf._with_lf(
-            pl.concat(frames, how="diagonal_relaxed"), groups=tf._groups
+            pl.concat(frames, how="diagonal_relaxed"),
+            groups=tf._groups,
+            category_levels=levels,
         )
 
     return Verb(_apply, "bind_rows")

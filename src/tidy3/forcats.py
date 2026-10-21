@@ -84,7 +84,7 @@ def fct_rev(f: Any) -> Any:
     return _dispatch("fct_rev", f)
 
 
-def _factor(value: Any, levels: list[str] | None = None) -> pd.Series:
+def _factor(value: Any, levels: list[str] | None = None, *, ordered: bool | None = None) -> pd.Series:
     if isinstance(value, pl.Series):
         if isinstance(value.dtype, pl.Enum):
             levels = value.dtype.categories.to_list()
@@ -94,13 +94,16 @@ def _factor(value: Any, levels: list[str] | None = None) -> pd.Series:
         if not all(isinstance(level, str) for level in source.cat.categories):
             raise TypeError("factor levels must be strings")
         if levels is not None:
-            return pd.Series(pd.Categorical(source, categories=levels, ordered=source.cat.ordered), index=source.index, name=source.name)
+            flag = source.cat.ordered if ordered is None else ordered
+            return pd.Series(pd.Categorical(source, categories=levels, ordered=flag), index=source.index, name=source.name)
         return source
-    present = source.dropna()
-    if not all(isinstance(value, str) for value in present):
+    # Checking the distinct values is enough, and far cheaper than every row.
+    distinct = source.dropna().unique().tolist()
+    if not all(isinstance(value, str) for value in distinct):
         raise TypeError("factor input must be a character or categorical column")
-    categories = sorted(present.unique().tolist()) if levels is None else levels
-    return pd.Series(pd.Categorical(source, categories=categories), index=source.index, name=source.name)
+    categories = sorted(distinct) if levels is None else levels
+    flag = False if ordered is None else ordered
+    return pd.Series(pd.Categorical(source, categories=categories, ordered=flag), index=source.index, name=source.name)
 
 
 def _summary(values: pd.Series, fun: Any, kwargs: dict[str, Any]) -> Any:
@@ -201,31 +204,96 @@ def contains_factor(value: Any) -> bool:
     return any(contains_factor(child) for child in _expression_children(node))
 
 
-def prepare_polars(tf: Any, lf: pl.LazyFrame, stage: dict[str, Any], groups: list[str] | None, *, sort_groups: bool) -> tuple[pl.LazyFrame, dict[str, Any]]:
-    """Compute factor assignments once; preserve other columns' Polars dtypes."""
+def prepare_polars(tf: Any, lf: pl.LazyFrame, stage: dict[str, Any], groups: list[str] | None, *, sort_groups: bool) -> tuple[pl.LazyFrame, dict[str, Any], dict[str, bool]]:
+    """Compute factor assignments once; preserve other columns' Polars dtypes.
+
+    The third result maps each produced factor column to its ordered flag.
+    Polars Enums have no unordered state, so the flag has to travel beside
+    the level names.
+    """
     factors = {name: value for name, value in stage.items() if contains_factor(value)}
     if not factors:
-        return lf, stage
+        return lf, stage, {}
     from tidy3.pandas_engine import eval_expr
     from tidy3.verbs import _column_references
 
-    data = lf.collect()
     required = set(groups or []) | set().union(*(_column_references(value) for value in factors.values()))
-    pdf = data.select([name for name in data.columns if name in required]).to_pandas()
-    if not required:
-        pdf = pd.DataFrame(index=pd.RangeIndex(data.height))
+    sources = {name: _level_source(value) for name, value in factors.items()}
+    schema = lf.collect_schema()
+    lazy = bool(required) and all(
+        source is not None and _text_like(lf, source, schema) for source in sources.values()
+    )
+    if lazy:
+        # Only the columns the factors read go to pandas, and the factor
+        # values are their source values, so the result is a cast of those
+        # columns rather than every row copied back through Python lists.
+        pdf = lf.select(sorted(required, key=list(schema.names()).index)).collect().to_pandas()
+    else:
+        data = lf.collect()
+        pdf = data.select([name for name in data.columns if name in required]).to_pandas()
+        if not required:
+            pdf = pd.DataFrame(index=pd.RangeIndex(data.height))
     for column, levels in tf._category_levels.items():
-        if column in pdf and not isinstance(data.schema[column], pl.Enum):
-            pdf[column] = _factor(pdf[column], levels)
+        if column in pdf:
+            # An Enum collected to pandas is always ordered. Reapply the
+            # recorded flag so fct_* can preserve an unordered factor.
+            pdf[column] = _factor(
+                pdf[column], list(levels), ordered=bool(getattr(levels, "ordered", False))
+            )
     token = SORT_GROUPS.set(sort_groups)
     try:
         results = {name: eval_expr(value, pdf, groups, "window") for name, value in factors.items()}
     finally:
         SORT_GROUPS.reset(token)
     columns = []
+    ordered: dict[str, bool] = {}
+    rest = {name: value for name, value in stage.items() if name not in factors}
+    if lazy and all(isinstance(value.dtype, pd.CategoricalDtype) for value in results.values()):
+        from tidy3.expr import to_polars
+
+        for name, value in results.items():
+            ordered[name] = bool(value.cat.ordered)
+            levels = pl.Enum(value.cat.categories.tolist())
+            columns.append(to_polars(sources[name]).cast(pl.String).cast(levels).alias(name))
+        return lf.with_columns(columns), rest, ordered
+    if lazy:
+        data = lf.collect()
     for name, value in results.items():
         if isinstance(value, pd.Series) and isinstance(value.dtype, pd.CategoricalDtype):
+            ordered[name] = bool(value.cat.ordered)
             columns.append(pl.Series(name, value.astype(object).where(value.notna(), None).tolist(), dtype=pl.Enum(value.cat.categories.tolist())))
         else:
             columns.append(pl.Series(name, value))
-    return data.with_columns(columns).lazy(), {name: value for name, value in stage.items() if name not in factors}
+    return data.with_columns(columns).lazy(), rest, ordered
+
+
+def _level_source(value: Any) -> Any:
+    """The expression a chain of fct_* calls reorders, or None.
+
+    fct_relevel, fct_reorder, fct_infreq, and fct_rev change the levels and
+    never the values, so ``fct_rev(fct_infreq(species))`` has the values of
+    ``species``.
+    """
+    node = value.node if isinstance(value, Expr) else None
+    if not isinstance(node, tuple) or node[0] != "func" or node[1] not in FUNCTIONS:
+        return None
+    while isinstance(node, tuple) and node[0] == "func" and node[1] in FUNCTIONS:
+        node = node[2][0]
+    if isinstance(node, tuple) and node and node[0] == "func" and node[1] in FUNCTIONS:
+        return None
+    from tidy3.verbs import _expression_children
+
+    if any(contains_factor(child) for child in _expression_children(node)):
+        return None
+    return Expr(node)
+
+
+def _text_like(lf: pl.LazyFrame, source: Any, schema: Any) -> bool:
+    """Text and factor sources keep their values as level names."""
+    from tidy3.expr import to_polars
+
+    try:
+        dtype = lf.select(to_polars(source)).collect_schema().dtypes()[0]
+    except pl.exceptions.PolarsError:
+        return False
+    return dtype == pl.String or isinstance(dtype, (pl.Enum, pl.Categorical))

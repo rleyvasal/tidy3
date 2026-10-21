@@ -303,6 +303,44 @@ def _expansion_units(tf: Any, specs: tuple[Any, ...]) -> list[list[str]]:
     return units
 
 
+def _factor_units(tf: Any, specs: tuple[Any, ...]) -> dict[str, Any]:
+    """Factor columns named outside ``nesting()``: they expand to every level.
+
+    tidyr expands a bare factor to all its levels, including unused ones,
+    while ``nesting()`` keeps only combinations that occur. Values are the
+    Polars Enum dtype, or the pandas categorical dtype.
+    """
+    import pandas as pd
+
+    bare = [
+        name for spec in specs if not isinstance(spec, Nesting)
+        for name in resolve_selection(tf, [spec])
+    ]
+    if tf._backend == "pandas":
+        return {
+            name: tf._pdf[name].dtype for name in bare
+            if isinstance(tf._pdf[name].dtype, pd.CategoricalDtype)
+        }
+    schema = tf._lf.collect_schema()
+    return {name: schema[name] for name in bare if isinstance(schema[name], pl.Enum)}
+
+
+def _pandas_levels(series: Any) -> Any:
+    import pandas as pd
+
+    values = list(series.cat.categories)
+    if series.isna().any():
+        values.append(None)
+    return pd.DataFrame({series.name: pd.Categorical(values, dtype=series.dtype)})
+
+
+def _polars_levels(tf: Any, name: str, dtype: Any) -> pl.LazyFrame:
+    """Every level of an Enum column, then null when the column has one."""
+    every = pl.LazyFrame({name: pl.Series(name, dtype.categories.to_list(), dtype=dtype)})
+    missing = tf._lf.select(pl.col(name)).filter(pl.col(name).is_null()).head(1)
+    return pl.concat([every, missing])
+
+
 def expand(*cols: Any, **values: Any) -> Verb:
     """Generate observed-value combinations, within groups when grouped.
 
@@ -315,6 +353,7 @@ def expand(*cols: Any, **values: Any) -> Verb:
 
     def _apply(tf):
         units = _expansion_units(tf, cols)
+        levels = _factor_units(tf, cols)
         groups = list(tf._groups or [])
         named = {name: _value_list(tf, name, spec) for name, spec in named_specs.items()}
         selected = [name for unit in units for name in unit] + list(named)
@@ -324,18 +363,31 @@ def expand(*cols: Any, **values: Any) -> Verb:
                 f"expand() cannot expand grouping columns: {overlap}"
             )
         if tf._backend == "pandas":
+            import pandas as pd
+
             pdf = tf._pdf
             if groups:
                 result = pdf.loc[:, groups].drop_duplicates()
                 for unit in units:
-                    values = pdf.loc[:, [*groups, *unit]].drop_duplicates()
+                    if unit[0] in levels:
+                        name = unit[0]
+                        every = _pandas_levels(pdf[name].dropna())
+                        values = pd.concat([
+                            pdf.loc[:, groups].drop_duplicates().merge(every, how="cross"),
+                            pdf.loc[pdf[name].isna(), [*groups, name]].drop_duplicates(),
+                        ], ignore_index=True)
+                    else:
+                        values = pdf.loc[:, [*groups, *unit]].drop_duplicates()
                     result = result.merge(
                         values, on=groups, how="inner", sort=False
                     )
             else:
                 result = None
                 for unit in units:
-                    values = pdf.loc[:, unit].drop_duplicates()
+                    values = (
+                        _pandas_levels(pdf[unit[0]]) if unit[0] in levels
+                        else pdf.loc[:, unit].drop_duplicates()
+                    )
                     if result is None:
                         result = values
                     else:
@@ -354,16 +406,31 @@ def expand(*cols: Any, **values: Any) -> Verb:
         if groups:
             result = tf._lf.select(groups).unique(maintain_order=True)
             for unit in units:
-                values = tf._lf.select([*groups, *unit]).unique(
-                    maintain_order=True
-                )
+                if unit[0] in levels:
+                    name = unit[0]
+                    every = pl.LazyFrame(
+                        {name: pl.Series(name, levels[name].categories.to_list(), dtype=levels[name])}
+                    )
+                    values = pl.concat([
+                        tf._lf.select(groups).unique(maintain_order=True).join(every, how="cross"),
+                        tf._lf.select([*groups, name]).filter(pl.col(name).is_null()).unique(
+                            maintain_order=True
+                        ),
+                    ])
+                else:
+                    values = tf._lf.select([*groups, *unit]).unique(
+                        maintain_order=True
+                    )
                 result = result.join(
                     values, on=groups, how="inner", maintain_order="left_right"
                 )
         else:
             result = None
             for unit in units:
-                values = tf._lf.select(unit).unique(maintain_order=True)
+                values = (
+                    _polars_levels(tf, unit[0], levels[unit[0]]) if unit[0] in levels
+                    else tf._lf.select(unit).unique(maintain_order=True)
+                )
                 result = (
                     values
                     if result is None
@@ -376,7 +443,7 @@ def expand(*cols: Any, **values: Any) -> Verb:
             result = tf._lf.select([]).head(0)
         ordered = [*groups, *selected]
         return tf._with_lf(
-            result.select(ordered).sort(ordered),
+            result.select(ordered).sort(ordered, nulls_last=True, maintain_order=True),
             groups=groups or None,
             rowwise=False,
         )
@@ -577,6 +644,7 @@ def complete(
             on=keys,
             how="left",
             maintain_order="left_right",
+            nulls_equal=True,  # a missing key matches its own row, as in tidyr
         )
         schema = output.collect_schema()
         expressions = []
@@ -2392,8 +2460,6 @@ def separate_longer_delim(cols: Any, delim: str) -> Verb:
     def _apply(tf):
         if tf._backend == "polars":
             return _pl_separate_longer_delim(tf, cols, delim)
-        import pandas as pd
-
         selected = resolve_selection(tf, [cols])
         if len(selected) != 1:
             raise ValueError("separate_longer_delim() currently accepts one column")
@@ -2403,9 +2469,7 @@ def separate_longer_delim(cols: Any, delim: str) -> Verb:
             lambda value: value.split(delim) if isinstance(value, str) else [value]
         )
         pdf = pdf.explode(column, ignore_index=True)
-        from tidy3.frame import tidy
-
-        return tidy(pdf, backend=tf._backend)
+        return tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns))
 
     return Verb(_apply, "separate_longer_delim")
 
@@ -2441,7 +2505,6 @@ def separate_wider_delim(
         if tf._backend == "polars":
             return _pl_separate_wider_delim(tf, column, list(names), delim, too_few, too_many, names_sep, cols_remove)
         import pandas as pd
-        from tidy3.frame import tidy
 
         selected = resolve_selection(tf, [column])
         if len(selected) != 1:
@@ -2487,7 +2550,7 @@ def separate_wider_delim(
         )
         # The new columns take the place of the split one, as in tidyr.
         pdf = _replace_column(pdf, source, expanded, cols_remove)
-        return tidy(pdf, backend=tf._backend)
+        return tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns))
 
     return Verb(_apply, "separate_wider_delim")
 
@@ -2717,7 +2780,6 @@ def separate_wider_regex(
         if tf._backend == "polars":
             return _pl_separate_wider_regex(tf, column, pieces, too_few, names_sep, cols_remove)
         import pandas as pd
-        from tidy3.frame import tidy
 
         source = _one_column(tf, column, "separate_wider_regex")
         pdf = tf.collect(as_="pandas").reset_index(drop=True)
@@ -2735,7 +2797,8 @@ def separate_wider_regex(
             index=pdf.index,
             dtype=object,
         )
-        return tidy(_replace_column(pdf, source, expanded, cols_remove), backend=tf._backend)
+        pdf = _replace_column(pdf, source, expanded, cols_remove)
+        return tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns))
 
     return Verb(_apply, "separate_wider_regex")
 
@@ -2775,7 +2838,6 @@ def separate_wider_position(
         if tf._backend == "polars":
             return _pl_separate_wider_position(tf, column, pieces, total, too_few, too_many, names_sep, cols_remove)
         import pandas as pd
-        from tidy3.frame import tidy
 
         source = _one_column(tf, column, "separate_wider_position")
         pdf = tf.collect(as_="pandas").reset_index(drop=True)
@@ -2810,7 +2872,8 @@ def separate_wider_position(
             index=pdf.index,
             dtype=object,
         )
-        return tidy(_replace_column(pdf, source, expanded, cols_remove), backend=tf._backend)
+        pdf = _replace_column(pdf, source, expanded, cols_remove)
+        return tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns))
 
     return Verb(_apply, "separate_wider_position")
 
@@ -2827,8 +2890,6 @@ def separate_longer_position(column: Any, width: int, *, keep_empty: bool = Fals
     def _apply(tf):
         if tf._backend == "polars":
             return _pl_separate_longer_position(tf, column, int(width), keep_empty)
-        from tidy3.frame import tidy
-
         source = _one_column(tf, column, "separate_longer_position")
         pdf = tf.collect(as_="pandas").copy()
 
@@ -2841,7 +2902,7 @@ def separate_longer_position(column: Any, width: int, *, keep_empty: bool = Fals
 
         pdf[source] = pdf[source].map(chunks)
         pdf = pdf[pdf[source].map(len) > 0].explode(source, ignore_index=True)
-        return tidy(pdf, backend=tf._backend)
+        return tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns))
 
     return Verb(_apply, "separate_longer_position")
 
@@ -2967,7 +3028,6 @@ def hoist(
         import copy
 
         import pandas as pd
-        from tidy3.frame import tidy
 
         pdf = tf.collect(as_="pandas").copy()
         specs = list(named_paths.items()) or [(str(path), path) for path in paths]
@@ -2995,7 +3055,8 @@ def hoist(
         if not empty:
             parts.append(pdf[[column]])
         parts.append(pdf.iloc[:, at + 1 :])
-        out = tidy(pd.concat(parts, axis=1), backend=tf._backend)
+        pdf = pd.concat(parts, axis=1)
+        out = tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns))
         return _transform_columns(out, transform, list(hoisted), "transform")
     return Verb(_apply, "hoist")
 
@@ -3091,9 +3152,6 @@ def _pluck(value: Any, keys: list[Any]) -> Any:
 def pack(name: str, *cols: Any) -> Verb:
     """Pack selected columns into a structured column."""
     def _apply(tf):
-        import pandas as pd
-        from tidy3.frame import tidy
-
         selected = resolve_selection(tf, cols or [c for c in _columns(tf) if c not in (tf._groups or [])])
         if tf._backend == "polars":
             lf = tf._lf.with_columns(pl.struct(selected).alias(name)).drop(selected)
@@ -3101,7 +3159,7 @@ def pack(name: str, *cols: Any) -> Verb:
         pdf = tf.collect(as_="pandas").copy()
         pdf[name] = pdf[selected].to_dict(orient="records")
         pdf = pdf.drop(columns=selected)
-        return tidy(pdf, backend=tf._backend)
+        return tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns))
     return Verb(_apply, "pack")
 
 
@@ -3109,14 +3167,13 @@ def unpack(column: str) -> Verb:
     """Expand a structured dictionary column into ordinary columns."""
     def _apply(tf):
         import pandas as pd
-        from tidy3.frame import tidy
 
         if tf._backend == "polars":
             return tf >> unnest_wider(column)
         pdf = tf.collect(as_="pandas").copy()
         expanded = pd.json_normalize(pdf[column]).set_index(pdf.index)
         pdf = pd.concat([pdf.drop(columns=column), expanded], axis=1)
-        return tidy(pdf, backend=tf._backend)
+        return tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns), rowwise=False)
     return Verb(_apply, "unpack")
 
 

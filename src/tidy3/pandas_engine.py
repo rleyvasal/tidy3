@@ -1441,7 +1441,9 @@ def do_join(
 def _do_join(
     df: pd.DataFrame, right: pd.DataFrame, on, how: str, **kwargs
 ) -> pd.DataFrame:
-    if how == "outer":
+    if how in {"outer", "right"}:
+        # pandas keeps y's order in a right join; dplyr keeps x's order and
+        # puts y's unmatched rows last, as for a full join.
         left_order = "__tidy3_left_order"
         right_order = "__tidy3_right_order"
         occupied = set(df.columns) | set(right.columns)
@@ -1710,10 +1712,9 @@ def do_join_by(
             missing_right[column] = np.nan
         pieces.append(missing_right)
     combined = pd.concat(pieces, ignore_index=True, sort=False)
-    if how == "right":
-        combined = combined.sort_values([right_id, left_id], kind="stable")
-    else:
-        combined = combined.sort_values([left_id, right_id], kind="stable")
+    # dplyr's order for every join: x's rows in order, each with its matches
+    # in y's order, then y's unmatched rows (right and full joins) in order.
+    combined = combined.sort_values([left_id, right_id], kind="stable", na_position="last")
 
     equality_map = {condition.left: condition.right for condition in equality}
     equality_right = {condition.right for condition in equality}

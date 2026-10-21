@@ -64,6 +64,7 @@ _ASSIGN_VERBS = frozenset(
 _SELECTOR_ARG_VERBS = frozenset(
     {
         "select",
+        "get_dupes",
         "drop",
         "relocate",
         "ungroup",
@@ -178,11 +179,12 @@ _FIRST_COLUMN_ARG = frozenset(
         "ntile", "case_match", "recode", "recode_values", "replace_values",
         "replace_when", "any", "all", "abs", "round", "floor", "ceiling",
         "is_na", "is_nan", "is_finite", "is_infinite",
-        "as_numeric", "as_double", "as_integer", "as_character", "as_logical",
+        "as_numeric", "as_double", "as_integer", "as_character", "as_string",
+        "as_logical",
         "as_date", "as_datetime",
         "ymd", "mdy", "dmy", "ym", "year", "month", "day",
         "floor_date", "ceiling_date", "days_in_month", "add_with_rollback",
-        "months", "years",
+        "months", "years", "excel_numeric_to_date",
         "parse_double", "parse_integer", "parse_logical", "parse_date",
         "parse_datetime", "parse_number",
         "order_by", "with_order",

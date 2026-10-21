@@ -395,6 +395,41 @@ def test_split_variants(foods):
     assert str_count(["it's a dog's life"], boundary("word")) == [4]
 
 
+@pytest.mark.parametrize("backend", ["polars", "pandas"])
+def test_str_equal_normalizes_to_nfc(backend):
+    frame = tidy(
+        {
+            "x": ["\u00e9", "\u00c9", "\u212b", "\ufb01", "e\u0301", None],
+            "y": ["e\u0301", "e\u0301", "\u00c5", "fi", "\u00e9", None],
+        },
+        backend=backend,
+    )
+    out = frame >> mutate(
+        equal=str_equal("x", col("y")),
+        ignore=str_equal("x", col("y"), ignore_case=True),
+    )
+    assert cells(out, "equal") == [True, False, True, False, True, None]
+    assert cells(out, "ignore") == [True, True, True, False, True, None]
+    assert str_equal(["\u00e9"], "e\u0301") == [True]
+    assert str_equal(["\u00e9", None], ["e\u0301", None]) == [True, None]
+    assert str_equal(["\u00e9"], "e") == [False]
+
+
+def test_str_equal_is_not_stringi_collation():
+    # stringr equates these. tidy3 compares NFC after optional lowercase.
+    family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+    apart = "\U0001f468\U0001f469\U0001f467"
+    assert str_equal([family], [apart]) == [False]
+    assert str_equal(["\ufb01"], ["fi"], ignore_case=True) == [False]
+    assert str_equal(["\u00df"], ["ss"], ignore_case=True) == [False]
+
+
+def test_character_boundary_splits_code_points():
+    assert str_split(["e\u0301"], boundary("character")) == [["e", "\u0301"]]
+    family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+    assert len(str_split([family], boundary("character"))[0]) == 5
+
+
 def test_replace_all_with_a_dict(foods):
     out = foods >> mutate(y=str_replace_all("x", {"a": "4", "e": "3"}))
     assert cells(out, "y") == ["4ppl3 pi3", "b4n4n4 split", "Ch3rry t4rt", None]

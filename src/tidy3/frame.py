@@ -17,6 +17,87 @@ _POLARS_EXECUTION_ENGINES = frozenset({"auto", "streaming", "gpu"})
 _KEEP = object()
 
 
+class FactorLevels(list):
+    """Factor level names plus whether the factor is ordered.
+
+    A list subclass so ``levels == ["a", "b"]``, ``enumerate(levels)``, and
+    ``pl.Enum(levels)`` keep working. ``list(levels)`` drops the flag.
+    """
+
+    def __init__(self, levels: Any, ordered: bool = False) -> None:
+        super().__init__(levels)
+        self.ordered = bool(ordered)
+
+
+def _as_levels(levels: Any, ordered: bool | None = None) -> FactorLevels:
+    """Wrap *levels* without dropping an ordered flag already stored on it."""
+    if isinstance(levels, FactorLevels) and ordered is None:
+        return levels
+    if ordered is None:
+        ordered = bool(getattr(levels, "ordered", False))
+    return FactorLevels(list(levels), ordered=bool(ordered))
+
+
+def _recorded_levels(levels: dict[str, Any] | None) -> dict[str, FactorLevels]:
+    return {str(name): _as_levels(values) for name, values in (levels or {}).items()}
+
+
+def _is_categorical_dtype(dtype: Any) -> bool:
+    import pandas as pd
+
+    if isinstance(dtype, pd.CategoricalDtype):
+        return True
+    if isinstance(dtype, pd.ArrowDtype):
+        return "dictionary" in str(dtype)
+    return False
+
+
+def _numeric_level(level: Any) -> bool:
+    return isinstance(level, (int, float)) and not isinstance(level, bool)
+
+
+def _restore_factors(pdf: Any, levels: dict[str, Any]) -> Any:
+    """Put recorded factor levels back onto a pandas frame.
+
+    Polars drops unused levels and the ordered flag when a pandas factor is
+    imported. Restoration runs only when the collected column is already
+    categorical, numeric levels survived as numbers, or the column is empty
+    or entirely missing. A string column is left alone, so a later overwrite
+    is not turned back into a factor or into missing values.
+    """
+    if not levels:
+        return pdf
+    import pandas as pd
+
+    for name, recorded in levels.items():
+        if name not in pdf.columns:
+            continue
+        categories = list(recorded)
+        ordered = bool(getattr(recorded, "ordered", False))
+        series = pdf[name]
+        if (
+            isinstance(series.dtype, pd.CategoricalDtype)
+            and list(series.cat.categories) == categories
+            and bool(series.cat.ordered) is ordered
+        ):
+            continue
+        try:
+            present = [value for value in series.tolist() if not pd.isna(value)]
+            if any(value not in set(categories) for value in present):
+                continue
+            numeric = bool(categories) and all(_numeric_level(level) for level in categories)
+            if not (
+                _is_categorical_dtype(series.dtype)
+                or not present
+                or (numeric and pd.api.types.is_numeric_dtype(series))
+            ):
+                continue
+            pdf[name] = pd.Categorical(series.tolist(), categories=categories, ordered=ordered)
+        except (TypeError, ValueError):
+            continue
+    return pdf
+
+
 def _validate_execution_engine(engine: Any, *, backend: str) -> None:
     if isinstance(engine, str) and engine not in _POLARS_EXECUTION_ENGINES:
         choices = ", ".join(sorted(_POLARS_EXECUTION_ENGINES))
@@ -97,11 +178,14 @@ class TidyFrame:
             import pandas as pd
 
             category_levels = {
-                str(name): series.cat.categories.tolist()
+                str(name): FactorLevels(
+                    series.cat.categories.tolist(),
+                    ordered=bool(series.cat.ordered),
+                )
                 for name, series in data.items()
                 if isinstance(series.dtype, pd.CategoricalDtype)
             }
-        self._category_levels = dict(category_levels or {})
+        self._category_levels = _recorded_levels(category_levels)
         self._select_base = select_base
         self._problems = problems
 
@@ -399,6 +483,55 @@ class TidyFrame:
             maintain_order=maintain_order,
             **computed,
         )
+
+    def get_dupes(self, *cols: Any) -> TidyFrame:
+        from tidy3.verbs import get_dupes as get_dupes_verb
+
+        return self >> get_dupes_verb(*cols)
+
+    def remove_empty(self, which: Any = "both", *, cutoff: float = 1) -> TidyFrame:
+        from tidy3.janitor import remove_empty as remove_empty_verb
+
+        return self >> remove_empty_verb(which, cutoff=cutoff)
+
+    def remove_constant(self, *, na_rm: bool = False) -> TidyFrame:
+        from tidy3.janitor import remove_constant as remove_constant_verb
+
+        return self >> remove_constant_verb(na_rm=na_rm)
+
+    def row_to_names(
+        self,
+        row_number: Any,
+        *,
+        remove_row: bool = True,
+        remove_rows_above: bool = True,
+        value: Any = None,
+        column: Any = None,
+    ) -> TidyFrame:
+        from tidy3.janitor import row_to_names as row_to_names_verb
+
+        return self >> row_to_names_verb(
+            row_number,
+            remove_row=remove_row,
+            remove_rows_above=remove_rows_above,
+            value=value,
+            column=column,
+        )
+
+    def find_header(self, *, value: Any = None, column: Any = 1) -> int:
+        from tidy3.janitor import find_header as find_header_verb
+
+        return self >> find_header_verb(value=value, column=column)
+
+    def compare_df_cols(self, *frames: Any, **kwargs: Any) -> TidyFrame:
+        from tidy3.janitor import compare_df_cols as compare_df_cols_fn
+
+        return compare_df_cols_fn(self, *frames, **kwargs)
+
+    def compare_df_cols_same(self, *frames: Any, **kwargs: Any) -> bool:
+        from tidy3.janitor import compare_df_cols_same as compare_same
+
+        return compare_same(self, *frames, **kwargs)
 
     def group_by(
         self,
@@ -970,7 +1103,9 @@ class TidyFrame:
 
         ``arrow_backed=True`` returns a pandas DataFrame whose columns use
         Arrow extension dtypes.  For the Polars backend this avoids copying
-        every column into NumPy buffers at the handoff boundary.
+        every column into NumPy buffers at the handoff boundary. Factor
+        columns recorded on a Polars frame are written back as pandas
+        categoricals, including unused levels and ordered status.
 
         ``engine`` controls Polars execution: ``"auto"`` (the default),
         ``"streaming"``, or ``"gpu"``. A configured ``polars.GPUEngine``
@@ -1022,7 +1157,10 @@ class TidyFrame:
         if as_ == "polars":
             return df
         if as_ == "pandas":
-            return df.to_pandas(use_pyarrow_extension_array=arrow_backed)
+            return _restore_factors(
+                df.to_pandas(use_pyarrow_extension_array=arrow_backed),
+                self._category_levels,
+            )
         if as_ == "arrow":
             return df.to_arrow()
         raise ValueError(
@@ -1463,7 +1601,10 @@ def tidy(data: Any = None, backend: str | None = None, **kwargs: Any) -> TidyFra
 
         if isinstance(data, pd.DataFrame):
             category_levels = {
-                str(name): series.cat.categories.tolist()
+                str(name): FactorLevels(
+                    series.cat.categories.tolist(),
+                    ordered=bool(series.cat.ordered),
+                )
                 for name, series in data.items()
                 if isinstance(series.dtype, pd.CategoricalDtype)
             }

@@ -97,6 +97,9 @@ def regex(
     return StringPattern(pattern, False, flags)
 
 
+# ``character`` is one code point. stringr's character boundary is a
+# grapheme cluster, so a combining accent or a joined emoji stays in one
+# piece there and splits here.
 _BOUNDARIES = {"character": r"(?s:.)", "word": r"\w+(?:['’]\w+)*"}
 
 
@@ -105,6 +108,10 @@ def boundary(type: str = "character") -> StringPattern:  # noqa: A002
 
     Splitting on a boundary returns its pieces: ``str_split(x, boundary("word"))``
     gives the words. Only ``"character"`` and ``"word"`` are supported.
+
+    ``"character"`` splits on Unicode code points, not grapheme clusters.
+    A combining accent is its own piece, and a joined family emoji splits
+    into several pieces.
     """
     if type not in _BOUNDARIES:
         raise NotImplementedError(
@@ -284,7 +291,14 @@ def str_ilike(string: Any, pattern: str) -> Any:
 
 
 def str_equal(x: Any, y: Any, ignore_case: bool = False) -> Any:
-    """True where *x* equals *y*; a plain string *y* is text, not a column."""
+    """True where *x* equals *y*; a plain string *y* is text, not a column.
+
+    Both sides are compared in Unicode NFC, so ``é`` and ``e\\u0301`` are
+    equal. ``ignore_case`` lowercases first, then normalizes, because
+    lowercasing can leave a character decomposed. Missing stays missing.
+    This is not stringi collation: the ligature ``ﬁ`` is not equal to
+    ``fi``, and a joined emoji is not equal to the same emoji without ZWJ.
+    """
     _check_bool("str_equal", "ignore_case", ignore_case)
     if _is_vector(x) or _is_vector(y):
         columns = {_X: x}
@@ -983,9 +997,13 @@ def compile_polars(name: str, args: tuple, kw: dict) -> pl.Expr:
         return ~found if kw["negate"] else found
     if name == "str_equal":
         y = args[1].cast(pl.String)
+        # Lowercase before NFC. Casefold would treat ``ß`` as ``ss``, which
+        # stringr does not, and lowercasing a precomposed capital can leave
+        # a combining mark that NFC then composes.
         if kw["ignore_case"]:
-            return x.str.to_lowercase() == y.str.to_lowercase()
-        return x == y
+            x = x.str.to_lowercase()
+            y = y.str.to_lowercase()
+        return x.str.normalize("NFC") == y.str.normalize("NFC")
     if name == "str_count":
         if _plain(kw):
             return x.str.count_matches(kw["pattern"], literal=True)
@@ -1151,6 +1169,17 @@ def _text(value: Any, index: Any) -> Any:
     return _NA if _missing(value) else str(value)
 
 
+def _nfc_text(value: Any, ignore_case: bool) -> Any:
+    """Lowercase when requested, then Unicode NFC. Missing stays missing."""
+    if isinstance(value, pd.Series):
+        text = value.str.lower() if ignore_case else value
+        return _map(text, lambda item: unicodedata.normalize("NFC", item))
+    if _missing(value):
+        return value
+    text = value.lower() if ignore_case else str(value)
+    return unicodedata.normalize("NFC", text)
+
+
 def eval_pandas(
     name: str,
     args: tuple,
@@ -1196,12 +1225,9 @@ def eval_pandas(
         return ~found if kw["negate"] else found
     if name == "str_equal":
         y = _text(args[1], index)
-        if kw["ignore_case"]:
-            x = x.str.lower()
-            y = y.str.lower() if isinstance(y, pd.Series) else (
-                y if y is _NA else y.lower()
-            )
-        return (x == y).astype("boolean")
+        return (
+            _nfc_text(x, kw["ignore_case"]) == _nfc_text(y, kw["ignore_case"])
+        ).astype("boolean")
     if name == "str_count":
         return x.str.count(_regex(kw)).astype("Int64")
     if name == "str_locate":
