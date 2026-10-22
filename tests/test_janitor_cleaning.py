@@ -468,3 +468,17 @@ def test_excel_numeric_to_date_notebook_bare_name():
         namespace,
     )
     assert namespace["cleaned"].columns == ["min", "label"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_excel_vector_path_divides_exactly_at_day_boundaries(backend):
+    # janitor: excel_numeric_to_date(-194.0000000115741) is 1899-06-19. The
+    # serial is just under a whole day; dividing by 86400 through its
+    # reciprocal rounded it up to -194 and gave the next day.
+    serials = [-194.0000000115741, -193.0000000115741, 100.0000000115741 - 2e-8]
+    out = (
+        t.tidy({"serial": serials * 4000}, backend=backend)
+        >> t.mutate(d=t.excel_numeric_to_date("serial"))
+    ).collect()["d"].to_list()
+    assert out[:3] == [date(1899, 6, 19), date(1899, 6, 20), date(1900, 4, 9)]
+    assert out == out[:3] * 4000

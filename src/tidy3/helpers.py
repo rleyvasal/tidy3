@@ -383,10 +383,17 @@ def _round_numpy(values: np.ndarray, digits: int) -> np.ndarray:
             whole = np.floor(size / scale)
             lower, upper = whole * scale, np.ceil(size / scale) * scale
         down, up = size - lower, upper - size
-        nearer = np.where((down < up) | ((down == up) & (np.fmod(whole, 2) == 0)), lower, upper)
+        # whole is a non-negative whole number, so halving and doubling are
+        # exact: a cheaper even test than fmod. Ties need finite values.
+        even = np.floor(whole * 0.5) * 2 == whole
+        nearer = np.where((down < up) | ((down == up) & even), lower, upper)
         keep = ~np.isfinite(size) | (size == 0)
         if digits > 0:
-            keep |= np.log10(size) + digits > _ROUND_KEEP_DIGITS
+            # log10(size) + digits > 15 needs size near 10 ** (15 - digits);
+            # only values within a factor of 10 of that pay for the log.
+            near = size >= 10.0 ** (_ROUND_KEEP_DIGITS - digits - 1)
+            if near.any():
+                keep[near] |= np.log10(size[near]) + digits > _ROUND_KEEP_DIGITS
         return np.where(keep, x, np.copysign(nearer, x))
 
 

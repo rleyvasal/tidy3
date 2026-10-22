@@ -157,6 +157,11 @@ def _group_table(
     own = names is None
     names = list(tf._groups or []) if own else list(names)
     if own and tf._rowwise:
+        if not names:
+            # rowwise() with no keys: still one group per row, as in dplyr.
+            # Iterating a frame with no columns would yield no rows at all.
+            count = _row_count(tf)
+            return names, [((), np.array([i]) if positions else 1) for i in range(count)]
         if tf._backend == "pandas":
             rows = tf._pdf.loc[:, names].itertuples(index=False, name=None)
         else:
@@ -212,15 +217,25 @@ def group_data(data: Any = _MISSING):
     tf = _frame(data)
     names, table = _group_table(tf)
     out = _keys_frame(tf, names, [key for key, _ in table])
-    rows = [(positions + 1).tolist() for _, positions in table]
     if tf._backend == "pandas":
-        out[".rows"] = rows
+        out[".rows"] = [(positions + 1).tolist() for _, positions in table]
     elif not names:
         # Ungrouped: one group, no key columns to attach to.
-        out = pl.DataFrame({".rows": pl.Series(rows, dtype=pl.List(pl.Int64))})
+        out = pl.DataFrame({".rows": _rows_column(table)})
     else:
-        out = out.with_columns(pl.Series(".rows", rows, dtype=pl.List(pl.Int64)))
+        out = out.with_columns(_rows_column(table))
     return _result(tf, out)
+
+
+def _rows_column(table: list[tuple[tuple, np.ndarray]]) -> pl.Series:
+    """Each group's 1-based rows as one list column, without Python lists per group."""
+    import pyarrow as pa
+
+    parts = [positions for _, positions in table]
+    values = (np.concatenate(parts) if parts else np.array([], dtype=np.int64)).astype(np.int64) + 1
+    offsets = np.concatenate([[0], np.cumsum([len(part) for part in parts], dtype=np.int64)])
+    rows = pa.LargeListArray.from_arrays(pa.array(offsets, pa.int64()), pa.array(values, pa.int64()))
+    return pl.Series(".rows", rows).cast(pl.List(pl.Int64))
 
 
 def group_keys(data: Any = _MISSING):

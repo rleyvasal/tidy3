@@ -1183,7 +1183,7 @@ _CLOCK_FORMATS = {
 
 
 def _no_failures(length: int) -> pl.Series:
-    return pl.Series("failed", [False] * length, dtype=pl.Boolean)
+    return pl.repeat(False, length, dtype=pl.Boolean, eager=True).alias("failed")
 
 
 def _every_row(frame: pl.DataFrame) -> bool:
@@ -1321,6 +1321,46 @@ def _uniform_fast(
     return value.cast(pl.Datetime("us")), failed
 
 
+# Kinds whose text a plain Polars cast reads exactly as the rules do, for
+# every value the cast accepts. Floats exclude inf and NaN spellings, which
+# the cast reads and the rules may not.
+_CAST_FIRST = {
+    "integer": pl.Int64,
+    "parse_integer": pl.Int64,
+    "double": pl.Float64,
+    "parse_double": pl.Float64,
+}
+
+
+def _cast_first(
+    series: pl.Series, kind: str, options: dict[str, Any], out_dtype: Any
+) -> tuple[pl.Series, pl.Series] | None:
+    """A plain cast (or word lookup) when it reads every present value, else None.
+
+    Clean columns skip the strip and the shape check. A column with any
+    value the cast rejects (spaces, ``NA`` text, overflow) takes the full path.
+    """
+    if kind in _LOGICAL_KINDS:
+        # The same words the shape check accepts, looked up in one pass.
+        key = series if kind == "logical" else series.str.to_lowercase()
+        truth, false = (_AS_TRUE, _AS_FALSE) if kind == "logical" else (_PARSE_TRUE, _PARSE_FALSE)
+        words = {**dict.fromkeys(truth, True), **dict.fromkeys(false, False)}
+        value = key.replace_strict(words, default=None, return_dtype=pl.Boolean)
+        if (series.is_not_null() & value.is_null()).any():
+            return None
+        return value.cast(out_dtype).alias(series.name), _no_failures(series.len())
+    target = _CAST_FIRST.get(kind)
+    if target is None or (kind == "parse_double" and options["decimal_mark"] != "."):
+        return None
+    value = series.cast(target, strict=False)
+    unsure = series.is_not_null() & value.is_null()
+    if target == pl.Float64:
+        unsure = unsure | ~value.is_finite().fill_null(True)
+    if unsure.any():
+        return None
+    return value.cast(out_dtype).alias(series.name), _no_failures(series.len())
+
+
 def _fast_convert(series: pl.Series, options: dict[str, Any]) -> tuple[pl.Series, pl.Series] | None:
     """``(converted, failed)`` computed natively, or None for the per-value path."""
     kind = options["kind"]
@@ -1330,6 +1370,9 @@ def _fast_convert(series: pl.Series, options: dict[str, Any]) -> tuple[pl.Series
     v = pl.col("v")
     present = v.is_not_null()
     if series.dtype == pl.String:
+        direct = _cast_first(series, kind, options, out_dtype)
+        if direct is not None:
+            return direct
         direct = _uniform_fast(series, kind, options)
         if direct is not None:
             value, failed = direct
@@ -1366,7 +1409,7 @@ def _fast_convert(series: pl.Series, options: dict[str, Any]) -> tuple[pl.Series
             rows = rows.filter(series.gather(rows).str.contains(_UNSURE))
     else:
         # A shape covers common text only: the rest goes to the per-value rules.
-        failed_out = pl.Series(failed_out.name, [False] * failed_out.len(), dtype=pl.Boolean)
+        failed_out = pl.repeat(False, failed_out.len(), dtype=pl.Boolean, eager=True).alias(failed_out.name)
     rows = pl.concat([rows, frame["miss"].arg_true()])
     if rows.len():
         redo, redo_failed = _per_value(series.gather(rows).to_list(), options)
@@ -1381,7 +1424,7 @@ def _failed_originals(series: pl.Series, failed: pl.Series) -> pl.Series:
         return series.to_frame("v").select(
             pl.when(failed).then(pl.col("v")).otherwise(None)
         ).to_series()
-    out = pl.Series([None] * series.len(), dtype=pl.String)
+    out = pl.repeat(None, series.len(), dtype=pl.String, eager=True)
     rows = failed.arg_true()
     if rows.len():
         out = out.scatter(rows, [_original(value) for value in series.gather(rows).to_list()])

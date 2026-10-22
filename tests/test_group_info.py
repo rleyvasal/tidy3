@@ -107,3 +107,16 @@ def test_group_trim_drops_unused_levels_from_the_column_too(backend):
     # dplyr: levels(group_trim(...)$species) is c("Adelie", "Gentoo").
     assert trimmed.collect()["species"].dtype == pl.Enum(["Adelie", "Gentoo"])
     assert group_size(trimmed) == [1, 2]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_rowwise_without_keys_has_one_group_per_row(backend):
+    from tidy3 import rowwise
+
+    frame = tidy({"x": [5, 6, 7]}, backend=backend) >> rowwise()
+    # dplyr: group_data(rowwise(df))$.rows is list(1L, 2L, 3L).
+    assert group_data(frame).collect()[".rows"].to_list() == [[1], [2], [3]]
+    assert group_rows(frame) == [[1], [2], [3]]
+    assert group_size(frame) == [1, 1, 1]
+    assert n_groups(frame) == 3
+    assert group_indices(frame) == [1, 2, 3]

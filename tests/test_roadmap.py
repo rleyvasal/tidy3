@@ -668,3 +668,14 @@ def test_aliases_name_themselves_in_errors(backend):
         as_string("x", true=1)
     with pytest.raises(TypeError, match=r"as_character\(\) false must be a string"):
         as_character("x", false=None)
+
+
+def test_rowwise_mutate_keeps_aggregates_per_row():
+    from tidy3 import c_across, mean, n, rowwise, sum
+
+    frame = tidy(pl.DataFrame({"x": [1.0, 3.0, None], "y": [10, 20, 30]})) >> rowwise()
+    out = (frame >> mutate(m=mean("x"), k=n(), total=sum(c_across(["x", "y"])), twice=col("y") * 2)).collect()
+    assert out["m"].to_list() == [1.0, 3.0, None]
+    assert out["k"].to_list() == [1, 1, 1]
+    assert out["total"].to_list() == [11.0, 23.0, 30.0]
+    assert out["twice"].to_list() == [20, 40, 60]

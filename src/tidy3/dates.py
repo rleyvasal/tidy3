@@ -726,19 +726,22 @@ def _excel_needs_python(series: pl.Series, date_system: str, include_time: bool)
 
 def _excel_vector_dates(series: pl.Series, date_system: str) -> pl.Series:
     """Calendar dates for in-range serials, including the 1900 leap-day gap."""
-    origin = _EXCEL_ORIGINS[date_system]
-    number = pl.col("n").cast(pl.Float64)
-    # The 0.001 second bias matches janitor's day boundary.
-    days = ((number * 86400.0 + 0.001) / 86400.0).floor()
-    shifted = (
-        pl.when(days.is_finite() & (days != 60))
-        .then(pl.when(days < 60).then(days + 1).otherwise(days))
-        .otherwise(None)
-        .cast(pl.Int64)
-    )
+    import numpy as np
+
+    number = series.cast(pl.Float64).to_numpy()  # missing values become NaN
+    with np.errstate(invalid="ignore"):
+        # The 0.001 second bias matches janitor's day boundary. NumPy divides
+        # exactly, as R does; Polars multiplies by 1/86400, which moves
+        # serials such as -194.0000000115741 to the next day.
+        days = np.floor((number * 86400.0 + 0.001) / 86400.0)
+    valid = np.isfinite(days) & (days != 60)
+    days = np.where(days < 60, days + 1, days)
+    epoch = (_EXCEL_ORIGINS[date_system] - date(1970, 1, 1)).days
+    since_epoch = np.where(valid, days + epoch, 0).astype(np.int32)
     return (
-        pl.DataFrame({"n": series})
-        .select((pl.lit(origin) + pl.duration(days=shifted)).cast(pl.Date).alias("d"))
+        pl.Series("d", since_epoch)
+        .to_frame()
+        .select(pl.when(pl.Series(valid)).then(pl.col("d")).cast(pl.Date))
         .to_series()
     )
 

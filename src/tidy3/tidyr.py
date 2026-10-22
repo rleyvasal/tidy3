@@ -1949,20 +1949,29 @@ def separate(
             )
 
         sentinel = "\x1f"
-        source = pl.col(column).cast(pl.String).str.replace_all(sep, sentinel)
+        text = pl.col(column).cast(pl.String)
+        # A separator with no regex syntax splits directly; a regex is first
+        # rewritten to a sentinel character that Polars can split on.
+        literal = bool(sep) and not re.search(r"[\\.^$|?*+()\[\]{}]", sep)
+        source = text if literal else text.str.replace_all(sep, sentinel)
+        piece_sep = sep if literal else sentinel
         if extra == "merge":
-            split = source.str.splitn(sentinel, len(names))
+            split = source.str.splitn(piece_sep, len(names))
+        elif literal and fill != "left":
+            split = source.str.split_exact(piece_sep, len(names) - 1)
         else:
-            split = source.str.split(sentinel)
+            split = source.str.split(piece_sep)
         schema = tf._lf.collect_schema()
         expressions: dict[str, pl.Expr] = {}
         for index, name in enumerate(names):
             if name is None:
                 continue
             if extra == "merge":
-                value = split.struct.field(f"field_{index}").str.replace_all(
-                    sentinel, sep, literal=True
-                )
+                value = split.struct.field(f"field_{index}")
+                if not literal:
+                    value = value.str.replace_all(sentinel, sep, literal=True)
+            elif literal and fill != "left":
+                value = split.struct.field(f"field_{index}")
             else:
                 if fill == "left":
                     value = (
@@ -2681,9 +2690,18 @@ def _pl_separate_wider_delim(tf, column, names, delim, too_few, too_many, names_
     source = _one_column(tf, column, "separate_wider_delim")
     width = len(names)
     parts = pl.col(source).str.split(delim)
-    count = parts.list.len().cast(pl.Int64)  # signed: width - count may be negative
-    too_short = _pl_count(tf, pl.col(source).is_not_null() & (count < width)) if too_few == "error" else 0
-    too_long = _pl_count(tf, pl.col(source).is_not_null() & (count > width)) if too_many == "error" else 0
+    # Counting delimiters avoids building a list per row; both checks share one query.
+    count = (
+        (pl.col(source).str.count_matches(delim, literal=True) + 1) if delim else parts.list.len()
+    ).cast(pl.Int64)  # signed: width - count may be negative
+    present = pl.col(source).is_not_null()
+    checks = {}
+    if too_few == "error":
+        checks["short"] = (present & (count < width)).sum()
+    if too_many == "error":
+        checks["long"] = (present & (count > width)).sum()
+    found = tf._lf.select(**checks).collect().row(0, named=True) if checks else {}
+    too_short, too_long = int(found.get("short") or 0), int(found.get("long") or 0)
     if too_short:
         raise ValueError(
             f"separate_wider_delim() expected {width} pieces in each value "
@@ -2696,6 +2714,18 @@ def _pl_separate_wider_delim(tf, column, names, delim, too_few, too_many, names_
             f"of {source!r}; {too_long} value(s) had more. "
             'Use too_many="drop" or "merge".'
         )
+    if delim and too_few != "align_end":
+        # Fields come straight from the split: missing ones are null, and
+        # splitn keeps the rest of the text in the last field for "merge".
+        fields = (
+            pl.col(source).str.splitn(delim, width) if too_many == "merge"
+            else pl.col(source).str.split_exact(delim, width - 1)
+        )
+        new = [
+            fields.struct.field(f"field_{index}").alias(_output_name(source, name, names_sep))
+            for index, name in enumerate(names)
+        ]
+        return _pl_place(tf, source, new, not cols_remove)
     shift = (pl.lit(width) - count).clip(lower_bound=0) if too_few == "align_end" else pl.lit(0)
     new = []
     for index, name in enumerate(names):

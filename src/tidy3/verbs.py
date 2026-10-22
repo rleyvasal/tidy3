@@ -1096,7 +1096,12 @@ def mutate(
                 exprs = {}
                 for name, value in stage.items():
                     with output_column(name):
-                        exprs[name] = _pl_expr(value).over(marker)
+                        compiled = _pl_expr(value)
+                    # A one-row window changes only aggregates and window
+                    # functions; element-wise and horizontal work skips it.
+                    if not isinstance(value, Expr) or _requires_group_window(value.node):
+                        compiled = compiled.over(marker)
+                    exprs[name] = compiled
                 lf = lf.with_columns(**exprs)
             lf = lf.drop(marker)
         else:
@@ -2370,15 +2375,22 @@ def _grouped_parts(
     names, table = _group_table(tf, None if not cols else names)
     # One materialized copy of the frame, in its own backend.
     frame = tf._pdf.reset_index(drop=True) if tf._backend == "pandas" else tf._lf.collect()
+    if tf._backend != "pandas" and table:
+        import numpy as np
+
+        # One gather in group order, then zero-copy slices: cheaper than a
+        # gather per group on wide frames.
+        ordered = frame.gather(pl.Series(np.concatenate([p for _, p in table]), dtype=pl.Int64))
+        starts = np.concatenate([[0], np.cumsum([len(p) for _, p in table])])
     parts: list[tuple[dict[str, Any], Any, tuple[int, ...]]] = []
-    for key_tuple, positions in table:
+    for index, (key_tuple, positions) in enumerate(table):
         subset = (
             frame.iloc[positions].reset_index(drop=True)
             if tf._backend == "pandas"
-            else frame[positions.tolist()]
+            else ordered.slice(int(starts[index]), len(positions))
         )
         key_map = dict(zip(names, key_tuple))
-        row_positions = tuple(int(index) for index in positions)
+        row_positions = tuple(positions.tolist())
         parts.append((key_map, tidy(subset, backend=tf._backend), row_positions))
     return parts
 
@@ -3685,6 +3697,18 @@ def _polars_join_by(
             lf = _pl_guard_no_rows(lf, violations, message)
         return tf._with_lf(lf, groups=tf._groups)
 
+    if how in {"left", "inner"}:
+        # dplyr's order is x's rows, each with its matches in y's order. Sort
+        # only the matched id pairs, then attach both sides by row id: no
+        # union of unmatched rows and no sort of the whole result.
+        pairs = candidates.select(left_id, right_id).sort([left_id, right_id])
+        combined = left.join(
+            pairs, on=left_id, how=how, maintain_order="left_right"
+        ).join(y, on=right_id, how="left", maintain_order="left")
+        return _join_by_output(
+            tf, combined, guards, equality, left_columns, right_columns,
+            right_names, keep, suffix,
+        )
     matched_right = candidates.select(right_id).unique()
     if narrow_rolling:
         candidates = (
@@ -3719,7 +3743,24 @@ def _polars_join_by(
     # dplyr's order for every join: x's rows in order, each with its matches
     # in y's order, then y's unmatched rows (right and full joins) in order.
     combined = combined.sort([left_id, right_id], nulls_last=True, maintain_order=True)
+    return _join_by_output(
+        tf, combined, guards, equality, left_columns, right_columns,
+        right_names, keep, suffix,
+    )
 
+
+def _join_by_output(
+    tf: Any,
+    combined: pl.LazyFrame,
+    guards: list[tuple[pl.LazyFrame, str]],
+    equality: list[Any],
+    left_columns: list[str],
+    right_columns: list[str],
+    right_names: dict[str, str],
+    keep: bool,
+    suffix: tuple[str, str],
+) -> Any:
+    """Name and order the joined columns as dplyr does, then add the guards."""
     equality_map = {condition.left: condition.right for condition in equality}
     equality_right = {condition.right for condition in equality}
     left_out, right_out = _pe().join_names(
@@ -3866,9 +3907,26 @@ def _mutating_join(
 ) -> Verb:
     def _apply(tf):
         if isinstance(on, JoinSpec):
-            return _join_by_operation(tf, right, on, how, kwargs)
-        r = _right_frame(right, tf._backend)
-        keys = _join_keys(tf._pdf if tf._backend == "pandas" else tf._lf, r, on)
+            # Polars only: the pandas join_by path keeps nullable integer
+            # columns that a plain pandas merge would turn into floats.
+            if tf._backend == "pandas":
+                return _join_by_operation(tf, right, on, how, kwargs)
+            r = _right_frame(right, tf._backend)
+            keys = _equality_keys(on, r, kwargs)
+            if keys is not None:
+                # Unequal key types (an empty y has Null columns) need the
+                # general path, which reconciles them.
+                left_types, right_types = tf._lf.collect_schema(), r.collect_schema()
+                if any(left_types[c.left] != right_types[c.right] for c in on.equality):
+                    keys = None
+            if keys is None:
+                return _join_by_operation(tf, right, on, how, kwargs)
+            renames = {c.right: c.left for c in on.equality if c.right != c.left}
+            if renames:
+                r = r.rename(renames)
+        else:
+            r = _right_frame(right, tf._backend)
+            keys = _join_keys(tf._pdf if tf._backend == "pandas" else tf._lf, r, on)
         if set(kwargs) <= {"suffix"}:
             suffix = _join_suffix(kwargs.get("suffix"))
             if tf._backend == "pandas":
@@ -3911,6 +3969,29 @@ def _mutating_join(
         return _join_by_operation(tf, r, join_by(*key_names), how, kwargs)
 
     return Verb(_apply, verb_name)
+
+
+def _equality_keys(spec: JoinSpec, right: Any, kwargs: dict[str, Any]) -> list[str] | None:
+    """Left key names when ``join_by`` is plain equality with default options.
+
+    Such a join is the same as ``by=``, which joins in one native step; the
+    general ``join_by`` path matches row ids and reattaches unmatched rows.
+    None keeps the general path: inequalities, options other than
+    ``suffix``, repeated keys, or a right key whose rename would collide.
+    """
+    if set(kwargs) - {"suffix"} or spec.inequality:
+        return None
+    lefts = [condition.left for condition in spec.equality]
+    rights = [condition.right for condition in spec.equality]
+    if len(set(lefts)) != len(lefts) or len(set(rights)) != len(rights):
+        return None
+    columns = set(right.columns if not isinstance(right, pl.LazyFrame) else right.collect_schema().names())
+    renamed = {r: l for l, r in zip(lefts, rights) if l != r}
+    if set(renamed) & set(renamed.values()):
+        return None
+    if any(target in columns and target not in rights for target in renamed.values()):
+        return None
+    return lefts
 
 
 def _join_argument(on: Any, by: Any) -> Any:

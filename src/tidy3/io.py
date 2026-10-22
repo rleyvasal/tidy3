@@ -222,6 +222,7 @@ def _scan_table(
     locale: Any,
     allow_decode: bool,
     kwargs: dict[str, Any],
+    materialize: bool = False,
 ) -> TidyFrame:
     if na is not None and "null_values" in kwargs:
         raise TypeError("pass na= or null_values=, not both")
@@ -276,6 +277,9 @@ def _scan_table(
         if polars_encoding != "utf8":
             options["encoding"] = polars_encoding
         frame = pl.scan_csv(source, **options)
+        if materialize:
+            # read_* parse the file once; guessing then samples memory.
+            frame = frame.collect().lazy()
     if trim_ws:
         frame = _trim_strings(frame, {id} if id else set())
         frame = _null_after_trim(frame, na, {id} if id else set())
@@ -384,6 +388,7 @@ def read_csv(
         strict=strict,
         locale=locale,
         allow_decode=True,
+        materialize=True,
         kwargs=kwargs,
     )
     return frame.compute()
