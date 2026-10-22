@@ -48,11 +48,14 @@ def full_seq(x: Any, period: float, tol: float = 1e-6) -> Any:
         raise ValueError("full_seq() period must be a positive number")
     if isinstance(x, str):
         return FullSeq(x, float(period), float(tol))
-    return _full_seq_values(list(x), period, tol)
+    # A Series or array goes to NumPy directly; a missing value becomes NaN,
+    # which the checks below reject as before.
+    values = x.to_numpy() if hasattr(x, "to_numpy") else list(x)
+    return _full_seq_values(values, period, tol)
 
 
-def _full_seq_values(values: list[Any], period: float, tol: float) -> list[Any]:
-    if not values:
+def _full_seq_values(values: Any, period: float, tol: float) -> list[Any]:
+    if len(values) == 0:
         return []
     fast = _full_seq_array(values, period, tol)
     if fast is not None:

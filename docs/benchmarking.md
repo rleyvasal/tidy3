@@ -85,6 +85,17 @@ The command writes JSON and Markdown, ranked by excess time (tidy3 minus raw
 Polars). `--case` and `--family` select a subset. The run stops if any export
 or method is unclassified.
 
+The baseline is the best raw Polars. Each recipe is also run on
+`df.lazy()`; when that gives the same result, both forms are timed and the
+faster one counts, so a lazy tidy3 plan is not compared with an eager recipe
+that reads every column. `raw_mode` in the JSON says which one won. Both
+sides receive the same input: vector helpers such as `str_sort` and
+`full_seq` take a Series built outside the timed region. Every recipe does
+the operation's work, including the checks tidy3 makes (`full_seq` checks
+the grid; `problems` parses and lists failures). Nested results are compared
+column by column after flattening lists and structs, which keeps the
+correctness check fast at a million rows.
+
 `tests/test_bench_api.py` checks that classification is complete and that
 every case matches Polars on a 24-row table. The CI speed guards stay
 regression alarms; this command is the parity measurement. It is not part of

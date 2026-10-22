@@ -173,10 +173,11 @@ def same(left, right) -> None:
     """Fail unless both results are the same complete value."""
     left, right = _box(left), _box(right)
     if isinstance(left, pl.DataFrame) and isinstance(right, pl.DataFrame):
-        assert_frame_equal(left, right, check_row_order=True, check_column_order=True)
+        _same_frame(left, right)
         return
     if isinstance(left, pl.Series) and isinstance(right, pl.Series):
-        assert_series_equal(left, right, check_names=True)
+        if left.name != right.name or not _flat_equal(left.to_frame("v"), right.to_frame("v")):
+            assert_series_equal(left, right, check_names=True)
         return
     if isinstance(left, np.ndarray) and isinstance(right, np.ndarray):
         if left.shape != right.shape:
@@ -195,11 +196,91 @@ def same(left, right) -> None:
     if isinstance(left, list) and isinstance(right, list) and left and isinstance(left[0], pl.DataFrame):
         if len(left) != len(right):
             raise AssertionError(f"{len(left)} frames != {len(right)} frames")
-        for index, (one, other) in enumerate(zip(left, right)):
-            assert_frame_equal(one, other, check_row_order=True, check_column_order=True)
+        for one, other in zip(left, right):
+            _same_frame(one, other)
         return
     if left != right:
         raise AssertionError(f"{left!r} != {right!r}")
+
+
+def _same_frame(left: pl.DataFrame, right: pl.DataFrame) -> None:
+    """Fail unless the frames are equal; fast on large nested columns.
+
+    Polars compares list-of-struct columns very slowly (minutes on a million
+    rows), so nested columns are compared flattened. The detailed
+    assert_frame_equal runs only to explain a difference.
+    """
+    if left.schema == right.schema and left.height == right.height and _flat_equal(left, right):
+        return
+    assert_frame_equal(left, right, check_row_order=True, check_column_order=True)
+
+
+def _flat_equal(left: pl.DataFrame, right: pl.DataFrame) -> bool:
+    flat_left = dict(item for name in left.columns for item in _flat(name, left[name]))
+    flat_right = dict(item for name in right.columns for item in _flat(name, right[name]))
+    return flat_left.keys() == flat_right.keys() and all(
+        flat_left[key].equals(flat_right[key], check_dtypes=True, check_names=False, null_equal=True)
+        for key in flat_left
+    )
+
+
+def _flat(name: str, series: pl.Series):
+    """A column as flat columns: list lengths and values, struct fields."""
+    dtype = series.dtype
+    if isinstance(dtype, pl.Array):
+        series = series.cast(pl.List(dtype.inner))
+        dtype = series.dtype
+    if isinstance(dtype, pl.List):
+        yield f"{name}[len]", series.list.len()
+        yield from _flat(f"{name}[]", series.explode(empty_as_null=False, keep_nulls=False))
+    elif isinstance(dtype, pl.Struct):
+        yield f"{name}[null]", series.is_null()
+        for field in dtype.fields:
+            yield from _flat(f"{name}.{field.name}", series.struct.field(field.name))
+    else:
+        yield name, series
+
+
+def _lazy_native(case: Case, df: pl.DataFrame, extra, expected):
+    """The raw recipe on ``df.lazy()``, collected, when it gives the same result.
+
+    An eager recipe reads every column at each step; the lazy form lets
+    Polars push projections and filters down, as tidy3's lazy plan does.
+    Recipes that need eager data (``df["x"]``, ``df.height``) stay eager.
+    """
+    def run(frame, extra):
+        with warnings.catch_warnings():
+            # Recipes that read .columns on a LazyFrame warn about it; harmless here.
+            warnings.simplefilter("ignore", pl.exceptions.PerformanceWarning)
+            result = case.native(frame.lazy(), extra)
+            return result.collect() if isinstance(result, pl.LazyFrame) else result
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = case.native(df.lazy(), extra)
+            if not isinstance(result, pl.LazyFrame):
+                return None
+            same(expected, result.collect())
+    except Exception:
+        return None
+    return run
+
+
+def _lazy_tidy(case: Case, df: pl.DataFrame, extra, expected):
+    """The tidy3 call on ``df.lazy()``, when it gives the same result."""
+    def run(frame, extra):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", pl.exceptions.PerformanceWarning)
+            return case.tidy(frame.lazy(), extra)
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            same(expected, case.tidy(df.lazy(), extra))
+    except Exception:
+        return None
+    return run
 
 
 def _cleanup(extra) -> None:
@@ -216,8 +297,17 @@ def run_case(case: Case, df: pl.DataFrame, *, repeat: int = 3, warmup: int = 1) 
         raise ValueError("repeat must be positive and warmup non-negative")
     extra = case.prepare(df) if case.prepare else None
     try:
-        same(case.tidy(df, extra), case.native(df, extra))
+        expected = case.tidy(df, extra)
+        same(expected, case.native(df, extra))
         functions = {"tidy3": case.tidy, "raw_polars": case.native}
+        lazy = _lazy_native(case, df, extra, expected)
+        if lazy is not None:
+            functions["raw_polars_lazy"] = lazy
+        # The same choice for tidy3: a case that builds its inputs from df
+        # (df.select(...), a filtered right table) fuses them when df is lazy.
+        lazy_tidy = _lazy_tidy(case, df, extra, expected)
+        if lazy_tidy is not None:
+            functions["tidy3_lazy"] = lazy_tidy
         for _ in range(warmup):
             for function in functions.values():
                 function(df, extra)
@@ -230,7 +320,11 @@ def run_case(case: Case, df: pl.DataFrame, *, repeat: int = 3, warmup: int = 1) 
                 samples[name].append((time.perf_counter() - start) * 1000)
                 del result
         best = {name: min(values) for name, values in samples.items()}
-        raw = best["raw_polars"]
+        # Each side's best form: its recipe on the eager table or on df.lazy().
+        raw_mode = "lazy" if best.get("raw_polars_lazy", float("inf")) < best["raw_polars"] else "eager"
+        raw = min(best["raw_polars"], best.get("raw_polars_lazy", float("inf")))
+        tidy_mode = "lazy" if best.get("tidy3_lazy", float("inf")) < best["tidy3"] else "eager"
+        best["tidy3"] = min(best["tidy3"], best.get("tidy3_lazy", float("inf")))
         info = classification()
         methods = [name for name, owner in info["methods"].items() if owner == case.name]
         return {
@@ -241,6 +335,8 @@ def run_case(case: Case, df: pl.DataFrame, *, repeat: int = 3, warmup: int = 1) 
             "rows": df.height,
             "tidy3_ms": best["tidy3"],
             "raw_polars_ms": raw,
+            "raw_mode": raw_mode,
+            "tidy3_mode": tidy_mode,
             "tidy3_over_polars": (best["tidy3"] / raw) if raw else None,
             "excess_ms": best["tidy3"] - raw,
             "median_ms": {name: statistics.median(values) for name, values in samples.items()},
@@ -689,7 +785,16 @@ def _cases() -> list[Case]:
         return t.problems(frame).collect()
 
     def raw_problems(df, extra=None):
-        return pl.DataFrame(schema={"row": pl.Int64, "column": pl.String, "original": pl.String, "expected": pl.String})
+        # Parse, then list the present values that did not parse, as problems() does.
+        parsed = df.with_row_index("row", offset=1).with_columns(
+            value=pl.col("date").str.to_date("%Y-%m-%d", strict=False)
+        )
+        return parsed.filter(pl.col("date").is_not_null() & pl.col("value").is_null()).select(
+            pl.col("row").cast(pl.Int64),
+            pl.lit("date").alias("column"),
+            pl.col("date").alias("original"),
+            pl.lit("date").alias("expected"),
+        )
 
     add(Case("problems", "convert", ["problems"], tidy_problems, raw_problems))
 
@@ -711,7 +816,7 @@ def _cases() -> list[Case]:
     col("wday", "dates", ["wday"], lambda t, df: t.wday("day_d"), lambda df: (pl.col("day_d").dt.weekday() % 7 + 1).cast(pl.Int64))
     col("hour", "dates", ["hour"], lambda t, df: t.hour("at"), lambda df: pl.col("at").dt.hour().cast(pl.Int64))
     col("minute", "dates", ["minute"], lambda t, df: t.minute("at"), lambda df: pl.col("at").dt.minute().cast(pl.Int64))
-    col("second", "dates", ["second"], lambda t, df: t.second("at"), lambda df: pl.col("at").dt.second().cast(pl.Float64))
+    col("second", "dates", ["second"], lambda t, df: t.second("at"), lambda df: pl.col("at").dt.second(fractional=True))
     col("days_in_month", "dates", ["days_in_month"], lambda t, df: t.days_in_month("day_d"), lambda df: pl.col("day_d").dt.month_end().dt.day().cast(pl.Int64))
     col("floor_date", "dates", ["floor_date"], lambda t, df: t.floor_date("day_d", "month"), lambda df: pl.col("day_d").dt.truncate("1mo"))
     col("ceiling_date", "dates", ["ceiling_date"], lambda t, df: t.ceiling_date("day_d", "month"), lambda df: pl.col("day_d").dt.truncate("1mo").dt.offset_by("1mo"))
@@ -810,44 +915,48 @@ def _cases() -> list[Case]:
 
     add(Case("str_glue_data", "string", ["str_glue_data"], tidy_glue_data, raw_glue_data))
 
+    # Vector helpers: both sides take the same Series, built outside the
+    # timed region, and return a Python list.
+    def column(name):
+        return lambda df: df[name]
+
     def tidy_sort(df, extra=None):
         import tidy3 as t
 
-        return t.str_sort(df["code"].to_list())
+        return t.str_sort(extra)
 
-    add(Case("str_sort", "string", ["str_sort"], tidy_sort, lambda df, extra=None: df["code"].sort().to_list()))
+    add(Case("str_sort", "string", ["str_sort"], tidy_sort, lambda df, extra=None: extra.sort().to_list(), prepare=column("code")))
 
     def tidy_order(df, extra=None):
         import tidy3 as t
 
-        return t.str_order(df["code"].to_list())
+        return t.str_order(extra)
 
-    add(Case("str_order", "string", ["str_order"], tidy_order, lambda df, extra=None: (df["code"].arg_sort() + 1).to_list()))
+    add(Case("str_order", "string", ["str_order"], tidy_order, lambda df, extra=None: (extra.arg_sort() + 1).to_list(), prepare=column("code")))
 
     def tidy_unique(df, extra=None):
         import tidy3 as t
 
-        return t.str_unique(df["species"].to_list())
+        return t.str_unique(extra)
 
-    add(Case("str_unique", "string", ["str_unique"], tidy_unique, lambda df, extra=None: df["species"].unique(maintain_order=True).to_list()))
+    add(Case("str_unique", "string", ["str_unique"], tidy_unique, lambda df, extra=None: extra.unique(maintain_order=True).to_list(), prepare=column("species")))
 
     def tidy_subset(df, extra=None):
         import tidy3 as t
 
-        return t.str_subset(df["species"].to_list(), "el")
+        return t.str_subset(extra, "el")
 
-    add(Case("str_subset", "string", ["str_subset"], tidy_subset, lambda df, extra=None: df.filter(pl.col("species").str.contains("el", literal=True))["species"].to_list()))
+    add(Case("str_subset", "string", ["str_subset"], tidy_subset, lambda df, extra=None: extra.filter(extra.str.contains("el", literal=True)).to_list(), prepare=column("species")))
 
     def tidy_which(df, extra=None):
         import tidy3 as t
 
-        return t.str_which(df["species"].to_list(), "el")
+        return t.str_which(extra, "el")
 
     def raw_which(df, extra=None):
-        hits = df.with_row_index("row").filter(pl.col("species").str.contains("el", literal=True))
-        return (hits["row"] + 1).to_list()
+        return (extra.str.contains("el", literal=True).arg_true() + 1).to_list()
 
-    add(Case("str_which", "string", ["str_which"], tidy_which, raw_which))
+    add(Case("str_which", "string", ["str_which"], tidy_which, raw_which, prepare=column("species")))
 
     def tidy_split_1(df, extra=None):
         import tidy3 as t

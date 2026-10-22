@@ -48,9 +48,23 @@ def input_dtype(expr: Any) -> Any:
     if frame is None:
         return None
     try:
-        return frame.select(expr.alias("__tidy3_dtype")).collect_schema()["__tidy3_dtype"]
+        if expr.meta.is_column():
+            # A plain column: read the frame's schema, resolved once per frame.
+            schema = frame._schema() if hasattr(frame, "_schema") else _schema_of(frame)
+            return schema.get(expr.meta.output_name())
+        lazy = frame._lf if hasattr(frame, "_lf") else frame
+        return lazy.select(expr.alias("__tidy3_dtype")).collect_schema()["__tidy3_dtype"]
     except Exception:
         return None
+
+
+_LAST_SCHEMA: list[Any] = [None, None]  # (frame, schema): the frame keeps its id alive
+
+
+def _schema_of(frame: Any) -> Any:
+    if _LAST_SCHEMA[0] is not frame:
+        _LAST_SCHEMA[0], _LAST_SCHEMA[1] = frame, frame.collect_schema()
+    return _LAST_SCHEMA[1]
 
 
 class NameRef(str):
@@ -1015,10 +1029,9 @@ def _compile_pl(node: tuple) -> Any:
             return value.shift(periods, fill_value=kwargs["default"])
         if name == "cummean":
             value = args[0]
-            result = (
-                value.cum_sum()
-                / value.is_not_null().cast(pl.UInt32).cum_sum()
-            )
+            # Up to the first missing value every value is present, so the
+            # running count is the row number; later rows become missing.
+            result = value.cum_sum() / pl.int_range(1, pl.len() + 1, dtype=pl.UInt32)
             missing_seen = value.is_null().cast(pl.UInt8).cum_max() > 0
             return pl.when(missing_seen).then(None).otherwise(result)
         if name == "cumall":

@@ -89,7 +89,7 @@ class Selector:
 
 
 def _frame_schema(tf: Any) -> tuple[list[str], Mapping[str, Any]]:
-    schema = tf._lf.collect_schema()
+    schema = tf._schema() if hasattr(tf, "_schema") else tf._lf.collect_schema()
     return schema.names(), schema
 
 

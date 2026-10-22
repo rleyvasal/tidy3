@@ -437,6 +437,13 @@ def _row_expr(
             return pl.lit(None, dtype=pl.Float64)
         return pl.lit(0)
     values = [_nullify_nan(arg) for arg in args]
+    if not min_count:
+        # One horizontal kernel: ignore_nulls=False is R's na.rm = FALSE
+        # (any missing value makes the row missing); a row with no values
+        # has a missing mean and a zero sum.
+        if operation == "mean":
+            return pl.mean_horizontal(values, ignore_nulls=na_rm)
+        return pl.sum_horizontal(values, ignore_nulls=na_rm).cast(pl.Float64)
     present = pl.sum_horizontal(
         [value.is_not_null().cast(pl.Int64) for value in values]
     )

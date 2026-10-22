@@ -206,3 +206,19 @@ def test_with_polars_escape():
     df = pl.DataFrame({"x": [1, 2, 3]})
     out = tidy(df).with_polars(lambda lf: lf.filter(pl.col("x") > 1)).collect()
     assert out.height == 2
+
+
+@pytest.mark.parametrize("how", ["left", "inner", "right", "full", "semi", "anti"])
+def test_small_inequality_join_matches_the_ie_join_path(how):
+    import tidy3 as t
+
+    left = pl.DataFrame({"k": [5, None, 2, 9, 2], "v": list("abcde")})
+    right = pl.DataFrame({"lo": [1, 2, None, 6], "hi": [3, 9, 4, 6], "tag": list("wxyz")})
+    spec = t.join_by(t.between("k", "lo", "hi"))
+    verb = getattr(t, f"{how}_join")
+    # An eager y of up to 64 rows runs as a nested loop; a lazy y as an IE join.
+    small = (tidy(left) >> verb(right, by=spec)).collect()
+    lazy = (tidy(left) >> verb(tidy(right.lazy()), by=spec)).collect()
+    assert small.equals(lazy)
+    big = pl.concat([right] * 20)
+    assert (tidy(left) >> verb(big, by=spec)).collect().equals((tidy(left) >> verb(tidy(big.lazy()), by=spec)).collect())

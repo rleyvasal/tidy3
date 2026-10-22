@@ -197,6 +197,8 @@ class TidyFrame:
         "_problems",
         # Steps whose plan holds values read from the data (note_data_read).
         "_data_reads",
+        # The plan's schema, resolved once: a frame's plan never changes.
+        "_schema_cache",
     )
 
     def __init__(
@@ -227,10 +229,17 @@ class TidyFrame:
         self._select_base = select_base
         self._problems = problems
         self._data_reads = tuple(data_reads)
+        self._schema_cache = None
 
     @property
     def _lf(self) -> pl.LazyFrame:
         return self._data
+
+    def _schema(self) -> pl.Schema:
+        """The plan's schema, resolved on first use (Polars re-resolves each call)."""
+        if self._schema_cache is None:
+            self._schema_cache = self._data.collect_schema()
+        return self._schema_cache
 
     # ── EDA / inspection (schema-first; row counts materialize lazily) ──
 

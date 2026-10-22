@@ -225,7 +225,11 @@ def test_join_by_polars_plan_remains_lazy():
         right, by=join_by(between("point", "lower", "upper"))
     )
     assert isinstance(result._lf, pl.LazyFrame)
-    assert "IEJOIN JOIN" in result.explain()
+    # A small in-memory y runs as a nested loop; a larger or lazy y as an IE join.
+    assert "NESTED LOOP JOIN" in result.explain()
+    bigger = {"lower": list(range(0, 200, 2)), "upper": list(range(1, 201, 2))}
+    assert "IEJOIN JOIN" in (left >> inner_join(bigger, by=join_by(between("point", "lower", "upper")))).explain()
+    assert "IEJOIN JOIN" in (left >> inner_join(tidy(pl.LazyFrame(right)), by=join_by(between("point", "lower", "upper")))).explain()
 
 
 def test_phase4_method_api_matches_pipe_api():

@@ -181,7 +181,7 @@ class Verb:
         from tidy3.frame import _DATA_READS, _merge_reads
 
         token = _FRAME_COLUMNS.set(columns)
-        frame_token = _COMPILE_FRAME.set(other._lf)
+        frame_token = _COMPILE_FRAME.set(other)  # its schema is cached
         reads: list[str] = []
         reads_token = _DATA_READS.set(reads)
         try:
@@ -189,7 +189,8 @@ class Verb:
             if isinstance(result, TidyFrame):
                 # Resolve the lazy plan's schema (no rows are read) so a
                 # missing column fails here, naming this verb, not at display.
-                result._lf.collect_schema()
+                # The next verb reuses it.
+                result._schema()
                 # Carry forward what this verb and its input read from data.
                 result._data_reads = _merge_reads(
                     other._data_reads, result._data_reads, reads
@@ -981,7 +982,8 @@ def mutate(
                 lf, stage, stage_ordered = prepare_polars(
                     tf, lf, stage, [marker], sort_groups=False
                 )
-                _COMPILE_FRAME.set(lf)  # later stages see earlier columns
+                # later stages see earlier columns; the first reuses tf's cached schema
+                _COMPILE_FRAME.set(tf if lf is tf._lf else lf)
                 produced_ordered.update(stage_ordered)
                 for name, value in stage.items():
                     if isinstance(value, Expr):
@@ -1003,7 +1005,8 @@ def mutate(
                 lf, stage, stage_ordered = prepare_polars(
                     tf, lf, stage, groups, sort_groups=not transient
                 )
-                _COMPILE_FRAME.set(lf)  # later stages see earlier columns
+                # later stages see earlier columns; the first reuses tf's cached schema
+                _COMPILE_FRAME.set(tf if lf is tf._lf else lf)
                 produced_ordered.update(stage_ordered)
                 cached, stage, cache_columns = (
                     _aggregate_cache_plan(stage, lf.collect_schema().names())
@@ -1060,6 +1063,9 @@ def mutate(
             before=before,
             after=after,
         )
+        if ordered == _frame_columns(result):
+            # with_columns already put new columns last: no select to add.
+            return result
         return tf._with_lf(
             lf.select(ordered),
             groups=None if transient else tf._groups,
@@ -1226,7 +1232,7 @@ def rename(*specs: Any, **kwargs: str) -> Verb:
 
 
 def _frame_columns(tf: Any) -> list[str]:
-    return tf._lf.collect_schema().names()
+    return tf._schema().names() if hasattr(tf, "_schema") else tf._lf.collect_schema().names()
 
 
 def relocate(
@@ -1742,12 +1748,22 @@ def _temp_column(columns: list[str], base: str) -> str:
     return name
 
 
+def _contiguous(positions: list[int]) -> bool:
+    """1-based positions that run up by one from a positive start."""
+    return positions[0] > 0 and all(b == a + 1 for a, b in zip(positions, positions[1:]))
+
+
 def slice(*rows: Any, by: Any = None) -> Verb:  # noqa: A001
     """Select 1-based row positions per group; negative positions exclude."""
     positions = _slice_positions(rows)
 
     def _apply(tf):
         groups, transient = _operation_groups(tf, by, "slice")
+        if not groups and positions and _contiguous(positions):
+            # slice(3, 4, 5) without groups is rows 3..5; rows past the end
+            # are dropped, as Polars' slice does.
+            lf = tf._lf.slice(positions[0] - 1, len(positions))
+            return tf._with_lf(lf, groups=None if transient else tf._groups)
         columns = _frame_columns(tf)
         row_name = _temp_column(columns, "__tidy3_slice_row")
         global_name = _temp_column([*columns, row_name], "__tidy3_slice_global")
@@ -3120,7 +3136,9 @@ def _polars_join_by(
     multiple: str,
     unmatched: str,
     relationship: str | None,
+    right_rows: int | None = None,
 ):
+    pairs_ordered = False
     left_columns = _frame_columns(tf)
     right_columns = right.collect_schema().names()
     for condition in spec.conditions:
@@ -3203,6 +3221,13 @@ def _polars_join_by(
             for condition in inequalities[1:]:
                 predicate = predicate & condition
             candidates = candidates.filter(predicate)
+    elif right_rows is not None and right_rows <= _NESTED_LOOP_ROWS:
+        # A small y: Polars runs a cross join with these filters as a nested
+        # loop, which keeps x's order, then y's, so the pairs need no sort.
+        candidates = match_left.join(match_right, how="cross", maintain_order="left_right").filter(
+            *inequalities
+        )
+        pairs_ordered = True
     else:
         candidates = match_left.join_where(match_right, *inequalities)
 
@@ -3276,7 +3301,21 @@ def _polars_join_by(
         # dplyr's order is x's rows, each with its matches in y's order. Sort
         # only the matched id pairs, then attach both sides by row id: no
         # union of unmatched rows and no sort of the whole result.
-        pairs = candidates.select(left_id, right_id).sort([left_id, right_id])
+        if pairs_ordered and not narrow_rolling and multiple == "all":
+            # The nested-loop candidates already hold both sides' columns in
+            # dplyr's order: an inner join is done; a left join adds back x's
+            # unmatched rows with one join on the row id.
+            matched = candidates.select(left_id, right_id, *right_names.values())
+            combined = candidates if how == "inner" else left.join(
+                matched, on=left_id, how="left", maintain_order="left_right"
+            )
+            return _join_by_output(
+                tf, combined, guards, equality, left_columns, right_columns,
+                right_names, keep, suffix,
+            )
+        pairs = candidates.select(left_id, right_id)
+        if not pairs_ordered:
+            pairs = pairs.sort([left_id, right_id])
         combined = left.join(
             pairs, on=left_id, how=how, maintain_order="left_right"
         ).join(y, on=right_id, how="left", maintain_order="left")
@@ -3390,6 +3429,25 @@ def _join_suffix(suffix: Any) -> tuple[str, str]:
     return pair  # type: ignore[return-value]
 
 
+# Up to this many rows in y, an inequality join runs as a nested loop; above
+# it, Polars' IE join (sort-based) is faster when few rows match.
+_NESTED_LOOP_ROWS = 64
+
+
+def _known_rows(frame: Any) -> int | None:
+    """The row count of an in-memory table, without running any query."""
+    if isinstance(frame, pl.DataFrame):
+        return frame.height
+    if isinstance(frame, dict):
+        lengths = {len(values) for values in frame.values() if hasattr(values, "__len__")}
+        return lengths.pop() if len(lengths) == 1 else None
+    try:
+        import pandas as pd
+    except ImportError:
+        return None
+    return len(frame) if isinstance(frame, pd.DataFrame) else None
+
+
 def _join_by_operation(
     tf: Any,
     right: Any,
@@ -3429,6 +3487,7 @@ def _join_by_operation(
         raise TypeError(
             f"unsupported join arguments: {sorted(params)}"
         )
+    right_rows = _known_rows(right)
     resolved = _right_frame(right)
     aligned, resolved, finish = _align_factor_keys(
         tf,
@@ -3447,6 +3506,7 @@ def _join_by_operation(
         multiple=multiple,
         unmatched=unmatched,
         relationship=relationship,
+        right_rows=right_rows,
     ))
 
 

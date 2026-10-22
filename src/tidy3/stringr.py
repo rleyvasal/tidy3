@@ -888,6 +888,68 @@ def _split_row(value: str, kw: dict, n: int | None) -> list[str]:
     return _re_split(_compiled(kw), value, n)
 
 
+def _map_distinct(series: pl.Series, fn: Any, dtype: Any) -> pl.Series:
+    """*fn* of each value, run once per distinct value. Missing stays missing.
+
+    These rules (textwrap, display width, every regex match) have no Polars
+    form, but each is a function of the value alone. Text columns repeat
+    values, so the Python work scales with the distinct values, not the rows.
+    """
+    present = series.drop_nulls()
+    distinct = present.unique(maintain_order=True)
+    if distinct.len() == present.len():
+        # Every value differs: a lookup would only add a join.
+        return series.map_elements(fn, return_dtype=dtype, skip_nulls=True)
+    results = pl.Series("value", [fn(value) for value in distinct.to_list()], dtype=dtype)
+    lookup = pl.DataFrame({"key": distinct, "value": results})
+    found = series.rename("key").to_frame().join(lookup, on="key", how="left", maintain_order="left")
+    return found["value"].alias(series.name)
+
+
+def _width_series(series: pl.Series) -> pl.Series:
+    """Display width: ASCII text is one column per character; the rest uses Unicode rules."""
+    widths = series.str.len_chars().cast(pl.Int64)
+    wide = series.str.contains(r"[^\x00-\x7F]").fill_null(False).arg_true()
+    if wide.len():
+        widths = widths.scatter(wide, _map_distinct(series.gather(wide), _width, pl.Int64))
+    return widths
+
+
+def _pl_locate_all_literal(x: pl.Expr, pattern: str) -> pl.Expr:
+    """Every literal match's 1-based start and end, without a Python pass.
+
+    Splitting on the pattern finds the same non-overlapping matches, left to
+    right, as re.finditer: match k starts after pieces 0..k and k patterns.
+    """
+    size = len(pattern)
+    starts = x.str.split(pattern).list.eval(
+        pl.element().str.len_chars().cast(pl.Int64).cum_sum() + pl.int_range(pl.len()) * size + 1
+    )
+    starts = starts.list.head(starts.list.len() - 1)
+    return starts.list.eval(
+        pl.struct(
+            pl.element().cast(pl.Int32).alias("start"),
+            (pl.element() + size - 1).cast(pl.Int32).alias("end"),
+        )
+    )
+
+
+def _on_distinct(series: pl.Series, build: Any) -> pl.Series:
+    """A Polars expression ``build(pl.col(...))`` evaluated once per distinct value."""
+    frame = series.rename("key").to_frame()
+    distinct = frame.unique(maintain_order=True)
+    source = distinct if distinct.height < frame.height else frame
+    computed = source.with_columns(build(pl.col("key")).alias("value"))
+    if source is frame:
+        return computed["value"].alias(series.name)
+    joined = frame.join(computed, on="key", how="left", maintain_order="left", nulls_equal=True)
+    return joined["value"].alias(series.name)
+
+
+def _each_distinct(x: pl.Expr, fn: Any, dtype: Any) -> pl.Expr:
+    return x.map_batches(lambda series: _map_distinct(series, fn, dtype), return_dtype=dtype, is_elementwise=True)
+
+
 def _width(value: str) -> int:
     width = 0
     for char in value:
@@ -1018,9 +1080,7 @@ def _pl_split(x: pl.Expr, kw: dict, n: int | None = None) -> pl.Expr:
             [fields.struct.field(f"field_{i}") for i in range(n)]
         ).list.drop_nulls()
         return pl.when(x.is_null()).then(None).otherwise(pieces)
-    return x.map_elements(
-        lambda v: _split_row(v, kw, n), return_dtype=pl.List(pl.String)
-    )
+    return _each_distinct(x, lambda v: _split_row(v, kw, n), pl.List(pl.String))
 
 
 def _pl_flatten(x: pl.Expr, kw: dict) -> pl.Expr:
@@ -1061,9 +1121,7 @@ def compile_polars(name: str, args: tuple, kw: dict) -> pl.Expr:
                 return series
             if series.dtype == pl.Null:
                 return series.cast(pl.String)
-            return series.map_elements(
-                lambda value: _decode(value, encoding), return_dtype=pl.String
-            )
+            return _map_distinct(series, lambda value: _decode(value, encoding), pl.String)
 
         return args[0].map_batches(batch, return_dtype=pl.String, is_elementwise=True)
     x = args[0].cast(pl.String)
@@ -1098,13 +1156,18 @@ def compile_polars(name: str, args: tuple, kw: dict) -> pl.Expr:
         return pl.struct(start.alias("start"), end.alias("end"))
     if name == "str_locate_all":
         rx = _compiled(kw)
-        return x.map_elements(
-            lambda v: _locate_all(v, rx), return_dtype=pl.List(_LOCATION)
-        )
+        if _plain(kw):
+            pattern = kw["pattern"]
+
+            def located(series: pl.Series) -> pl.Series:
+                return _on_distinct(series, lambda column: _pl_locate_all_literal(column, pattern))
+
+            return x.map_batches(located, return_dtype=pl.List(_LOCATION), is_elementwise=True)
+        return _each_distinct(x, lambda v: _locate_all(v, rx), pl.List(_LOCATION))
     if name == "str_length":
         return x.str.len_chars()
     if name == "str_width":
-        return x.map_elements(_width, return_dtype=pl.Int64)
+        return x.map_batches(_width_series, return_dtype=pl.Int64, is_elementwise=True)
     if name == "str_sub":
         return _pl_sub(x, kw["start"], kw["end"])
     if name == "str_sub_all":
@@ -1126,7 +1189,7 @@ def compile_polars(name: str, args: tuple, kw: dict) -> pl.Expr:
         return pl.when(length > width).then(cut).otherwise(x)
     if name == "str_word":
         if not _plain(kw):
-            return x.map_elements(lambda v: _word(v, kw), return_dtype=pl.String)
+            return _each_distinct(x, lambda v: _word(v, kw), pl.String)
         start, end = kw["start"], kw["end"]
         # One field is a list lookup. A split always has a first field, and
         # a later missing field is null, matching the out-of-range rule.
@@ -1182,7 +1245,7 @@ def compile_polars(name: str, args: tuple, kw: dict) -> pl.Expr:
             return pl.when(x.is_null()).then(None).otherwise(pl.lit(""))
         return pl.concat_str([x] * kw["times"])
     if name == "str_wrap":
-        return x.map_elements(lambda v: _wrap(v, kw), return_dtype=pl.String)
+        return _each_distinct(x, lambda v: _wrap(v, kw), pl.String)
     if name == "str_extract":
         return x.str.extract(_regex(kw), kw["group"])
     if name == "str_extract_all":
@@ -1197,9 +1260,7 @@ def compile_polars(name: str, args: tuple, kw: dict) -> pl.Expr:
         rx = _compiled(kw)
         names = kw["names"]
         dtype = pl.List(pl.Struct({label: pl.String for label in ("match", *names)}))
-        return x.map_elements(
-            lambda v: [_match_row(m, names) for m in rx.finditer(v)], return_dtype=dtype
-        )
+        return _each_distinct(x, lambda v: [_match_row(m, names) for m in rx.finditer(v)], dtype)
     if name in {"str_split", "str_split_i"}:
         pieces = _pl_split(x, kw, kw.get("n"))
         if name == "str_split":

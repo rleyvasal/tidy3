@@ -11,6 +11,38 @@ from pathlib import Path
 import polars as pl
 
 
+def _raw_full_seq(df, extra=None):
+    """full_seq(x, 1): check the values lie on the grid, then fill the range."""
+    values = extra.cast(pl.Float64)
+    low, high = values.min(), values.max()
+    offset = (values - low) % 1
+    if ((offset > 1e-6) & ((1 - offset) > 1e-6)).any():
+        raise ValueError("full_seq() x is not a regular sequence")
+    steps = round(high - low)
+    return (pl.int_range(0, steps + 1, eager=True).cast(pl.Float64) + low).to_list()
+
+
+def _raw_setequal(df, extra=None):
+    """Whether two frames hold the same distinct rows."""
+    left = df.select("species", "island").unique()
+    right = df.select("species", "island").unique(maintain_order=True).unique()
+    if left.height != right.height:
+        return False
+    return left.join(right, on=["species", "island"], how="anti", nulls_equal=True).height == 0
+
+
+def _raw_remove_empty(df, extra=None):
+    """Drop the columns whose every value is missing (null, or NaN in floats)."""
+    data = df.with_columns(empty=pl.lit(None, dtype=pl.String))
+    present = data.select(
+        (pl.col(name).is_not_null() & ~pl.col(name).is_nan() if dtype.is_float() else pl.col(name).is_not_null())
+        .sum()
+        .alias(name)
+        for name, dtype in data.schema.items()
+    ).row(0, named=True)
+    return data.select(name for name, count in present.items() if count)
+
+
 def attach(add, Case) -> None:
     from tidy3 import bench_api as api
     import tidy3 as t
@@ -372,7 +404,7 @@ def attach(add, Case) -> None:
     verb(
         "setequal", "joins", ["setequal"],
         lambda df, extra=None: pipe(pairs(df)) >> t.setequal(_unique(df)),
-        lambda df, extra=None: True,
+        _raw_setequal,
     )
 
     # ── rows_* ─────────────────────────────────────────────────────────
@@ -837,8 +869,9 @@ def attach(add, Case) -> None:
     )
     verb(
         "full_seq", "tidyr", ["full_seq"],
-        lambda df, extra=None: t.full_seq(df["whole"].to_list(), 1),
-        lambda df, extra=None: [float(value) for value in range(int(df["whole"].min()), int(df["whole"].max()) + 1)],
+        lambda df, extra=None: t.full_seq(extra, 1),
+        _raw_full_seq,
+        prepare=lambda df: df["whole"],
     )
     verb(
         "complete", "tidyr", ["complete"],
@@ -887,7 +920,7 @@ def attach(add, Case) -> None:
     verb(
         "remove_empty", "janitor", ["remove_empty"],
         lambda df, extra=None: (pipe(df.with_columns(empty=pl.lit(None, dtype=pl.String))) >> t.remove_empty(which="cols")).collect(),
-        lambda df, extra=None: df,
+        _raw_remove_empty,
     )
     verb(
         "clean_names", "janitor", ["clean_names"],
