@@ -1,4 +1,4 @@
-"""Speed guards for column functions.
+"""Polars-relative speed guards for column functions, groups, and joins.
 
 Two kinds of check. The structural ones are exact and never flaky: common
 text shapes convert natively, without the per-value Python rules, on both
@@ -19,6 +19,7 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 import polars as pl
+from polars.testing import assert_frame_equal
 import pytest
 
 import tidy3 as t3
@@ -68,6 +69,37 @@ def test_common_shapes_skip_the_per_value_rules(monkeypatch, backend, name, buil
         t3.problems(frame).collect()
 
 
+def test_uniform_dates_and_numbers_skip_the_general_text_parser(monkeypatch):
+    """A column of one zero-padded shape never enters the general text parser."""
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    from tidy3 import convert
+
+    def general(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("uniform text used the general parser")
+
+    monkeypatch.setattr(convert, "_fast_text", general)
+    frame = tidy({
+        "day": ["2024-01-07", "2024-12-31"],
+        "clock": ["2024-01-07 13:05:09", "2024-12-31 00:00:01"],
+        "num": ["$5.50", "$1,234.50"],
+    }) >> mutate(
+        day=t3.ymd("day"),
+        clock=t3.ymd_hms("clock"),
+        num=t3.parse_number("num"),
+    )
+    out = frame.collect()
+    assert out["day"].to_list() == [date(2024, 1, 7), date(2024, 12, 31)]
+    utc = ZoneInfo("UTC")
+    assert out["clock"].to_list() == [
+        datetime(2024, 1, 7, 13, 5, 9, tzinfo=utc),
+        datetime(2024, 12, 31, 0, 0, 1, tzinfo=utc),
+    ]
+    assert out["num"].to_list() == [5.5, 1234.5]
+    assert t3.problems(frame).collect().height == 0
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_text_of_numbers_skips_the_per_value_rules(monkeypatch, backend):
     from tidy3 import convert
@@ -93,6 +125,7 @@ timing = pytest.mark.skipif(
 
 
 def _best(run: Callable[[], Any], repeat: int = 3) -> float:
+    run()  # Exclude initialization and compilation from the samples.
     best = float("inf")
     for _ in range(repeat):
         start = time.perf_counter()
@@ -143,12 +176,18 @@ TIMED: list[tuple[str, Callable[[], Any], Callable[[pl.DataFrame], Any]]] = [
 @timing
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("name, build, native", TIMED, ids=[case[0] for case in TIMED])
-def test_function_speed_is_close_to_native(data, backend, name, build, native):
+def test_function_speed_is_close_to_native(data, backend, name, build, native, record_property):
     frame = tidy(data if backend == "polars" else data.to_pandas(), backend=backend)
     # Match native(data): materialize only the converted column on either backend.
-    elapsed = _best(lambda: (frame >> mutate(out=build())).collect(columns="out"))
+    run = lambda: (frame >> mutate(out=build())).collect(columns="out")
+    expected = native(data)
+    expected = expected.rename({expected.columns[0]: "out"})
+    assert_frame_equal(run(), expected)
+    elapsed = _best(run)
     baseline = _best(lambda: native(data))
+    _record_comparison(record_property, elapsed, baseline)
     budget = max(RATIO * baseline, FLOOR)
+    record_property("ci_budget_ms", budget * 1000)
     assert elapsed <= budget, (
         f"{name}() on {backend} took {elapsed * 1000:.0f} ms for {ROWS:,} rows; "
         f"native takes {baseline * 1000:.1f} ms, budget {budget * 1000:.0f} ms"
@@ -156,15 +195,24 @@ def test_function_speed_is_close_to_native(data, backend, name, build, native):
 
 
 @timing
-def test_factor_on_a_lazy_scan_builds_quickly(tmp_path):
+def test_factor_on_a_lazy_scan_builds_quickly(tmp_path, record_property):
     path = tmp_path / "penguins.csv"
     species = np.array(["Adelie", "Gentoo", "Chinstrap"])[np.arange(ROWS) % 3]
     pl.DataFrame({"species": species, "mass": np.arange(ROWS, dtype=float)}).write_csv(path)
     build = _best(lambda: t3.scan_csv(path) >> mutate(species=t3.fct_infreq("species")))
-    # A factor mutation snapshots the frame, so the baseline reads it all.
-    read = _best(lambda: pl.scan_csv(path).collect())
-    budget = max(RATIO * read, FLOOR)
-    assert build <= budget, f"fct_infreq() build took {build * 1000:.0f} ms; budget {budget * 1000:.0f} ms"
+    def native():
+        data = pl.read_csv(path)
+        levels = data.group_by("species").len().sort(
+            ["len", "species"], descending=[True, False],
+        )["species"].to_list()
+        return data.lazy().with_columns(pl.col("species").cast(pl.Enum(levels)))
+
+    assert_frame_equal((t3.scan_csv(path) >> mutate(species=t3.fct_infreq("species"))).collect(), native().collect())
+    baseline = _best(native)
+    _record_comparison(record_property, build, baseline)
+    budget = max(RATIO * baseline, FLOOR)
+    record_property("ci_budget_ms", budget * 1000)
+    assert build <= budget, f"fct_infreq() build took {build * 1000:.0f} ms; raw Polars {baseline * 1000:.1f} ms; budget {budget * 1000:.0f} ms"
 
 
 # ── many groups ─────────────────────────────────────────────────────────
@@ -258,35 +306,134 @@ GROUPED_TIMED: list[tuple[str, Callable[[Any], Any], float]] = [
     ("summarise_mean", lambda f: f >> t3.group_by("g") >> t3.summarise(m=t3.mean("mass")), FLOOR),
     ("summarise_nth", lambda f: f >> t3.group_by("g") >> t3.summarise(m=t3.nth("mass", 2)), FLOOR),
     ("filter", lambda f: f >> t3.group_by("g") >> t3.filter(t3.col("mass") > t3.mean("mass")), FLOOR),
-    # Pandas nesting builds one DataFrame per group; its timing baseline
-    # below constructs the same representation.
+    # The raw Polars baseline exports nested pandas frames when required.
     ("group_nest", lambda f: f >> t3.group_by("g") >> t3.group_nest(), 1.0),
     ("nest_by", lambda f: f >> t3.nest(by="g"), 1.0),
 ]
 
 
+def _record_comparison(record_property, elapsed, baseline):
+    record_property("tidy3_ms", elapsed * 1000)
+    record_property("raw_polars_ms", baseline * 1000)
+    record_property("tidy3_over_polars", elapsed / baseline)
+
+
+def _native_grouped(data, name, backend):
+    """Independent Polars recipes for these fixed benchmark parameters."""
+    if name.startswith("fct_"):
+        if name == "fct_reorder":
+            pairs = data.group_by("g", "species").agg(pl.col("mass").median().alias("score"))
+            pairs = pairs.sort(["g", "score", "species"])
+        elif name == "fct_infreq":
+            pairs = data.group_by("g", "species").agg(pl.len().alias("count"))
+            pairs = pairs.sort(["g", "count", "species"], descending=[False, True, False])
+        elif name == "fct_relevel":
+            pairs = data.select("g", "species").unique()
+            pairs = pairs.with_columns((pl.col("species") != "Gentoo").alias("other")).sort(["g", "other", "species"])
+        else:
+            pairs = data.select("g", "species").unique()
+            pairs = pairs.sort(["g", "species"], descending=[False, True])
+        levels = pairs["species"].unique(maintain_order=True).to_list()
+        out = data.with_columns(pl.col("species").cast(pl.Enum(levels)).alias("s"))
+    elif name == "slice_max":
+        out = data.filter(pl.col("mass") == pl.col("mass").max().over("g")).sort("g", maintain_order=True)
+    elif name == "slice_head":
+        out = data.filter(pl.int_range(pl.len()).over("g") < 2)
+        if backend == "pandas":
+            out = out.sort("g", maintain_order=True)
+    elif name == "slice_sample":
+        out = data.group_by("g", maintain_order=True).agg(
+            pl.struct(pl.exclude("g")).sample(n=1, seed=1).alias("sample"),
+        ).explode("sample", empty_as_null=True).unnest("sample")
+    elif name == "reframe":
+        out = data.group_by("g", maintain_order=True).agg(pl.col("mass").median().alias("q"))
+    elif name == "summarise_mean":
+        out = data.group_by("g", maintain_order=True).agg(pl.col("mass").mean().alias("m"))
+    elif name == "summarise_nth":
+        out = data.group_by("g", maintain_order=True).agg(pl.col("mass").get(1).alias("m"))
+    elif name == "filter":
+        out = data.filter(pl.col("mass") > pl.col("mass").mean().over("g"))
+    else:
+        out = data.group_by("g", maintain_order=True).agg(pl.struct(pl.exclude("g")).alias("data"))
+        if backend == "pandas":
+            # Common output contract: a pandas DataFrame in every nested cell.
+            sizes = out["data"].list.len().to_numpy()
+            body = out.select("data").explode("data", empty_as_null=True).unnest("data").to_pandas()
+            stops = np.cumsum(sizes)
+            frames = [body.iloc[int(start):int(stop)].reset_index(drop=True)
+                      for start, stop in zip(np.r_[0, stops[:-1]], stops)]
+            return pd.DataFrame({"g": out["g"].to_numpy(), "data": frames})
+    if backend == "pandas":
+        out = out.to_pandas()
+        if name.startswith("fct_"):
+            out["s"] = out["s"].cat.as_unordered()
+    return out
+
+
+def _assert_grouped_equivalent(actual, expected, name, data):
+    if isinstance(actual, pd.DataFrame):
+        if name in {"group_nest", "nest_by"}:
+            assert actual["g"].tolist() == expected["g"].tolist()
+            for left, right in zip(actual["data"], expected["data"]):
+                pd.testing.assert_frame_equal(left, right, check_dtype=False)
+            return
+        if name.startswith("fct_"):
+            assert actual["s"].cat.categories.tolist() == expected["s"].cat.categories.tolist()
+            assert actual["s"].cat.ordered == expected["s"].cat.ordered
+        actual, expected = pl.from_pandas(actual), pl.from_pandas(expected)
+    if name == "slice_sample":
+        # Engine RNGs differ: compare sample shape and source membership.
+        assert actual.shape == expected.shape
+        assert actual["g"].to_list() == expected["g"].to_list()
+        assert actual.join(data, on=data.columns, how="anti").is_empty()
+        return
+    if name.startswith("fct_"):
+        if isinstance(actual.schema["s"], pl.Enum):
+            assert actual.schema["s"] == expected.schema["s"]
+        actual = actual.with_columns(pl.col("s").cast(pl.String))
+        expected = expected.with_columns(pl.col("s").cast(pl.String))
+    assert_frame_equal(actual, expected)
+
+
 @timing
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("name, build, floor", GROUPED_TIMED, ids=[case[0] for case in GROUPED_TIMED])
-def test_many_groups_speed(grouped_data, backend, name, build, floor):
+def test_many_groups_speed(grouped_data, backend, name, build, floor, record_property):
     frame = _grouped_frame(grouped_data, backend)
 
     def run() -> Any:
         result = build(frame)
         return result.collect(as_="pandas") if backend == "pandas" else result.collect()
 
-    elapsed = _best(run)
-    pdf = grouped_data.to_pandas()
-    if backend == "pandas" and name in {"group_nest", "nest_by"}:
-        baseline = _best(lambda: [
-            part.reset_index(drop=True)
-            for _, part in pdf.groupby("g")[["species", "mass", "bill"]]
-        ])
-        budget = max(2 * baseline, floor)
-    else:
-        baseline = _best(lambda: pdf.groupby("g")["mass"].max())
-        budget = max(RATIO * baseline, floor)
+    native = lambda: _native_grouped(grouped_data, name, backend)
+    _assert_grouped_equivalent(run(), native(), name, grouped_data)
+    elapsed, baseline = _best(run), _best(native)
+    _record_comparison(record_property, elapsed, baseline)
+    ratio = 2 if backend == "pandas" and name in {"group_nest", "nest_by"} else RATIO
+    budget = max(ratio * baseline, floor)
+    record_property("ci_budget_ms", budget * 1000)
+    record_property("materialization", backend)
     assert elapsed <= budget, (
         f"{name} on {backend} with {GROUPS:,} groups took {elapsed * 1000:.0f} ms; "
-        f"budget {budget * 1000:.0f} ms"
+        f"raw Polars {baseline * 1000:.1f} ms ({elapsed / baseline:.2f}x); budget {budget * 1000:.0f} ms"
     )
+
+
+@timing
+def test_wide_closest_join_is_close_to_native(record_property):
+    data = pl.DataFrame({"x": np.arange(100_000)}).with_columns(
+        *(pl.col("x").cast(pl.Float64).alias(f"value_{i}") for i in range(16))
+    )
+    right = pl.DataFrame({"y": np.arange(0, 100_000, 1_000)})
+    frame = tidy(data)
+    spec = t3.join_by(t3.closest(t3.ge("x", "y")))
+    run = lambda: (frame >> t3.left_join(right, by=spec)).collect()
+    native = lambda: data.lazy().sort("x").join_asof(
+        right.lazy().sort("y"), left_on="x", right_on="y", coalesce=False,
+    ).collect()
+    assert_frame_equal(run(), native())
+    elapsed, baseline = _best(run), _best(native)
+    _record_comparison(record_property, elapsed, baseline)
+    budget = max(RATIO * baseline, FLOOR)
+    record_property("ci_budget_ms", budget * 1000)
+    assert elapsed <= budget, f"wide closest join took {elapsed * 1000:.0f} ms; raw Polars {baseline * 1000:.1f} ms ({elapsed / baseline:.2f}x); budget {budget * 1000:.0f} ms"

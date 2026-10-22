@@ -1166,6 +1166,161 @@ def _typed_values(series: pl.Series, kind: str) -> tuple[pl.Expr, pl.Expr] | Non
     return None
 
 
+_DATE_FORMATS = {
+    "date": ("%Y-%m-%d",),
+    "ymd": ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"),
+    "mdy": ("%m/%d/%Y", "%m-%d-%Y", "%m.%d.%Y"),
+    "dmy": ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y"),
+    "ym": ("%Y-%m", "%Y/%m", "%Y.%m"),
+}
+_CLOCK_FORMATS = {
+    "datetime": ("%Y-%m-%d %H:%M:%S",),
+    "ymd_hms": ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y.%m.%d %H:%M:%S"),
+    "ymd_hm": ("%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M", "%Y.%m.%d %H:%M"),
+    "mdy_hms": ("%m/%d/%Y %H:%M:%S", "%m-%d-%Y %H:%M:%S", "%m.%d.%Y %H:%M:%S"),
+    "dmy_hms": ("%d/%m/%Y %H:%M:%S", "%d-%m-%Y %H:%M:%S", "%d.%m.%Y %H:%M:%S"),
+}
+
+
+def _no_failures(length: int) -> pl.Series:
+    return pl.Series("failed", [False] * length, dtype=pl.Boolean)
+
+
+def _every_row(frame: pl.DataFrame) -> bool:
+    return bool(frame.select(pl.col("settled").fill_null(False).all()).item())
+
+
+def _fixed_width(fmt: str) -> int | None:
+    """Character width of a zero-padded strptime format, or None if a code varies."""
+    widths = {"Y": 4, "m": 2, "d": 2, "H": 2, "M": 2, "S": 2}
+    total = 0
+    index = 0
+    while index < len(fmt):
+        if fmt[index] == "%":
+            code = fmt[index + 1:index + 2]
+            if code not in widths:
+                return None
+            total += widths[code]
+            index += 2
+            continue
+        total += 1
+        index += 1
+    return total
+
+
+def _uniform_fixed(
+    series: pl.Series,
+    formats: tuple[str, ...],
+    *,
+    clock: bool,
+    tz: str | None,
+) -> tuple[pl.Series, pl.Series] | None:
+    """Parse *series* when every present value has one format's exact width and parses.
+
+    Polars accepts some shorter spellings (``2024-1-7``, ``24-01-07``). Those
+    widths miss, so the column stays on the general path. Impossible dates
+    parse as null and do the same.
+    """
+    for fmt in formats:
+        width = _fixed_width(fmt)
+        if width is None:
+            continue
+        try:
+            if clock:
+                naive = pl.col("v").str.to_datetime(fmt, time_unit="us", strict=False)
+                value = (
+                    naive if tz is None
+                    else naive.dt.replace_time_zone(tz, ambiguous="latest", non_existent="null")
+                )
+            else:
+                value = pl.col("v").str.to_date(fmt, strict=False)
+            checked = series.to_frame("v").with_columns(value=value).select(
+                "value",
+                settled=pl.col("v").is_null() | (
+                    (pl.col("v").str.len_chars() == width) & pl.col("value").is_not_null()
+                ),
+            )
+        except (pl.exceptions.PolarsError, ValueError):
+            continue
+        if _every_row(checked):
+            return checked["value"], _no_failures(series.len())
+    return None
+
+
+def _uniform_dates(series: pl.Series, formats: tuple[str, ...]) -> tuple[pl.Series, pl.Series] | None:
+    return _uniform_fixed(series, formats, clock=False, tz=None)
+
+
+def _uniform_clocks(
+    series: pl.Series, formats: tuple[str, ...], *, tz: str | None
+) -> tuple[pl.Series, pl.Series] | None:
+    found = _uniform_fixed(series, formats, clock=True, tz=tz)
+    if found is not None:
+        return found
+    # ``2024-01-07T13:05:09`` is the same width as the space form.
+    replaced = series.str.replace("T", " ", literal=True)
+    if replaced.equals(series):
+        return None
+    return _uniform_fixed(replaced, formats, clock=True, tz=tz)
+
+
+def _uniform_number(series: pl.Series, options: dict[str, Any]) -> tuple[pl.Series, pl.Series] | None:
+    """``$1,234.50`` and ``$5.50`` when grouping is a comma and the decimal is a point."""
+    if options["decimal_mark"] != "." or options["grouping_mark"] != ",":
+        return None
+    shape = r"^\$[0-9]+(?:,[0-9]+)*\.[0-9]+$"
+    base = series.to_frame("v").with_columns(
+        text=pl.col("v").str.strip_chars(),
+        present=pl.col("v").is_not_null(),
+    )
+    value = (
+        pl.col("text").str.replace_all(",", "", literal=True)
+        .str.replace_all("$", "", literal=True)
+        .cast(pl.Float64, strict=False)
+    )
+    checked = base.with_columns(value=value).select(
+        "value",
+        settled=~pl.col("present") | (pl.col("text").str.contains(shape) & pl.col("value").is_not_null()),
+    )
+    if _every_row(checked):
+        return checked["value"], _no_failures(series.len())
+    return None
+
+
+def _uniform_fast(
+    series: pl.Series, kind: str, options: dict[str, Any]
+) -> tuple[pl.Series, pl.Series] | None:
+    """A direct Polars parse when the whole column shares one common shape."""
+    if kind == "parse_number":
+        return _uniform_number(series, options)
+    if kind in _DATE_FORMATS:
+        return _uniform_dates(series, _DATE_FORMATS[kind])
+    if kind == "parse_date":
+        fmt = options["fmt"]
+        if _format_shape(fmt, clock=False) is None:
+            return None
+        return _uniform_dates(series, (fmt,))
+    if kind == "parse_datetime":
+        fmt = options["fmt"]
+        if _format_shape(fmt, clock=True) is None:
+            return None
+        # An explicit format is literal: no ``T`` retry, unlike the guessed orders.
+        return _uniform_fixed(series, (fmt,), clock=True, tz=None)
+    if kind not in _CLOCK_FORMATS:
+        return None
+    if kind in _DATETIME_ORDERS and options["truncated"]:
+        return None
+    tz = options["tz"] if kind in _DATETIME_ORDERS else None
+    found = _uniform_clocks(series, _CLOCK_FORMATS[kind], tz=tz)
+    if found is not None or kind != "datetime":
+        return found
+    dates = _uniform_dates(series, ("%Y-%m-%d",))
+    if dates is None:
+        return None
+    value, failed = dates
+    return value.cast(pl.Datetime("us")), failed
+
+
 def _fast_convert(series: pl.Series, options: dict[str, Any]) -> tuple[pl.Series, pl.Series] | None:
     """``(converted, failed)`` computed natively, or None for the per-value path."""
     kind = options["kind"]
@@ -1174,6 +1329,11 @@ def _fast_convert(series: pl.Series, options: dict[str, Any]) -> tuple[pl.Series
     out_dtype = _out_dtype(kind, options)
     v = pl.col("v")
     present = v.is_not_null()
+    if series.dtype == pl.String:
+        direct = _uniform_fast(series, kind, options)
+        if direct is not None:
+            value, failed = direct
+            return value.cast(out_dtype), failed
     if series.dtype != pl.String:
         typed = _typed_values(series, kind)
         if typed is None:

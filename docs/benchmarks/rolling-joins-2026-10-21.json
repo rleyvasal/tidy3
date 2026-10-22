@@ -1,0 +1,63 @@
+{
+  "python": "3.14.6",
+  "polars": "1.42.1",
+  "results": [
+    {
+      "case": "original_sweep",
+      "rows": 200000,
+      "right_rows": 100,
+      "columns": 30,
+      "implementation": "before",
+      "ms": 861.11,
+      "output_rows": 200000
+    },
+    {
+      "case": "original_sweep",
+      "rows": 200000,
+      "right_rows": 100,
+      "columns": 30,
+      "implementation": "after",
+      "ms": 35.95,
+      "output_rows": 200000
+    },
+    {
+      "case": "large_wide",
+      "rows": 200000,
+      "right_rows": 1000,
+      "columns": 21,
+      "implementation": "after",
+      "ms": 14.48,
+      "output_rows": 200000
+    },
+    {
+      "case": "large_wide",
+      "rows": 1000000,
+      "right_rows": 1000,
+      "columns": 21,
+      "implementation": "after",
+      "ms": 94.97,
+      "output_rows": 1000000
+    },
+    {
+      "case": "large_wide",
+      "rows": 1000000,
+      "right_rows": 100000,
+      "columns": 21,
+      "implementation": "after",
+      "ms": 62.07,
+      "output_rows": 1000000
+    },
+    {
+      "case": "grouped",
+      "rows": 1000000,
+      "right_rows": 100000,
+      "columns": 3,
+      "implementation": "after",
+      "ms": 28.71,
+      "output_rows": 1000000
+    }
+  ],
+  "method": "One warm-up, best of three complete materializations; data generation excluded. Before and after original_sweep outputs compare exactly, including dtypes and row order.",
+  "reference_commit": "e68c534eb2aebe5d16c472da3bd3f4ccfb6ca9d9",
+  "scope": "Polars left join, closest(x >= y), default multiple=all; large_wide input rows are in reverse key order. The grouped case has two equality keys and includes unmatched groups."
+}

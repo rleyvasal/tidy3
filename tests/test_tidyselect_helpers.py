@@ -252,3 +252,20 @@ def test_predicate_helpers_on_raw_dtypes():
     assert is_datetime(pl.Datetime())
     assert is_categorical(pl.Categorical())
     assert not is_numeric(pl.Boolean())
+
+
+def test_pandas_date_list_and_dict_columns_are_not_text():
+    import tidy3 as t
+
+    source = pl.DataFrame({
+        "s": ["a", None],
+        "day": pl.Series(["2024-01-01", None]).str.to_date(),
+        "items": [[1], [2, 3]],
+        "rec": [{"a": 1}, {"a": 2}],
+    })
+    for predicate, wanted in ((t.is_character, ["s"]), (t.is_datetime, ["day"]), (t.is_temporal, ["day"])):
+        found = {
+            backend: (t.tidy(source, backend=backend) >> t.select(t.where(predicate))).collect().columns
+            for backend in ("polars", "pandas")
+        }
+        assert found == {"polars": wanted, "pandas": wanted}

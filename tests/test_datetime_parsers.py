@@ -186,6 +186,19 @@ def test_parse_datetime_offsets_are_naive_utc_clocks(backend):
          >> t.mutate(at=t.parse_datetime("x", "%Y-%m-%d %H:%M:%S%z", strict=True))).collect()
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_parse_datetime_explicit_format_does_not_read_a_t_separator(backend):
+    # Only the guessed orders (ymd_hms, ...) accept ``T`` for the space.
+    frame = t.tidy({"x": ["2024-01-07 13:05:09", "2024-01-07T13:05:09"]}, backend=backend)
+    out = frame >> t.mutate(
+        at=t.parse_datetime("x", "%Y-%m-%d %H:%M:%S"), guessed=t.ymd_hms("x"),
+    )
+    collected = out.collect()
+    assert collected["at"].to_list() == [datetime(2024, 1, 7, 13, 5, 9), None]
+    assert collected["guessed"].dt.replace_time_zone(None).to_list() == [datetime(2024, 1, 7, 13, 5, 9)] * 2
+    assert t.problems(out).collect()["row"].to_list() == [2]
+
+
 def test_parser_options_validate_before_execution():
     for value in [-1, 4, True, 1.5]:
         with pytest.raises(ValueError, match="truncated"):

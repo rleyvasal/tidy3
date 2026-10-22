@@ -697,6 +697,52 @@ def excel_numeric_to_date(
     return converted
 
 
+# Inclusive serials that land in years 1..9999 after the leap-day shift.
+# Outside this range the Python converter raises OverflowError.
+_EXCEL_SERIAL_LIMITS = {
+    "modern": (-693594, 2958465),
+    "mac pre-2011": (-695056, 2957003),
+}
+
+
+def _excel_needs_python(series: pl.Series, date_system: str, include_time: bool) -> bool:
+    """True when the per-value converter must run.
+
+    Integers and floats inside the calendar range become dates in Polars.
+    Clocks, other dtypes, and serials outside year 1..9999 stay on the Python
+    converter so the errors and the time-of-day rules stay the same.
+    """
+    if include_time or not (series.dtype.is_integer() or series.dtype.is_float()):
+        return True
+    if series.len() == 0:
+        return False
+    number = series.cast(pl.Float64)
+    finite = number.filter(number.is_finite())
+    if finite.len() == 0:
+        return False
+    low, high = _EXCEL_SERIAL_LIMITS[date_system]
+    return finite.min() < low or finite.max() > high
+
+
+def _excel_vector_dates(series: pl.Series, date_system: str) -> pl.Series:
+    """Calendar dates for in-range serials, including the 1900 leap-day gap."""
+    origin = _EXCEL_ORIGINS[date_system]
+    number = pl.col("n").cast(pl.Float64)
+    # The 0.001 second bias matches janitor's day boundary.
+    days = ((number * 86400.0 + 0.001) / 86400.0).floor()
+    shifted = (
+        pl.when(days.is_finite() & (days != 60))
+        .then(pl.when(days < 60).then(days + 1).otherwise(days))
+        .otherwise(None)
+        .cast(pl.Int64)
+    )
+    return (
+        pl.DataFrame({"n": series})
+        .select((pl.lit(origin) + pl.duration(days=shifted)).cast(pl.Date).alias("d"))
+        .to_series()
+    )
+
+
 def _excel_polars(
     value: pl.Expr,
     *,
@@ -708,6 +754,8 @@ def _excel_polars(
     dtype = pl.Datetime("us", tz) if include_time else pl.Date
 
     def batch(series: pl.Series) -> pl.Series:
+        if not _excel_needs_python(series, date_system, include_time):
+            return _excel_vector_dates(series, date_system)
         converted = _excel_convert(
             series,
             date_system=date_system,
@@ -721,6 +769,11 @@ def _excel_polars(
 
 
 def _excel_pandas(source: pd.Series, **kwargs: Any) -> pd.Series:
+    if not kwargs["include_time"]:
+        series = pl.from_pandas(source)
+        if not _excel_needs_python(series, kwargs["date_system"], False):
+            converted = _excel_vector_dates(series, kwargs["date_system"]).to_list()
+            return pd.Series(converted, index=source.index, dtype="object")
     converted = _excel_convert(source, **kwargs)
     if kwargs["include_time"]:
         return pd.Series(

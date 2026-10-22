@@ -543,3 +543,45 @@ def test_pivot_options_and_specs_never_convert_polars_frames_to_pandas(monkeypat
     assert as_pandas(results[1]).columns.tolist() == ["id", "a", "b", "note"]
     assert as_pandas(results[2]).columns.tolist() == ["id", "a", "b"]
     assert as_pandas(results[3]).columns.tolist() == ["id", "visit", "mean", "sd"]
+
+
+def test_pandas_list_cells_from_polars_are_list_columns():
+    # A Polars list column reaches pandas as NumPy arrays, not Python lists.
+    import tidy3 as t
+
+    source = pl.DataFrame({
+        "id": [1, 2, 3],
+        "items": [[0], [0, 1], []],
+        "same": [[1, 2]] * 3,
+        "rec": [{"a": 1}, {"a": 2}, None],
+        "s": ["x", "y", None],
+    })
+    results = {}
+    for backend in BACKENDS:
+        frame = tidy(source, backend=backend)
+        longer = frame >> t.select("id", "items") >> unnest_longer("items", indices_include=True)
+        results[backend] = (
+            longer.collect().rows(),
+            (frame >> t.select(t.where(t.is_character))).collect().columns,
+            (frame >> t.remove_constant()).collect().columns,
+            (frame >> t.select("id", "items") >> t.hoist("items", second=1)).collect()["second"].to_list(),
+        )
+    assert results["pandas"] == results["polars"]
+    assert results["pandas"][0] == [(1, 1, 0), (2, 1, 0), (2, 2, 1)]
+    assert results["pandas"][1] == ["s"]
+    assert results["pandas"][2] == ["id", "items", "rec", "s"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_wider_spec_with_no_rows_is_typed_and_pivots_to_ids(backend):
+    import tidy3 as t
+
+    empty = pl.DataFrame({
+        "id": pl.Series([], dtype=pl.Int64),
+        "k": pl.Series([], dtype=pl.String),
+        "v": pl.Series([], dtype=pl.Float64),
+    })
+    spec = t.build_wider_spec(tidy(empty, backend=backend), names_from="k", values_from="v")
+    assert spec.collect().schema == pl.Schema({".name": pl.String, ".value": pl.String, "k": pl.String})
+    out = (tidy(empty, backend=backend) >> t.pivot_wider_spec(spec, id_cols="id")).collect()
+    assert out.schema == pl.Schema({"id": pl.Int64}) and out.height == 0

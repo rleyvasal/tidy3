@@ -362,6 +362,223 @@ def contains_factor(value: Any) -> bool:
     return any(contains_factor(child) for child in _expression_children(node))
 
 
+def _lit(node: Any) -> Any:
+    if isinstance(node, tuple) and node and node[0] == "lit":
+        return node[1]
+    return None
+
+
+def _column_name(node: Any) -> str | None:
+    if isinstance(node, tuple) and node and node[0] in {"col", "name"} and isinstance(node[1], str):
+        return node[1]
+    return None
+
+
+def _group_key_dtype(dtype: Any) -> bool:
+    return dtype in {pl.String, pl.Boolean, pl.Date} or dtype.is_integer() or isinstance(dtype, pl.Datetime)
+
+
+def _native_spec(value: Any, schema: Any, groups: list[str] | None) -> dict[str, Any] | None:
+    """A single fct_* on string columns, or None when pandas still has to run.
+
+    Nested factor calls, callables, and Enum inputs keep the pandas path so
+    unused levels and per-group Python summaries stay exact.
+    """
+    node = value.node if isinstance(value, Expr) else None
+    if not isinstance(node, tuple) or node[0] != "func" or node[1] not in FUNCTIONS:
+        return None
+    name, args, kwargs = node[1], node[2], node[3]
+    if len(args) < 1:
+        return None
+    source = _column_name(args[0])
+    if source is None or source not in schema or schema[source] != pl.String:
+        return None
+    for group in groups or []:
+        if group not in schema or not _group_key_dtype(schema[group]):
+            return None
+    extra = None
+    if name == "fct_infreq":
+        if args[1:]:
+            extra = _column_name(args[1])
+            if extra is None or extra not in schema:
+                return None
+        if _lit(kwargs.get("ordered")) not in {None, True, False}:
+            return None
+    elif name == "fct_reorder":
+        extra = _column_name(args[1]) if len(args) > 1 else None
+        if extra is None or extra not in schema:
+            return None
+        fun = _lit(kwargs.get("fun"))
+        from tidy3.expr import max as expr_max
+        from tidy3.expr import mean, min as expr_min
+        from tidy3.expr import sum as expr_sum
+
+        aggs = {
+            median: lambda column: pl.col(column).median(),
+            mean: lambda column: pl.col(column).mean(),
+            expr_sum: lambda column: pl.col(column).sum(),
+            expr_min: lambda column: pl.col(column).min(),
+            expr_max: lambda column: pl.col(column).max(),
+        }
+        if fun not in aggs or _lit(kwargs.get("fun_kwargs")) or not isinstance(_lit(kwargs.get("desc")), bool):
+            return None
+        if _lit(kwargs.get("na_rm")) not in {None, True, False}:
+            return None
+    elif name == "fct_relevel":
+        requested = _lit(kwargs.get("levels"))
+        after = _lit(kwargs.get("after"))
+        if not isinstance(requested, list) or any(not isinstance(level, str) for level in requested):
+            return None
+        if len(set(requested)) != len(requested):
+            return None
+        if isinstance(after, bool) or not isinstance(after, (int, float)):
+            return None
+    elif name != "fct_rev":
+        return None
+    return {"name": name, "source": source, "extra": extra, "kwargs": kwargs}
+
+
+def _attach_codes(pairs: pl.DataFrame, source: str, categories: list[str]) -> pl.DataFrame:
+    codes = pl.DataFrame({"__level": categories, "__tidy3_code": list(range(len(categories)))})
+    return pairs.join(codes, left_on=source, right_on="__level", how="left")
+
+
+def _with_group_ids(pairs: pl.DataFrame, data: pl.DataFrame, groups: list[str], sort_groups: bool) -> pl.DataFrame:
+    if not groups:
+        return pairs.with_columns(__tidy3_gid=pl.lit(0, dtype=pl.UInt32))
+    keys = data.select(groups).unique(maintain_order=True)
+    if sort_groups:
+        keys = keys.sort(groups)
+    keys = keys.with_row_index("__tidy3_gid")
+    return pairs.join(keys, on=groups, how="left")
+
+
+def _native_levels(
+    data: pl.DataFrame, spec: dict[str, Any], groups: list[str] | None, sort_groups: bool
+) -> tuple[list[str], bool] | None:
+    """Level order for one string factor, using the same rules as :func:`_reordered_levels`."""
+    source = spec["source"]
+    groups = list(groups or [])
+    if groups and any(data[group].null_count() for group in groups):
+        return None
+    extra = spec["extra"]
+    if extra is not None:
+        column = data[extra]
+        if not (column.dtype.is_integer() or column.dtype.is_float()) or column.null_count():
+            return None
+        # pandas skips NaN in median/mean/sum; Polars aggregates it.
+        if column.dtype.is_float() and bool(column.is_nan().any()):
+            return None
+        if spec["name"] == "fct_infreq" and bool((column < 0).any()):
+            return None
+    present = data.drop_nulls(subset=[source])
+    categories = sorted(present[source].unique().to_list())
+    if not categories:
+        return None
+    name = spec["name"]
+    kwargs = spec["kwargs"]
+    if name == "fct_relevel":
+        requested = _lit(kwargs["levels"])
+        after = _lit(kwargs["after"])
+        known = [level for level in requested if level in categories]
+        pairs = present.select([*groups, source]).unique()
+        pairs = _attach_codes(pairs, source, categories)
+        pairs = _with_group_ids(pairs, data, groups, sort_groups)
+        pairs = pairs.sort(["__tidy3_gid", "__tidy3_code"])
+        other = ~pl.col(source).is_in(known) if known else pl.lit(True)
+        rank = {level: index for index, level in enumerate(requested) if level in categories}
+        pairs = pairs.with_columns(__other=other)
+        pairs = pairs.with_columns(
+            __other_rank=pl.col("__other").cast(pl.Int64).cum_sum().over("__tidy3_gid", order_by="__tidy3_code") - 1,
+            __n_other=pl.col("__other").cast(pl.Int64).sum().over("__tidy3_gid"),
+            __req=pl.col(source).replace_strict(rank, default=None),
+        )
+        position = pl.col("__n_other") if math.isinf(after) else pl.min_horizontal(pl.lit(int(after)), pl.col("__n_other"))
+        before = pl.col("__other") & (pl.col("__other_rank") < position)
+        pairs = pairs.with_columns(
+            __band=pl.when(before).then(0).when(pl.col("__other")).then(2).otherwise(1),
+            __key=pl.when(pl.col("__other")).then(pl.col("__other_rank")).otherwise(pl.col("__req")),
+        ).sort(["__tidy3_gid", "__band", "__key"], maintain_order=True)
+        codes = {categories.index(level): index for index, level in enumerate(requested) if level in categories}
+        warning_rows = pairs.select(gid=pl.col("__tidy3_gid"), code=pl.col("__tidy3_code")).to_pandas()
+        for unknown in _unknown_requested(warning_rows, codes, requested):
+            warnings.warn(f"fct_relevel(): unknown levels: {unknown}", UserWarning, stacklevel=4)
+        ordered = False
+    else:
+        group_keys = [*groups, source]
+        if name == "fct_rev":
+            pairs = present.select(group_keys).unique()
+            pairs = _attach_codes(pairs, source, categories)
+            pairs = _with_group_ids(pairs, data, groups, sort_groups)
+            pairs = pairs.sort(["__tidy3_gid", "__tidy3_code"], descending=[False, True])
+            ordered = False
+        elif name == "fct_infreq":
+            score = pl.len() if extra is None else pl.col(extra).sum()
+            pairs = present.group_by(group_keys).agg(score.alias("__tidy3_score"))
+            pairs = _attach_codes(pairs, source, categories)
+            pairs = _with_group_ids(pairs, data, groups, sort_groups)
+            pairs = pairs.sort(
+                ["__tidy3_gid", "__tidy3_score", "__tidy3_code"],
+                descending=[False, True, False],
+            )
+            flag = _lit(kwargs.get("ordered"))
+            ordered = False if flag is None else bool(flag)
+        else:
+            from tidy3.expr import max as expr_max
+            from tidy3.expr import mean, min as expr_min
+            from tidy3.expr import sum as expr_sum
+
+            agg = {
+                median: lambda column: pl.col(column).median(),
+                mean: lambda column: pl.col(column).mean(),
+                expr_sum: lambda column: pl.col(column).sum(),
+                expr_min: lambda column: pl.col(column).min(),
+                expr_max: lambda column: pl.col(column).max(),
+            }[_lit(kwargs["fun"])]
+            pairs = present.group_by(group_keys).agg(agg(extra).alias("__tidy3_score"))
+            pairs = _attach_codes(pairs, source, categories)
+            pairs = _with_group_ids(pairs, data, groups, sort_groups)
+            pairs = pairs.sort(
+                ["__tidy3_gid", "__tidy3_score", "__tidy3_code"],
+                descending=[False, bool(_lit(kwargs["desc"])), False],
+            )
+            ordered = False
+    return pairs[source].unique(maintain_order=True).to_list(), ordered
+
+
+def _apply_native_factors(
+    lf: pl.LazyFrame, factors: dict[str, Any], groups: list[str] | None, sort_groups: bool
+) -> tuple[pl.LazyFrame, dict[str, Any], dict[str, bool]]:
+    """Cast string factors in Polars. Anything else stays in *factors* for pandas."""
+    schema = lf.collect_schema()
+    specs = []
+    for name, value in factors.items():
+        spec = _native_spec(value, schema, groups)
+        if spec is not None:
+            specs.append((name, spec))
+    if not specs:
+        return lf, factors, {}
+    needed = set(groups or [])
+    for _, spec in specs:
+        needed.add(spec["source"])
+        if spec["extra"]:
+            needed.add(spec["extra"])
+    data = lf.select([name for name in schema.names() if name in needed]).collect()
+    exprs = []
+    ordered: dict[str, bool] = {}
+    for name, spec in specs:
+        levels = _native_levels(data, spec, groups, sort_groups)
+        if levels is None:
+            continue
+        level_names, flag = levels
+        exprs.append(pl.col(spec["source"]).cast(pl.String).cast(pl.Enum(level_names)).alias(name))
+        ordered[name] = flag
+    if exprs:
+        lf = lf.with_columns(exprs)
+    remaining = {name: value for name, value in factors.items() if name not in ordered}
+    return lf, remaining, ordered
+
+
 def prepare_polars(tf: Any, lf: pl.LazyFrame, stage: dict[str, Any], groups: list[str] | None, *, sort_groups: bool) -> tuple[pl.LazyFrame, dict[str, Any], dict[str, bool]]:
     """Compute factor assignments once; preserve other columns' Polars dtypes.
 
@@ -372,6 +589,10 @@ def prepare_polars(tf: Any, lf: pl.LazyFrame, stage: dict[str, Any], groups: lis
     factors = {name: value for name, value in stage.items() if contains_factor(value)}
     if not factors:
         return lf, stage, {}
+    lf, factors, native_ordered = _apply_native_factors(lf, factors, groups, sort_groups)
+    if not factors:
+        rest = {name: value for name, value in stage.items() if name not in native_ordered}
+        return lf, rest, native_ordered
     from tidy3.pandas_engine import eval_expr
     from tidy3.verbs import _column_references
 
@@ -404,8 +625,11 @@ def prepare_polars(tf: Any, lf: pl.LazyFrame, stage: dict[str, Any], groups: lis
     finally:
         SORT_GROUPS.reset(token)
     columns = []
-    ordered: dict[str, bool] = {}
-    rest = {name: value for name, value in stage.items() if name not in factors}
+    ordered = dict(native_ordered)
+    rest = {
+        name: value for name, value in stage.items()
+        if name not in factors and name not in native_ordered
+    }
     if lazy and all(isinstance(value.dtype, pd.CategoricalDtype) for value in results.values()):
         from tidy3.expr import to_polars
 

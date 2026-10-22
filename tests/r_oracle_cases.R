@@ -61,6 +61,26 @@ base <- tibble(
 
 result <- switch(
   case_name,
+  rolling_joins = {
+    x <- tibble(g=c("b", "a", NA, "a", "z"), x=c(4, 2, 2, 0, 9), lid=as.double(1:5))
+    y <- tibble(h=c("a", "a", NA, "b", "q"), y=c(1, 1, 1, 4, 8), rid=as.double(1:5))
+    specs <- list(
+      ge=join_by(g == h, closest(x >= y)),
+      gt=join_by(g == h, closest(x > y)),
+      le=join_by(g == h, closest(x <= y)),
+      lt=join_by(g == h, closest(x < y))
+    )
+    result <- list()
+    for (op in names(specs)) {
+      for (how in c("left", "inner", "right", "full", "semi", "anti")) {
+        join <- get(paste0(how, "_join"), asNamespace("dplyr"))
+        result[[paste(op, how, sep="_")]] <- suppressWarnings(join(x, y, by=specs[[op]]))
+      }
+    }
+    result$never <- left_join(x, y, by=specs$ge, na_matches="never")
+    result$keep <- left_join(x, y, by=specs$ge, keep=TRUE)
+    result
+  },
   reshape_metadata = {
     x <- tibble(g=factor(c("b", "a", "b"), levels=c("a", "b", "unused"), ordered=TRUE),
                 code=c("x-y", "p-q", "r-s"), x=c(2L, 4L, 8L)) %>% group_by(g, .drop=FALSE)

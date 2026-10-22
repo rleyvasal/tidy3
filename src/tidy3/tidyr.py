@@ -52,12 +52,15 @@ def full_seq(x: Any, period: float, tol: float = 1e-6) -> Any:
 
 
 def _full_seq_values(values: list[Any], period: float, tol: float) -> list[Any]:
+    if not values:
+        return []
+    fast = _full_seq_array(values, period, tol)
+    if fast is not None:
+        return fast
     import math
 
     if any(v is None or (isinstance(v, float) and math.isnan(v)) for v in values):
         raise ValueError("full_seq() x must not contain missing values")
-    if not values:
-        return []
     numbers = [float(v) for v in values]
     low, high = min(numbers), max(numbers)
     for value in numbers:
@@ -70,12 +73,62 @@ def _full_seq_values(values: list[Any], period: float, tol: float) -> list[Any]:
     return [low + index * period for index in range(count + 1)]
 
 
+def _full_seq_array(values: list[Any], period: float, tol: float) -> list[float] | None:
+    """The sequence when every value is a finite number. None asks for the slow path."""
+    import numpy as np
+
+    try:
+        numbers = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if numbers.shape != (len(values),) or not np.isfinite(numbers).all():
+        return None
+    low = float(numbers.min())
+    high = float(numbers.max())
+    offset = np.mod(numbers - low, period)
+    if np.any((offset > tol) & ((period - offset) > tol)):
+        raise ValueError("full_seq() x is not a regular sequence")
+    count = int(round((high - low) / period))
+    return (low + np.arange(count + 1, dtype=np.float64) * period).tolist()
+
+
+def _column_full_seq(lf: pl.LazyFrame, column: str, period: float, tol: float) -> list[float] | None:
+    """full_seq of a numeric Polars column without copying the column into Python."""
+    dtype = lf.collect_schema().get(column)
+    if dtype is None or not (dtype.is_integer() or dtype.is_float()):
+        return None
+    # Column full_seq ignores nulls, matching the collect-then-drop path.
+    # A float NaN is still a missing value and raises.
+    number = pl.col(column).cast(pl.Float64)
+    if dtype.is_float():
+        nans = lf.select(number.is_nan().sum().alias("nans")).collect()
+        if nans["nans"][0]:
+            raise ValueError("full_seq() x must not contain missing values")
+    stats = lf.select(number.min().alias("low"), number.max().alias("high")).collect()
+    low = stats["low"][0]
+    high = stats["high"][0]
+    if low is None:
+        return []
+    low, high = float(low), float(high)
+    offset = (number - low) % period
+    off_grid = lf.select(
+        (offset.is_not_null() & (offset > tol) & ((period - offset) > tol)).any().alias("bad")
+    ).collect()
+    if off_grid["bad"][0]:
+        raise ValueError("full_seq() x is not a regular sequence")
+    count = int(round((high - low) / period))
+    return [low + index * period for index in range(count + 1)]
+
+
 def _value_list(tf: Any, name: str, spec: Any) -> list[Any]:
     """Unique sorted values for a named ``expand()``/``complete()`` input."""
     if isinstance(spec, FullSeq):
         if tf._backend == "pandas":
             present = tf._pdf[spec.column].dropna().tolist()
         else:
+            fast = _column_full_seq(tf._lf, spec.column, spec.period, spec.tol)
+            if fast is not None:
+                return fast
             present = (
                 tf._lf.select(pl.col(spec.column).drop_nulls()).collect().to_series().to_list()
             )
@@ -1449,19 +1502,27 @@ def build_wider_spec(
     pairs = [(value, combo) for value in value_columns for combo in combos]
     if names_vary == "slowest":
         pairs.sort(key=lambda pair: (combos.index(pair[1]), value_columns.index(pair[0])))
-    return tidy(
-        pl.DataFrame(
-            {
-                ".name": [
-                    _pivot_label(v, c, name_columns, value_columns, names_prefix, names_sep, names_glue)
-                    for v, c in pairs
-                ],
-                ".value": [v for v, _ in pairs],
-                **{name: [c[i] for _, c in pairs] for i, name in enumerate(name_columns)},
-            },
-            strict=False,
-        )
+    spec = pl.DataFrame(
+        {
+            ".name": [
+                _pivot_label(v, c, name_columns, value_columns, names_prefix, names_sep, names_glue)
+                for v, c in pairs
+            ],
+            ".value": [v for v, _ in pairs],
+            **{name: [c[i] for _, c in pairs] for i, name in enumerate(name_columns)},
+        },
+        strict=False,
     )
+    # Typed even with no rows, as in tidyr: text labels, name columns as in data.
+    schema = (
+        tf._lf.collect_schema() if tf._backend != "pandas"
+        else pl.from_pandas(tf._pdf.loc[:, name_columns]).schema
+    )
+    return tidy(spec.with_columns(
+        pl.col(".name").cast(pl.String),
+        pl.col(".value").cast(pl.String),
+        *(pl.col(name).cast(schema[name]) for name in name_columns),
+    ))
 
 
 def pivot_wider_spec(
@@ -1489,6 +1550,11 @@ def pivot_wider_spec(
             else resolve_selection(tf, [id_cols])
         )
         unused = [c for c in all_columns if c not in {*identifiers, *keys, *values}]
+        if table.height == 0:
+            # No output columns: one row per distinct id, as tidyr returns.
+            from tidy3.verbs import distinct
+
+            return tf >> distinct(*identifiers)
         out = _pivot_wider_core(
             names_from=keys if len(keys) > 1 else keys[0],
             values_from=values if len(values) > 1 else values[0],
@@ -2187,14 +2253,13 @@ def _unnest_longer_core(
             pdf = tf._pdf.copy(deep=False)
             if not keep_empty:
                 keep = pdf[column].map(
-                    lambda value: isinstance(value, (list, tuple))
-                    and len(value) > 0
+                    lambda value: _list_cell(value) and len(value) > 0
                 )
                 pdf = pdf.loc[keep]
             if indices_to:
                 pdf[indices_to] = pdf[column].map(
                     lambda value: list(range(1, len(value) + 1))
-                    if isinstance(value, (list, tuple))
+                    if _list_cell(value)
                     else [pd.NA]
                     if keep_empty
                     else []
@@ -2319,8 +2384,7 @@ def unnest(
 
             if not keep_empty:
                 keep = pdf[column].map(
-                    lambda value: isinstance(value, (list, tuple))
-                    and len(value) > 0
+                    lambda value: _list_cell(value) and len(value) > 0
                 )
                 pdf = pdf.loc[keep]
             pdf = pdf.explode(column, ignore_index=True)
@@ -2413,7 +2477,7 @@ def _unnest_wider_core(column: str, *, names_sep: str | None = None) -> Verb:
             first = next((value for value in values if value is not None), None)
             if isinstance(first, dict):
                 expanded = pd.DataFrame(values.map(lambda value: value or {}).tolist(), index=tf._pdf.index)
-            elif isinstance(first, (list, tuple)):
+            elif _list_cell(first):
                 if names_sep is None:
                     raise ValueError("names_sep is required for unnamed list values")
                 expanded = pd.DataFrame(values.tolist(), index=tf._pdf.index)
@@ -3161,17 +3225,22 @@ def _pl_hoist(tf: Any, column: str, specs: list[tuple[str, Any]], remove: bool, 
     return _transform_columns(result, transform, [name for name, _ in specs], "transform")
 
 
+def _list_cell(value: Any) -> bool:
+    """A pandas list-column cell. Polars list columns arrive as NumPy arrays."""
+    return isinstance(value, (list, tuple, np.ndarray))
+
+
 def _pluck(value: Any, keys: list[Any]) -> Any:
     for key in keys:
         if value is None:
             return None
         if isinstance(value, dict):
             value = value.get(key)
-        elif isinstance(value, (list, tuple)) and isinstance(key, int):
+        elif _list_cell(value) and isinstance(key, int):
             value = value[key] if -len(value) <= key < len(value) else None
         else:
             return None
-    return value
+    return value.item() if isinstance(value, np.generic) else value
 
 
 def pack(name: str, *cols: Any) -> Verb:

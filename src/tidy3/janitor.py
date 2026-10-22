@@ -14,6 +14,7 @@ import warnings
 from datetime import date, datetime
 from typing import Any
 
+import numpy as np
 import polars as pl
 
 from tidy3.verbs import Verb
@@ -241,7 +242,18 @@ def _empty_pandas_columns(pdf: Any, cutoff: float) -> list[str]:
     return kept
 
 
+def _frozen(value: Any) -> Any:
+    """A hashable stand-in for a list, array or dict cell, compared by content."""
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return ("__list", tuple(_frozen(item) for item in value))
+    if isinstance(value, dict):
+        return ("__dict", tuple((key, _frozen(item)) for key, item in value.items()))
+    return value.item() if isinstance(value, np.generic) else value
+
+
 def _constant_pandas(series: Any, na_rm: bool) -> bool:
+    if series.dtype == object and series.map(lambda v: isinstance(v, (list, tuple, np.ndarray, dict))).any():
+        series = series.map(_frozen)
     if na_rm:
         return int(series.dropna().nunique(dropna=True)) <= 1
     return int(series.nunique(dropna=False)) <= 1

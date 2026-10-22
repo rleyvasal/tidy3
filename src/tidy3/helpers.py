@@ -253,28 +253,18 @@ def row_means(*cols: Any, na_rm: bool = False) -> Any:
 # ── flags ───────────────────────────────────────────────────────────────
 
 
-def _polars_flags(series: pl.Series) -> dict[str, pl.Series]:
-    size = series.len()
-    false = pl.Series([False] * size)
-    null = series.is_null()
+def _polars_flag(name: str, series: pl.Series) -> pl.Series:
+    """One of is_na/is_nan/is_finite/is_infinite, computed natively."""
     dtype = series.dtype
     if dtype.is_float():
-        nan = series.is_nan().fill_null(False)
-        infinite = series.is_infinite().fill_null(False)
-        return {
-            "is_na": null | nan,
-            "is_nan": nan,
-            "is_finite": series.is_finite().fill_null(False),
-            "is_infinite": infinite,
-        }
-    if dtype.is_integer() or dtype.is_numeric():
-        return {
-            "is_na": null,
-            "is_nan": false,
-            "is_finite": ~null,
-            "is_infinite": false,
-        }
-    return {"is_na": null, "is_nan": false, "is_finite": false, "is_infinite": false}
+        if name == "is_na":
+            return series.is_null() | series.is_nan().fill_null(False)
+        return getattr(series, name)().fill_null(False)
+    if name == "is_na":
+        return series.is_null()
+    if name == "is_finite" and dtype.is_numeric():
+        return series.is_not_null()
+    return pl.repeat(False, series.len(), dtype=pl.Boolean, eager=True)
 
 
 def _pandas_flags(series: pd.Series) -> dict[str, pd.Series]:
@@ -311,9 +301,9 @@ def _pandas_flags(series: pd.Series) -> dict[str, pd.Series]:
 
 def _flag_expr(name: str, value: pl.Expr) -> pl.Expr:
     def batch(series: pl.Series) -> pl.Series:
-        return _polars_flags(series)[name]
+        return _polars_flag(name, series)
 
-    return value.map_batches(batch, return_dtype=pl.Boolean)
+    return value.map_batches(batch, return_dtype=pl.Boolean, is_elementwise=True)
 
 
 # ── math ────────────────────────────────────────────────────────────────

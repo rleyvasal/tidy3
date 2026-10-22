@@ -1,0 +1,3999 @@
+{
+  "date": "2026-10-21",
+  "scope": "Coverage audit, not an all-functions timing report",
+  "git_head": "e68c534eb2aebe5d16c472da3bd3f4ccfb6ca9d9",
+  "working_tree": "Includes uncommitted rolling-join and benchmark changes",
+  "python": "3.14.6",
+  "polars": "1.42.1",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "exported_functions": 351,
+  "other_exports": [
+    {
+      "name": "TidyFrame",
+      "kind": "type"
+    },
+    {
+      "name": "ColumnNotFoundError",
+      "kind": "type"
+    },
+    {
+      "name": "JoinCondition",
+      "kind": "type"
+    },
+    {
+      "name": "JoinSpec",
+      "kind": "type"
+    },
+    {
+      "name": "Selector",
+      "kind": "type"
+    },
+    {
+      "name": "env",
+      "kind": "_Env"
+    },
+    {
+      "name": "ExportResult",
+      "kind": "type"
+    },
+    {
+      "name": "ConversionError",
+      "kind": "type"
+    },
+    {
+      "name": "__version__",
+      "kind": "str"
+    }
+  ],
+  "function_status_counts": {
+    "validated": 28,
+    "legacy-native": 2,
+    "pending": 321
+  },
+  "public_tidyframe_methods": 98,
+  "functions": [
+    {
+      "name": "abs",
+      "module": "helpers",
+      "source": "src/tidy3/helpers.py",
+      "line": 159,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "across",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 676,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "add_count",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2983,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "add_tally",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2997,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "add_with_rollback",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 173,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "all",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 216,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "all_of",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 260,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "anti_join",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4164,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "any",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 216,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "any_of",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 274,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "arrange",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1753,
+      "status": "legacy-native",
+      "cases": []
+    },
+    {
+      "name": "as_character",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1650,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "as_date",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1716,
+      "status": "validated",
+      "cases": [
+        "column/as_date"
+      ]
+    },
+    {
+      "name": "as_datetime",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1726,
+      "status": "validated",
+      "cases": [
+        "column/as_datetime"
+      ]
+    },
+    {
+      "name": "as_double",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1615,
+      "status": "validated",
+      "cases": [
+        "column/as_double"
+      ]
+    },
+    {
+      "name": "as_integer",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1632,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "as_logical",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1702,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "as_numeric",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1626,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "as_string",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1691,
+      "status": "validated",
+      "cases": [
+        "column/as_string"
+      ]
+    },
+    {
+      "name": "between",
+      "module": "join_spec",
+      "source": "src/tidy3/join_spec.py",
+      "line": 105,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "between_values",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 487,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "bind_cols",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4358,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "bind_rows",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4277,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "boundary",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 106,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "build_longer_spec",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 1282,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "build_wider_spec",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 1423,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "c_across",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 803,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "case_match",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 581,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "case_when",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 528,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "ceiling",
+      "module": "helpers",
+      "source": "src/tidy3/helpers.py",
+      "line": 169,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "ceiling_date",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 328,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "check_pivot_spec",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 1275,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "chop",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 2935,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "clean_names",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1560,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "closest",
+      "module": "join_spec",
+      "source": "src/tidy3/join_spec.py",
+      "line": 92,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "coalesce",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 518,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "col",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 200,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "col_range",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 232,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "coll",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 77,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "collect",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4840,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "collect_known_names",
+      "module": "export",
+      "source": "src/tidy3/export.py",
+      "line": 94,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "colnames",
+      "module": "eda",
+      "source": "src/tidy3/eda.py",
+      "line": 169,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "cols_between",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 253,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "compare_df_cols",
+      "module": "janitor",
+      "source": "src/tidy3/janitor.py",
+      "line": 528,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "compare_df_cols_same",
+      "module": "janitor",
+      "source": "src/tidy3/janitor.py",
+      "line": 607,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "complete",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 626,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "compute",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4868,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "consecutive_id",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 495,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "contains",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 197,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "count",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2894,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "cross_join",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4180,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "crossing",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 540,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "cumall",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 393,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "cumany",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 397,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "cume_dist",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 341,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "cummean",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 389,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "cur_column",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 692,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "cur_group",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 704,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "cur_group_id",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 718,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "cur_group_rows",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 774,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "day",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 195,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "days_in_month",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 340,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "dense_rank",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 333,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "desc",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 205,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "describe",
+      "module": "eda",
+      "source": "src/tidy3/eda.py",
+      "line": 316,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "describe_class",
+      "module": "janitor",
+      "source": "src/tidy3/janitor.py",
+      "line": 395,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "dim",
+      "module": "eda",
+      "source": "src/tidy3/eda.py",
+      "line": 207,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "distinct",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1800,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "dmy",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1852,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "dmy_hms",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1918,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "drop",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1280,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "drop_na",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 200,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "dtypes",
+      "module": "eda",
+      "source": "src/tidy3/eda.py",
+      "line": 218,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "ends_with",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 181,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "eq",
+      "module": "join_spec",
+      "source": "src/tidy3/join_spec.py",
+      "line": 72,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "everything",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 152,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "excel_numeric_to_date",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 638,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "excel_sheets",
+      "module": "io",
+      "source": "src/tidy3/io.py",
+      "line": 416,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "expand",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 369,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "expand_grid",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 527,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "fct_infreq",
+      "module": "forcats",
+      "source": "src/tidy3/forcats.py",
+      "line": 71,
+      "status": "validated",
+      "cases": [
+        "grouped/fct_infreq",
+        "lazy-scan/fct_infreq"
+      ]
+    },
+    {
+      "name": "fct_relevel",
+      "module": "forcats",
+      "source": "src/tidy3/forcats.py",
+      "line": 37,
+      "status": "validated",
+      "cases": [
+        "grouped/fct_relevel"
+      ]
+    },
+    {
+      "name": "fct_reorder",
+      "module": "forcats",
+      "source": "src/tidy3/forcats.py",
+      "line": 52,
+      "status": "validated",
+      "cases": [
+        "grouped/fct_reorder"
+      ]
+    },
+    {
+      "name": "fct_rev",
+      "module": "forcats",
+      "source": "src/tidy3/forcats.py",
+      "line": 83,
+      "status": "validated",
+      "cases": [
+        "grouped/fct_rev"
+      ]
+    },
+    {
+      "name": "fill",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 253,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "filter",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 832,
+      "status": "validated",
+      "cases": [
+        "grouped/filter"
+      ]
+    },
+    {
+      "name": "filter_out",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 893,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "find_header",
+      "module": "janitor",
+      "source": "src/tidy3/janitor.py",
+      "line": 675,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "first",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 285,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "fixed",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 72,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "floor",
+      "module": "helpers",
+      "source": "src/tidy3/helpers.py",
+      "line": 164,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "floor_date",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 315,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "force_tz",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 269,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "full_join",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 3970,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "full_seq",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 39,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "ge",
+      "module": "join_spec",
+      "source": "src/tidy3/join_spec.py",
+      "line": 80,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "get_dupes",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1853,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "glimpse",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1711,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "group_by",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2222,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "group_cols",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 308,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "group_data",
+      "module": "groups",
+      "source": "src/tidy3/groups.py",
+      "line": 179,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "group_indices",
+      "module": "groups",
+      "source": "src/tidy3/groups.py",
+      "line": 222,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "group_keys",
+      "module": "groups",
+      "source": "src/tidy3/groups.py",
+      "line": 197,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "group_map",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2395,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "group_modify",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2428,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "group_nest",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2461,
+      "status": "validated",
+      "cases": [
+        "grouped/group_nest"
+      ]
+    },
+    {
+      "name": "group_rows",
+      "module": "groups",
+      "source": "src/tidy3/groups.py",
+      "line": 206,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "group_size",
+      "module": "groups",
+      "source": "src/tidy3/groups.py",
+      "line": 214,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "group_split",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2386,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "group_trim",
+      "module": "groups",
+      "source": "src/tidy3/groups.py",
+      "line": 241,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "group_vars",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 729,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "group_walk",
+      "module": "groups",
+      "source": "src/tidy3/groups.py",
+      "line": 273,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "groups",
+      "module": "groups",
+      "source": "src/tidy3/groups.py",
+      "line": 234,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "gt",
+      "module": "join_spec",
+      "source": "src/tidy3/join_spec.py",
+      "line": 76,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "head",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 3008,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "hoist",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 3035,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "hour",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 243,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "if_all",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 786,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "if_any",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 782,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "if_else",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 524,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "inner_join",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 3938,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "intersect",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4524,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "invert_match",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 340,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "is_bool",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 412,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "is_boolean",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 399,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "is_categorical",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 454,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "is_character",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 394,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "is_datetime",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 417,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "is_finite",
+      "module": "helpers",
+      "source": "src/tidy3/helpers.py",
+      "line": 149,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "is_float",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 363,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "is_infinite",
+      "module": "helpers",
+      "source": "src/tidy3/helpers.py",
+      "line": 154,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "is_integer",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 347,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "is_na",
+      "module": "helpers",
+      "source": "src/tidy3/helpers.py",
+      "line": 128,
+      "status": "validated",
+      "cases": [
+        "column/is_na"
+      ]
+    },
+    {
+      "name": "is_nan",
+      "module": "helpers",
+      "source": "src/tidy3/helpers.py",
+      "line": 139,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "is_numeric",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 328,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "is_string",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 379,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "is_temporal",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 433,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "isoweek",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 225,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "join_by",
+      "module": "join_spec",
+      "source": "src/tidy3/join_spec.py",
+      "line": 57,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "lag",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 370,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "last",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 299,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "last_col",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 295,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "le",
+      "module": "join_spec",
+      "source": "src/tidy3/join_spec.py",
+      "line": 88,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "lead",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 351,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "left_join",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 3922,
+      "status": "validated",
+      "cases": [
+        "closest/wide-speed-guard",
+        "closest/five-scaling-cases"
+      ]
+    },
+    {
+      "name": "locale",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 209,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "looks_like_tidy_pipe",
+      "module": "partial_run",
+      "source": "src/tidy3/partial_run.py",
+      "line": 38,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "lt",
+      "module": "join_spec",
+      "source": "src/tidy3/join_spec.py",
+      "line": 84,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "make_clean_names",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1446,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "matches",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 213,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "max",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 216,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "maybe_rewrite_cell",
+      "module": "partial_run",
+      "source": "src/tidy3/partial_run.py",
+      "line": 371,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "mdy",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1847,
+      "status": "validated",
+      "cases": [
+        "column/mdy"
+      ]
+    },
+    {
+      "name": "mdy_hms",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1910,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "mean",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 216,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "median",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 216,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "min",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 216,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "min_rank",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 329,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "minute",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 248,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "month",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 190,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "months",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 152,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "mutate",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 947,
+      "status": "legacy-native",
+      "cases": []
+    },
+    {
+      "name": "n",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 210,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "n_distinct",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 445,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "n_groups",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 747,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "na_if",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 483,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "names",
+      "module": "eda",
+      "source": "src/tidy3/eda.py",
+      "line": 99,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "nb_export",
+      "module": "export",
+      "source": "src/tidy3/export.py",
+      "line": 392,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "ncol",
+      "module": "eda",
+      "source": "src/tidy3/eda.py",
+      "line": 200,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "near",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 477,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "nest",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 2056,
+      "status": "validated",
+      "cases": [
+        "grouped/nest_by"
+      ]
+    },
+    {
+      "name": "nest_by",
+      "module": "groups",
+      "source": "src/tidy3/groups.py",
+      "line": 293,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "nest_join",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 3987,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "nesting",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 23,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "normalize_pipe_source",
+      "module": "partial_run",
+      "source": "src/tidy3/partial_run.py",
+      "line": 72,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "now",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 370,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "nrow",
+      "module": "eda",
+      "source": "src/tidy3/eda.py",
+      "line": 193,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "nth",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 455,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "ntile",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 345,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "num_range",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 224,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "options",
+      "module": "options",
+      "source": "src/tidy3/options.py",
+      "line": 25,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "order_by",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 709,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "overlaps",
+      "module": "join_spec",
+      "source": "src/tidy3/join_spec.py",
+      "line": 150,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "pack",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 3177,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "parse_date",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1786,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "parse_datetime",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1810,
+      "status": "validated",
+      "cases": [
+        "column/parse_datetime"
+      ]
+    },
+    {
+      "name": "parse_double",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1745,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "parse_integer",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1757,
+      "status": "validated",
+      "cases": [
+        "column/parse_integer"
+      ]
+    },
+    {
+      "name": "parse_logical",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1767,
+      "status": "validated",
+      "cases": [
+        "column/parse_logical"
+      ]
+    },
+    {
+      "name": "parse_number",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1775,
+      "status": "validated",
+      "cases": [
+        "column/parse_number"
+      ]
+    },
+    {
+      "name": "partial_run",
+      "module": "partial_run",
+      "source": "src/tidy3/partial_run.py",
+      "line": 453,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "peek",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4905,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "percent_rank",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 337,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "pick",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 799,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "pivot_longer",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 944,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "pivot_longer_spec",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 1346,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "pivot_wider",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 1019,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "pivot_wider_spec",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 1467,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "pmax",
+      "module": "helpers",
+      "source": "src/tidy3/helpers.py",
+      "line": 204,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "pmin",
+      "module": "helpers",
+      "source": "src/tidy3/helpers.py",
+      "line": 190,
+      "status": "validated",
+      "cases": [
+        "column/pmin"
+      ]
+    },
+    {
+      "name": "problems",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1573,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "pull",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1685,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "quarter",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 230,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "read_csv",
+      "module": "io",
+      "source": "src/tidy3/io.py",
+      "line": 343,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "read_delim",
+      "module": "io",
+      "source": "src/tidy3/io.py",
+      "line": 398,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "read_excel",
+      "module": "io",
+      "source": "src/tidy3/io.py",
+      "line": 425,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "read_tsv",
+      "module": "io",
+      "source": "src/tidy3/io.py",
+      "line": 392,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "recode",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 770,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "recode_values",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 644,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "reframe",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2749,
+      "status": "validated",
+      "cases": [
+        "grouped/reframe"
+      ]
+    },
+    {
+      "name": "regex",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 82,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "relocate",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1359,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "remove_constant",
+      "module": "janitor",
+      "source": "src/tidy3/janitor.py",
+      "line": 268,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "remove_empty",
+      "module": "janitor",
+      "source": "src/tidy3/janitor.py",
+      "line": 163,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "rename",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1296,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "rename_with",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1397,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "replace_na",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 225,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "replace_values",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 675,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "replace_when",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 696,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "rescale",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 422,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "right_join",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 3954,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "round",
+      "module": "helpers",
+      "source": "src/tidy3/helpers.py",
+      "line": 174,
+      "status": "validated",
+      "cases": [
+        "column/round"
+      ]
+    },
+    {
+      "name": "row_means",
+      "module": "helpers",
+      "source": "src/tidy3/helpers.py",
+      "line": 237,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "row_number",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 324,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "row_sums",
+      "module": "helpers",
+      "source": "src/tidy3/helpers.py",
+      "line": 212,
+      "status": "validated",
+      "cases": [
+        "column/row_sums"
+      ]
+    },
+    {
+      "name": "row_to_names",
+      "module": "janitor",
+      "source": "src/tidy3/janitor.py",
+      "line": 733,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "rows_append",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4797,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "rows_delete",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4829,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "rows_insert",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4786,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "rows_patch",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4812,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "rows_update",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4801,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "rows_upsert",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4823,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "rowwise",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2208,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "sample_frac",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 3037,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "sample_n",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 3015,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "scale",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 401,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "scan_csv",
+      "module": "io",
+      "source": "src/tidy3/io.py",
+      "line": 304,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "scan_ipc",
+      "module": "io",
+      "source": "src/tidy3/io.py",
+      "line": 53,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "scan_parquet",
+      "module": "io",
+      "source": "src/tidy3/io.py",
+      "line": 48,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "sd",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 216,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "second",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 253,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "select",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1181,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "semi_join",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4148,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "separate",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 1794,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "separate_longer_delim",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 2480,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "separate_longer_position",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 2906,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "separate_wider_delim",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 2502,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "separate_wider_position",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 2831,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "separate_wider_regex",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 2750,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "set_names",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1607,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "setdiff",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4528,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "setequal",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4536,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "slice",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1917,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "slice_head",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2011,
+      "status": "validated",
+      "cases": [
+        "grouped/slice_head"
+      ]
+    },
+    {
+      "name": "slice_max",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2183,
+      "status": "validated",
+      "cases": [
+        "grouped/slice_max"
+      ]
+    },
+    {
+      "name": "slice_min",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2158,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "slice_sample",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 3059,
+      "status": "validated",
+      "cases": [
+        "grouped/slice_sample"
+      ]
+    },
+    {
+      "name": "slice_tail",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2032,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "starts_with",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 163,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "std",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 216,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "stop_for_problems",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1583,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_c",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 599,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_conv",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 779,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_count",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 258,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_detect",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 243,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_dup",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 505,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_ends",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 253,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_equal",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 293,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_escape",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 774,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_extract",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 533,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_extract_all",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 543,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_flatten",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 622,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_flatten_comma",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 637,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_glue",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 671,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_glue_data",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 682,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_ilike",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 288,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_length",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 352,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_like",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 277,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_locate",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 330,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_locate_all",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 335,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_match",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 548,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_match_all",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 558,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_order",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 711,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_pad",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 496,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_remove",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 445,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_remove_all",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 450,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_replace",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 417,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_replace_all",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 422,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_replace_na",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 455,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_sort",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 722,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_split",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 564,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_split_1",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 573,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_split_fixed",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 580,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_split_i",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 588,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_squish",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 491,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_starts",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 248,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_sub",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 362,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_sub_all",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 369,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_subset",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 313,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_to_lower",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 470,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_to_sentence",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 480,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_to_title",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 475,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_to_upper",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 465,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_trim",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 485,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_trunc",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 387,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_unique",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 733,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_view",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 752,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_which",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 320,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_width",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 357,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "str_wrap",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 513,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "sum",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 233,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "summarise",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2609,
+      "status": "validated",
+      "cases": [
+        "grouped/summarise_mean",
+        "grouped/summarise_nth"
+      ]
+    },
+    {
+      "name": "summarize",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2609,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "summary",
+      "module": "eda",
+      "source": "src/tidy3/eda.py",
+      "line": 282,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "symdiff",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4532,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "tally",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2928,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "tidy",
+      "module": "frame",
+      "source": "src/tidy3/frame.py",
+      "line": 1535,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "to_numpy",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4881,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "today",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 361,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "transform_cell",
+      "module": "export",
+      "source": "src/tidy3/export.py",
+      "line": 308,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "transform_source",
+      "module": "export",
+      "source": "src/tidy3/export.py",
+      "line": 240,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "transmute",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 1174,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "unchop",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 2967,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "uncount",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 549,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "ungroup",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2307,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "union",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4516,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "union_all",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 4520,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "unite",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 1985,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "unnest",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 2246,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "unnest_auto",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 3020,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "unnest_longer",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 2136,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "unnest_wider",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 2381,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "unpack",
+      "module": "tidyr",
+      "source": "src/tidy3/tidyr.py",
+      "line": 3191,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "var",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 216,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "wday",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 204,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "week",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 220,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "when_all",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 762,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "when_any",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 753,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "where",
+      "module": "tidyselect",
+      "source": "src/tidy3/tidyselect.py",
+      "line": 284,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "with_groups",
+      "module": "verbs",
+      "source": "src/tidy3/verbs.py",
+      "line": 2327,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "with_order",
+      "module": "expr",
+      "source": "src/tidy3/expr.py",
+      "line": 722,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "with_tz",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 258,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "within",
+      "module": "join_spec",
+      "source": "src/tidy3/join_spec.py",
+      "line": 136,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "word",
+      "module": "stringr",
+      "source": "src/tidy3/stringr.py",
+      "line": 398,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "yday",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 215,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "year",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 184,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "years",
+      "module": "dates",
+      "source": "src/tidy3/dates.py",
+      "line": 163,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "ym",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1857,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "ymd",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1835,
+      "status": "validated",
+      "cases": [
+        "column/ymd"
+      ]
+    },
+    {
+      "name": "ymd_hm",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1898,
+      "status": "pending",
+      "cases": []
+    },
+    {
+      "name": "ymd_hms",
+      "module": "convert",
+      "source": "src/tidy3/convert.py",
+      "line": 1878,
+      "status": "validated",
+      "cases": [
+        "column/ymd_hms"
+      ]
+    }
+  ],
+  "methods": [
+    {
+      "name": "add_count",
+      "line": 604,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "add_tally",
+      "line": 615,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "anti_join",
+      "line": 944,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "arrange",
+      "line": 466,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "bind_cols",
+      "line": 968,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "bind_rows",
+      "line": 963,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "clean_names",
+      "line": 439,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "collect",
+      "line": 1090,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "colnames",
+      "line": 278,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "compare_df_cols",
+      "line": 526,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "compare_df_cols_same",
+      "line": 531,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "complete",
+      "line": 736,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "compute",
+      "line": 1070,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "count",
+      "line": 579,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "cross_join",
+      "line": 958,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "describe",
+      "line": 270,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "distinct",
+      "line": 471,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "drop",
+      "line": 419,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "drop_na",
+      "line": 714,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "expand",
+      "line": 731,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "explain",
+      "line": 1424,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "fill",
+      "line": 724,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "filter",
+      "line": 379,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "filter_out",
+      "line": 384,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "find_header",
+      "line": 521,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "full_join",
+      "line": 902,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "get_dupes",
+      "line": 487,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "ggplot",
+      "line": 1440,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "glimpse",
+      "line": 461,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "group_by",
+      "line": 536,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "head",
+      "line": 626,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "inner_join",
+      "line": 888,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "intersect",
+      "line": 983,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "lazy",
+      "line": 1421,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "left_join",
+      "line": 881,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "mutate",
+      "line": 389,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "names_list",
+      "line": 284,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "nest",
+      "line": 833,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "nest_join",
+      "line": 909,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "pivot_longer",
+      "line": 746,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "pivot_wider",
+      "line": 771,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "preview",
+      "line": 1429,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "problems",
+      "line": 1364,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "pull",
+      "line": 456,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "reframe",
+      "line": 574,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "relocate",
+      "line": 446,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "remove_constant",
+      "line": 497,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "remove_empty",
+      "line": 492,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "rename",
+      "line": 424,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "rename_with",
+      "line": 429,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "replace_na",
+      "line": 719,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "right_join",
+      "line": 895,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "row_to_names",
+      "line": 502,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "rows_append",
+      "line": 1014,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "rows_delete",
+      "line": 1048,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "rows_insert",
+      "line": 1003,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "rows_patch",
+      "line": 1030,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "rows_update",
+      "line": 1019,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "rows_upsert",
+      "line": 1041,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "rowwise",
+      "line": 549,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "sample_frac",
+      "line": 708,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "sample_n",
+      "line": 703,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "select",
+      "line": 414,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "semi_join",
+      "line": 930,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "separate",
+      "line": 796,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "set_names",
+      "line": 434,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "setdiff",
+      "line": 988,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "setequal",
+      "line": 998,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "show",
+      "line": 1436,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "slice",
+      "line": 631,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "slice_head",
+      "line": 636,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "slice_max",
+      "line": 666,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "slice_min",
+      "line": 650,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "slice_sample",
+      "line": 682,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "slice_tail",
+      "line": 643,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "stop_for_problems",
+      "line": 1370,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "summarise",
+      "line": 559,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "summarize",
+      "line": 559,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "summary",
+      "line": 260,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "symdiff",
+      "line": 993,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "tally",
+      "line": 593,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "to_arrow",
+      "line": 1189,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "to_numpy",
+      "line": 1192,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "to_pandas",
+      "line": 1175,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "to_polars",
+      "line": 1170,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "transmute",
+      "line": 409,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "ungroup",
+      "line": 554,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "union",
+      "line": 973,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "union_all",
+      "line": 978,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "unite",
+      "line": 819,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "unnest",
+      "line": 861,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "unnest_longer",
+      "line": 844,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "unnest_wider",
+      "line": 874,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "with_polars",
+      "line": 1059,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "write_csv",
+      "line": 1280,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "write_excel",
+      "line": 1376,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "write_ipc",
+      "line": 1340,
+      "status": "pending method benchmark"
+    },
+    {
+      "name": "write_parquet",
+      "line": 1316,
+      "status": "pending method benchmark"
+    }
+  ],
+  "timings": [
+    {
+      "case": "test_function_speed_is_close_to_native[parse_integer-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 4.222707997541875,
+      "raw_polars_ms": 0.8639580046292394,
+      "tidy3_over_polars": 4.887631082663579,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 3.358749992912635
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[parse_integer-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 6.202459000633098,
+      "raw_polars_ms": 0.9009170025819913,
+      "tidy3_over_polars": 6.884606443054249,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 5.301541998051107
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[parse_number-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 31.36070800246671,
+      "raw_polars_ms": 16.452958996524103,
+      "tidy3_over_polars": 1.906083155564422,
+      "ci_budget_ms": 493.5887698957231,
+      "excess_ms": 14.907749005942605
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[parse_number-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 32.772625010693446,
+      "raw_polars_ms": 15.961958008119836,
+      "tidy3_over_polars": 2.0531707321884967,
+      "ci_budget_ms": 478.8587402435951,
+      "excess_ms": 16.81066700257361
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[as_double-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 4.787875004694797,
+      "raw_polars_ms": 1.5368750027846545,
+      "tidy3_over_polars": 3.1153314329530217,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 3.2510000019101426
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[as_double-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 7.18537499778904,
+      "raw_polars_ms": 1.5094999980647117,
+      "tidy3_over_polars": 4.760102687645718,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 5.6758749997243285
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[parse_logical-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 14.4846249895636,
+      "raw_polars_ms": 3.7534169969148934,
+      "tidy3_over_polars": 3.8590503004247014,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 10.731207992648706
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[parse_logical-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 22.874375004903413,
+      "raw_polars_ms": 3.6303750093793496,
+      "tidy3_over_polars": 6.300829789155591,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 19.243999995524064
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[as_date-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 6.160249991808087,
+      "raw_polars_ms": 1.6065830131992698,
+      "tidy3_over_polars": 3.8343801354782596,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 4.553666978608817
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[as_date-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 29.063791007502005,
+      "raw_polars_ms": 1.5038340061437339,
+      "tidy3_over_polars": 19.326462155241448,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 27.55995700135827
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[ymd-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 19.045749999349937,
+      "raw_polars_ms": 1.5648330008843914,
+      "tidy3_over_polars": 12.171107069307661,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 17.480916998465545
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[ymd-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 41.81100000278093,
+      "raw_polars_ms": 1.5761670074425638,
+      "tidy3_over_polars": 26.52701129090506,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 40.234832995338365
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[mdy-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 18.66800000425428,
+      "raw_polars_ms": 1.571667002281174,
+      "tidy3_over_polars": 11.877834157718445,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 17.096333001973107
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[mdy-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 41.978500012191944,
+      "raw_polars_ms": 1.5695000038249418,
+      "tidy3_over_polars": 26.74641599865464,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 40.409000008367
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[parse_datetime-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 9.606125007849187,
+      "raw_polars_ms": 6.5892500133486465,
+      "tidy3_over_polars": 1.4578480082541851,
+      "ci_budget_ms": 197.6775004004594,
+      "excess_ms": 3.01687499450054
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[parse_datetime-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 10.903375005000271,
+      "raw_polars_ms": 6.467375002102926,
+      "tidy3_over_polars": 1.6859042504037478,
+      "ci_budget_ms": 194.0212500630878,
+      "excess_ms": 4.4360000028973445
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[as_datetime-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 22.805207991041243,
+      "raw_polars_ms": 6.527958990773186,
+      "tidy3_over_polars": 3.4934667977042766,
+      "ci_budget_ms": 195.83876972319558,
+      "excess_ms": 16.277249000268057
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[as_datetime-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 24.603124998975545,
+      "raw_polars_ms": 6.416916992748156,
+      "tidy3_over_polars": 3.8341036710900056,
+      "ci_budget_ms": 192.50750978244469,
+      "excess_ms": 18.18620800622739
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[ymd_hms-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 35.71337499306537,
+      "raw_polars_ms": 6.382291991030797,
+      "tidy3_over_polars": 5.595697445879053,
+      "ci_budget_ms": 191.46875973092392,
+      "excess_ms": 29.331083002034575
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[ymd_hms-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 38.872000004630536,
+      "raw_polars_ms": 6.779875009669922,
+      "tidy3_over_polars": 5.733439030835911,
+      "ci_budget_ms": 203.39625029009767,
+      "excess_ms": 32.09212499496061
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[as_string-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 4.261374997440726,
+      "raw_polars_ms": 4.105875006644055,
+      "tidy3_over_polars": 1.0378725583572426,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 0.15549999079667032
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[as_string-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 15.209417004371062,
+      "raw_polars_ms": 4.034708006656729,
+      "tidy3_over_polars": 3.7696450348519788,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 11.174708997714333
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[is_na-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 1.6898339963518083,
+      "raw_polars_ms": 0.06062499596737325,
+      "tidy3_over_polars": 27.873552309368097,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 1.629209000384435
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[is_na-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 0.8099999977275729,
+      "raw_polars_ms": 0.051333001465536654,
+      "tidy3_over_polars": 15.779322747597005,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 0.7586669962620363
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[pmin-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 0.3887089987983927,
+      "raw_polars_ms": 0.05904199497308582,
+      "tidy3_over_polars": 6.5836020441989636,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 0.3296670038253069
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[pmin-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 7.493083001463674,
+      "raw_polars_ms": 0.07700000423938036,
+      "tidy3_over_polars": 97.31276089503723,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 7.416082997224294
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[row_sums-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 0.24291699810419232,
+      "raw_polars_ms": 0.0635839969618246,
+      "tidy3_over_polars": 3.8204109478999575,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 0.17933300114236772
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[row_sums-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 14.138500002445653,
+      "raw_polars_ms": 0.07887498941272497,
+      "tidy3_over_polars": 179.25200507430657,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 14.059625013032928
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[round-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 5.734292004490271,
+      "raw_polars_ms": 0.17158300033770502,
+      "tidy3_over_polars": 33.419930839326696,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 5.562709004152566
+    },
+    {
+      "case": "test_function_speed_is_close_to_native[round-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "polars",
+      "tidy3_ms": 6.486582991783507,
+      "raw_polars_ms": 0.17804099479690194,
+      "tidy3_over_polars": 36.43308665615465,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 6.308541996986605
+    },
+    {
+      "case": "test_factor_on_a_lazy_scan_builds_quickly",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 14.485417006653734,
+      "raw_polars_ms": 2.3678749857936054,
+      "tidy3_over_polars": 6.117475413001532,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 12.117542020860128
+    },
+    {
+      "case": "test_many_groups_speed[fct_reorder-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 36.1023750010645,
+      "raw_polars_ms": 4.775250010425225,
+      "tidy3_over_polars": 7.560310962200211,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 31.327124990639277
+    },
+    {
+      "case": "test_many_groups_speed[fct_reorder-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "pandas",
+      "tidy3_ms": 35.74045900313649,
+      "raw_polars_ms": 6.765291996998712,
+      "tidy3_over_polars": 5.282914472722247,
+      "ci_budget_ms": 202.95875990996137,
+      "excess_ms": 28.97516700613778
+    },
+    {
+      "case": "test_many_groups_speed[fct_infreq-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 31.727207999210805,
+      "raw_polars_ms": 3.6315409961389378,
+      "tidy3_over_polars": 8.736568865102512,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 28.095667003071867
+    },
+    {
+      "case": "test_many_groups_speed[fct_infreq-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "pandas",
+      "tidy3_ms": 29.665415990166366,
+      "raw_polars_ms": 4.5948749902890995,
+      "tidy3_over_polars": 6.45619653480494,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 25.070540999877267
+    },
+    {
+      "case": "test_many_groups_speed[fct_relevel-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 19.225875003030524,
+      "raw_polars_ms": 3.409582990570925,
+      "tidy3_over_polars": 5.638776077954097,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 15.816292012459598
+    },
+    {
+      "case": "test_many_groups_speed[fct_relevel-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "pandas",
+      "tidy3_ms": 19.411916990065947,
+      "raw_polars_ms": 4.898875005892478,
+      "tidy3_over_polars": 3.962525470994229,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 14.51304198417347
+    },
+    {
+      "case": "test_many_groups_speed[fct_rev-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 15.75454100384377,
+      "raw_polars_ms": 3.593542001908645,
+      "tidy3_over_polars": 4.384126022591646,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 12.160999001935124
+    },
+    {
+      "case": "test_many_groups_speed[fct_rev-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "pandas",
+      "tidy3_ms": 14.485749998129904,
+      "raw_polars_ms": 5.100583002786152,
+      "tidy3_over_polars": 2.840018482243536,
+      "ci_budget_ms": 153.01749008358456,
+      "excess_ms": 9.385166995343752
+    },
+    {
+      "case": "test_many_groups_speed[slice_max-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 9.596374991815537,
+      "raw_polars_ms": 1.3780409935861826,
+      "tidy3_over_polars": 6.963780494542582,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 8.218333998229355
+    },
+    {
+      "case": "test_many_groups_speed[slice_max-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "pandas",
+      "tidy3_ms": 9.294916002545506,
+      "raw_polars_ms": 2.0117910025874153,
+      "tidy3_over_polars": 4.620219491284671,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 7.2831249999580905
+    },
+    {
+      "case": "test_many_groups_speed[slice_head-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 8.8441249972675,
+      "raw_polars_ms": 8.091875002719462,
+      "tidy3_over_polars": 1.0929636202110422,
+      "ci_budget_ms": 242.75625008158386,
+      "excess_ms": 0.7522499945480376
+    },
+    {
+      "case": "test_many_groups_speed[slice_head-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "pandas",
+      "tidy3_ms": 2.6289160014130175,
+      "raw_polars_ms": 8.816582994768396,
+      "tidy3_over_polars": 0.29817855772162183,
+      "ci_budget_ms": 264.4974898430519,
+      "excess_ms": -6.1876669933553785
+    },
+    {
+      "case": "test_many_groups_speed[slice_sample-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 12.884083000244573,
+      "raw_polars_ms": 31.533458008198068,
+      "tidy3_over_polars": 0.408584526216407,
+      "ci_budget_ms": 946.003740245942,
+      "excess_ms": -18.649375007953495
+    },
+    {
+      "case": "test_many_groups_speed[slice_sample-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "pandas",
+      "tidy3_ms": 3.7039169983472675,
+      "raw_polars_ms": 32.4724160018377,
+      "tidy3_over_polars": 0.11406348693419217,
+      "ci_budget_ms": 974.172480055131,
+      "excess_ms": -28.768499003490433
+    },
+    {
+      "case": "test_many_groups_speed[reframe-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 1.9513340084813535,
+      "raw_polars_ms": 1.8527499923948199,
+      "tidy3_over_polars": 1.0532095622675492,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 0.09858401608653367
+    },
+    {
+      "case": "test_many_groups_speed[reframe-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "pandas",
+      "tidy3_ms": 13.583208012278192,
+      "raw_polars_ms": 1.9831670069834217,
+      "tidy3_over_polars": 6.849250700746325,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 11.60004100529477
+    },
+    {
+      "case": "test_many_groups_speed[summarise_mean-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 1.4159169950289652,
+      "raw_polars_ms": 1.4063749986235052,
+      "tidy3_over_polars": 1.0067848165779392,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 0.00954199640545994
+    },
+    {
+      "case": "test_many_groups_speed[summarise_mean-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "pandas",
+      "tidy3_ms": 2.4252089933725074,
+      "raw_polars_ms": 1.42599998798687,
+      "tidy3_over_polars": 1.700707583312292,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 0.9992090053856373
+    },
+    {
+      "case": "test_many_groups_speed[summarise_nth-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 1.0702500003390014,
+      "raw_polars_ms": 1.1869579902850091,
+      "tidy3_over_polars": 0.9016747088766097,
+      "ci_budget_ms": 150.0,
+      "excess_ms": -0.11670798994600773
+    },
+    {
+      "case": "test_many_groups_speed[summarise_nth-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "pandas",
+      "tidy3_ms": 8.781249998719431,
+      "raw_polars_ms": 1.411499993992038,
+      "tidy3_over_polars": 6.221218587386664,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 7.369750004727393
+    },
+    {
+      "case": "test_many_groups_speed[filter-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 8.97666699893307,
+      "raw_polars_ms": 1.10862500150688,
+      "tidy3_over_polars": 8.097117588663151,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 7.8680419974261895
+    },
+    {
+      "case": "test_many_groups_speed[filter-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "pandas",
+      "tidy3_ms": 2.911041010520421,
+      "raw_polars_ms": 1.656375010497868,
+      "tidy3_over_polars": 1.7574770158150534,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 1.254666000022553
+    },
+    {
+      "case": "test_many_groups_speed[group_nest-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 6.495958004961722,
+      "raw_polars_ms": 1.3603749976027757,
+      "tidy3_over_polars": 4.775123047989534,
+      "ci_budget_ms": 1000.0,
+      "excess_ms": 5.135583007358946
+    },
+    {
+      "case": "test_many_groups_speed[group_nest-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "pandas",
+      "tidy3_ms": 264.9999580025906,
+      "raw_polars_ms": 410.8229579869658,
+      "tidy3_over_polars": 0.6450466139991092,
+      "ci_budget_ms": 1000.0,
+      "excess_ms": -145.8229999843752
+    },
+    {
+      "case": "test_many_groups_speed[nest_by-polars]",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 1.5359160024672747,
+      "raw_polars_ms": 1.4329170080600306,
+      "tidy3_over_polars": 1.0718806419547566,
+      "ci_budget_ms": 1000.0,
+      "excess_ms": 0.10299899440724403
+    },
+    {
+      "case": "test_many_groups_speed[nest_by-pandas]",
+      "input_backend": "pandas",
+      "output_backend": "pandas",
+      "tidy3_ms": 253.56770800135564,
+      "raw_polars_ms": 416.84754099696875,
+      "tidy3_over_polars": 0.6082984378290948,
+      "ci_budget_ms": 1000.0,
+      "excess_ms": -163.2798329956131
+    },
+    {
+      "case": "test_wide_closest_join_is_close_to_native",
+      "input_backend": "polars",
+      "output_backend": "polars",
+      "tidy3_ms": 6.3458750082645565,
+      "raw_polars_ms": 1.6027919918997213,
+      "tidy3_over_polars": 3.959262986298715,
+      "ci_budget_ms": 150.0,
+      "excess_ms": 4.743083016364835
+    }
+  ],
+  "timing_method": "Existing speed guards: one warm-up, best of three; run alone, no concurrent benchmark",
+  "input_boundary_note": "Pandas-input column cases include returning Polars output; raw Polars starts with Polars input. Compare these as complete backend paths, not isolated Polars wrapper overhead."
+}

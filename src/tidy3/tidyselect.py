@@ -88,10 +88,39 @@ class Selector:
         return f"<tidy3.Selector {self.label}>"
 
 
+def _pandas_cell_dtype(column: Any, dtype: Any) -> Any:
+    """The Polars type of an object column holding lists, dicts or dates, else *dtype*.
+
+    pandas stores text, lists, dicts and dates all as ``object``; without
+    this, ``where(is_character)`` would select those columns too.
+    """
+    if getattr(dtype, "kind", None) != "O":
+        return dtype
+    import numpy as np
+
+    first = next(
+        (value for value in column if value is not None and not (isinstance(value, float) and value != value)),
+        None,
+    )
+    if isinstance(first, (list, tuple, np.ndarray)):
+        return pl.List(pl.Null)
+    if isinstance(first, dict):
+        return pl.Struct([])
+    import datetime as dt
+
+    # The pandas backend keeps calendar dates as ``datetime.date`` objects.
+    if isinstance(first, dt.date) and not isinstance(first, dt.datetime):
+        return pl.Date
+    return dtype
+
+
 def _frame_schema(tf: Any) -> tuple[list[str], Mapping[str, Any]]:
     if tf._backend == "pandas":
         columns = [str(name) for name in tf._pdf.columns]
-        return columns, {str(name): dtype for name, dtype in tf._pdf.dtypes.items()}
+        return columns, {
+            str(name): _pandas_cell_dtype(tf._pdf[name], dtype)
+            for name, dtype in tf._pdf.dtypes.items()
+        }
     schema = tf._lf.collect_schema()
     return schema.names(), schema
 

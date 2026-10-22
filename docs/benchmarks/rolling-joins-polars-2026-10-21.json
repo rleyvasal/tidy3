@@ -1,0 +1,186 @@
+{
+  "python": "3.14.6",
+  "polars": "1.42.1",
+  "platform": "Darwin arm64",
+  "repeat": 3,
+  "warmup": 1,
+  "memory": true,
+  "comparisons": [
+    {
+      "name": "original_sweep",
+      "rows": 200000,
+      "lookup_rows": 100,
+      "width": 30,
+      "raw_polars_ms": 19.35991700156592,
+      "tidy3_ms": 37.319291004678234,
+      "tidy3_over_polars": 1.9276575928326387,
+      "median_ms": {
+        "raw_polars": 19.72429199668113,
+        "tidy3": 38.79995799798053
+      },
+      "samples_ms": {
+        "raw_polars": [
+          19.85558299929835,
+          19.72429199668113,
+          19.35991700156592
+        ],
+        "tidy3": [
+          37.319291004678234,
+          39.4752080028411,
+          38.79995799798053
+        ]
+      },
+      "memory": {
+        "raw_polars": {
+          "peak_rss_mib": 471.046875,
+          "output_rows": 200000
+        },
+        "tidy3": {
+          "peak_rss_mib": 627.25,
+          "output_rows": 200000
+        }
+      }
+    },
+    {
+      "name": "wide_200k",
+      "rows": 200000,
+      "lookup_rows": 1000,
+      "width": 21,
+      "raw_polars_ms": 2.777582994895056,
+      "tidy3_ms": 10.3674999991199,
+      "tidy3_over_polars": 3.732561733771563,
+      "median_ms": {
+        "raw_polars": 2.942416991572827,
+        "tidy3": 10.70975000038743
+      },
+      "samples_ms": {
+        "raw_polars": [
+          3.4364580060355365,
+          2.942416991572827,
+          2.777582994895056
+        ],
+        "tidy3": [
+          11.9049589993665,
+          10.3674999991199,
+          10.70975000038743
+        ]
+      },
+      "memory": {
+        "raw_polars": {
+          "peak_rss_mib": 276.796875,
+          "output_rows": 200000
+        },
+        "tidy3": {
+          "peak_rss_mib": 320.53125,
+          "output_rows": 200000
+        }
+      }
+    },
+    {
+      "name": "wide_1m_sparse",
+      "rows": 1000000,
+      "lookup_rows": 1000,
+      "width": 21,
+      "raw_polars_ms": 18.95479099766817,
+      "tidy3_ms": 57.177875001798384,
+      "tidy3_over_polars": 3.016539460067507,
+      "median_ms": {
+        "raw_polars": 19.334167009219527,
+        "tidy3": 62.55000000237487
+      },
+      "samples_ms": {
+        "raw_polars": [
+          18.95479099766817,
+          19.334167009219527,
+          21.41049999045208
+        ],
+        "tidy3": [
+          57.177875001798384,
+          62.55000000237487,
+          64.44158300291747
+        ]
+      },
+      "memory": {
+        "raw_polars": {
+          "peak_rss_mib": 691.421875,
+          "output_rows": 1000000
+        },
+        "tidy3": {
+          "peak_rss_mib": 807.734375,
+          "output_rows": 1000000
+        }
+      }
+    },
+    {
+      "name": "wide_1m_dense",
+      "rows": 1000000,
+      "lookup_rows": 100000,
+      "width": 21,
+      "raw_polars_ms": 19.357458004378714,
+      "tidy3_ms": 61.970416994881816,
+      "tidy3_over_polars": 3.201371635721174,
+      "median_ms": {
+        "raw_polars": 20.59937499871012,
+        "tidy3": 64.27429099858273
+      },
+      "samples_ms": {
+        "raw_polars": [
+          19.357458004378714,
+          22.02229200338479,
+          20.59937499871012
+        ],
+        "tidy3": [
+          61.970416994881816,
+          71.38787501025945,
+          64.27429099858273
+        ]
+      },
+      "memory": {
+        "raw_polars": {
+          "peak_rss_mib": 697.03125,
+          "output_rows": 1000000
+        },
+        "tidy3": {
+          "peak_rss_mib": 803.015625,
+          "output_rows": 1000000
+        }
+      }
+    },
+    {
+      "name": "grouped_1m",
+      "rows": 1000000,
+      "lookup_rows": 100000,
+      "width": 3,
+      "groups": 1000,
+      "raw_polars_ms": 13.862457999493927,
+      "tidy3_ms": 28.68641700479202,
+      "tidy3_over_polars": 2.069360066291221,
+      "median_ms": {
+        "raw_polars": 14.611000005970709,
+        "tidy3": 29.330000004847534
+      },
+      "samples_ms": {
+        "raw_polars": [
+          14.611000005970709,
+          13.862457999493927,
+          14.720207997015677
+        ],
+        "tidy3": [
+          29.330000004847534,
+          29.53599998727441,
+          28.68641700479202
+        ]
+      },
+      "memory": {
+        "raw_polars": {
+          "peak_rss_mib": 352.53125,
+          "output_rows": 1000000
+        },
+        "tidy3": {
+          "peak_rss_mib": 439.234375,
+          "output_rows": 1000000
+        }
+      }
+    }
+  ]
+}

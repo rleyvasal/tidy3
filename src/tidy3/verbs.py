@@ -3456,6 +3456,71 @@ def _join_by_predicate(condition: Any, right_names: dict[str, str]) -> pl.Expr:
     }[condition.operator]
 
 
+def _polars_closest_pairs(
+    left: pl.LazyFrame,
+    right: pl.LazyFrame,
+    spec: JoinSpec,
+    *,
+    left_id: str,
+    right_id: str,
+    right_names: dict[str, str],
+    na_matches: str,
+) -> pl.LazyFrame:
+    """Find the closest value without expanding all eligible row pairs."""
+    rolling = spec.inequality[0]
+    left_key, right_key = rolling.left, right_names[rolling.right]
+    dtype = left.collect_schema()[left_key]
+    backward = rolling.operator in {">", ">="}
+    groups = []
+    if spec.equality:
+        # Native asof joins do not match null grouping keys. Assign a shared
+        # integer group through an ordinary join to preserve na_matches.
+        group = _temp_column([*left.collect_schema(), *right.collect_schema()], "__tidy3_asof_group")
+        left_by = [condition.left for condition in spec.equality]
+        right_by = [right_names[condition.right] for condition in spec.equality]
+        lookup = right.select(right_by).unique(maintain_order=True).with_row_index(group)
+        left = left.join(
+            lookup, left_on=left_by, right_on=right_by, how="inner",
+            nulls_equal=na_matches == "na", coalesce=False,
+        )
+        right = right.join(lookup, on=right_by, how="inner", nulls_equal=True)
+        groups = [group]
+    right_keys = right.select(right_id, right_key, *groups).filter(pl.col(right_key).is_not_null())
+    search = right_keys.select(right_key, *groups)
+    if backward and dtype.is_float():
+        # Polars max() ignores NaN when a finite/infinite candidate exists.
+        search = search.filter(pl.col(right_key).is_not_nan())
+    nearest = (
+        left.select(left_id, left_key, *groups)
+        .filter(pl.col(left_key).is_not_null())
+        .sort(left_key)
+        .join_asof(
+            search.sort(right_key),
+            left_on=left_key, right_on=right_key, by=groups or None,
+            strategy="backward" if backward else "forward",
+            allow_exact_matches=rolling.operator in {">=", "<="},
+            coalesce=False, check_sortedness=False,
+        )
+    )
+    if dtype.is_float() and rolling.operator == ">=":
+        nearest = nearest.with_columns(
+            pl.when(pl.col(left_key).is_nan())
+            .then(pl.col(right_key).fill_null(pl.lit(float("nan"), dtype=dtype)))
+            .otherwise(pl.col(right_key)).alias(right_key)
+        )
+    if dtype.is_float() and not groups:
+        # A merge join on one sorted float key skips NaN ties. A second
+        # equality key uses the hash join's ordinary NaN matching instead.
+        group = _temp_column([*nearest.collect_schema(), right_id], "__tidy3_asof_group")
+        nearest = nearest.with_columns(pl.lit(0, dtype=pl.UInt8).alias(group))
+        right_keys = right_keys.with_columns(pl.lit(0, dtype=pl.UInt8).alias(group))
+        groups = [group]
+    # An asof join chooses one value; the equality join restores every tie.
+    return nearest.select(left_id, right_key, *groups).join(
+        right_keys, on=[right_key, *groups], how="inner", maintain_order="left",
+    ).select(left_id, right_id)
+
+
 def _polars_join_by(
     tf: Any,
     right: pl.LazyFrame,
@@ -3508,12 +3573,37 @@ def _polars_join_by(
 
     left = left_frame.with_row_index(left_id)
     y = right_frame.with_row_index(right_id).rename(right_names)
+    rolling = next((condition for condition in spec.conditions if condition.rolling), None)
+    fast_rolling = False
+    if rolling is not None and len(spec.inequality) == 1 and multiple == "all":
+        dtype = left_schema[rolling.left]
+        fast_rolling = (
+            dtype == right_schema[rolling.right]
+            and (dtype.is_numeric() or dtype.is_temporal() or dtype == pl.String)
+            and len({condition.left for condition in equality}) == len(equality)
+            and len({condition.right for condition in equality}) == len(equality)
+        )
     inequalities = [
         _join_by_predicate(condition, right_names) for condition in spec.inequality
     ]
-    if equality:
-        candidates = left.join(
-            y,
+    narrow_rolling = rolling is not None and multiple == "all"
+    if narrow_rolling:
+        match_left = left.select(list(dict.fromkeys(
+            [left_id, *(c.left for c in spec.conditions)]
+        )))
+        match_right = y.select(list(dict.fromkeys(
+            [right_id, *(right_names[c.right] for c in spec.conditions)]
+        )))
+    else:
+        match_left, match_right = left, y
+    if fast_rolling:
+        candidates = _polars_closest_pairs(
+            match_left, match_right, spec, left_id=left_id, right_id=right_id,
+            right_names=right_names, na_matches=na_matches,
+        )
+    elif equality:
+        candidates = match_left.join(
+            match_right,
             left_on=[condition.left for condition in equality],
             right_on=[right_names[condition.right] for condition in equality],
             how="inner",
@@ -3527,10 +3617,9 @@ def _polars_join_by(
                 predicate = predicate & condition
             candidates = candidates.filter(predicate)
     else:
-        candidates = left.join_where(y, *inequalities)
+        candidates = match_left.join_where(match_right, *inequalities)
 
-    rolling = next((condition for condition in spec.conditions if condition.rolling), None)
-    if rolling is not None:
+    if rolling is not None and not fast_rolling:
         target = pl.col(right_names[rolling.right])
         extreme = (
             target.max().over(left_id)
@@ -3597,6 +3686,12 @@ def _polars_join_by(
         return tf._with_lf(lf, groups=tf._groups)
 
     matched_right = candidates.select(right_id).unique()
+    if narrow_rolling:
+        candidates = (
+            candidates.select(left_id, right_id)
+            .join(left, on=left_id, how="inner", maintain_order="left")
+            .join(y, on=right_id, how="inner", maintain_order="left")
+        )
     pieces = [candidates]
     if how in {"left", "full"}:
         missing_left = left.join(

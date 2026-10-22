@@ -1,5 +1,7 @@
 """Timezone-aware floor and ceiling keep the local boundary on both backends."""
 
+from datetime import date
+
 import polars as pl
 import pytest
 
@@ -86,3 +88,18 @@ def test_backends_round_the_same_instants(unit, empty):
         return {name: instants(frame, name) for name in ("floored", "ceiling", "monday")}
 
     assert signature("pandas") == signature("polars")
+
+
+@pytest.mark.parametrize("make", ["frame", "lazy", "tidy"])
+def test_polars_dates_stay_dates_on_the_pandas_backend(make):
+    # lubridate: ceiling_date(as.Date(c("2024-01-01", "2024-01-15")), "month") is Feb 1 twice.
+    source = pl.DataFrame({"d": pl.Series(["2024-01-01", "2024-01-15", None]).str.to_date()})
+    data = {"frame": source, "lazy": source.lazy(), "tidy": t.tidy(source)}[make]
+    out = (
+        t.tidy(data, backend="pandas")
+        >> t.mutate(up=t.ceiling_date("d", "month"), down=t.floor_date("d", "month"))
+    ).collect()
+    assert out.schema == pl.Schema({"d": pl.Date, "up": pl.Date, "down": pl.Date})
+    feb, jan = date(2024, 2, 1), date(2024, 1, 1)
+    assert out["up"].to_list() == [feb, feb, None]
+    assert out["down"].to_list() == [jan, jan, None]

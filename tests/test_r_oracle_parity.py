@@ -2158,7 +2158,24 @@ def _many_groups(backend: str):
     }
 
 
+def _rolling_joins(backend: str) -> dict[str, Any]:
+    import tidy3 as t3
+
+    left = t3.tidy({"g": ["b", "a", None, "a", "z"], "x": [4., 2., 2., 0., 9.], "lid": [1., 2., 3., 4., 5.]}, backend=backend)
+    right = {"h": ["a", "a", None, "b", "q"], "y": [1., 1., 1., 4., 8.], "rid": [1., 2., 3., 4., 5.]}
+    result = {}
+    for op in (t3.ge, t3.gt, t3.le, t3.lt):
+        spec = t3.join_by(("g", "h"), t3.closest(op("x", "y")))
+        for how in ("left", "inner", "right", "full", "semi", "anti"):
+            result[f"{op.__name__}_{how}"] = left >> getattr(t3, f"{how}_join")(right, by=spec)
+    spec = t3.join_by(("g", "h"), t3.closest(t3.ge("x", "y")))
+    result["never"] = left >> t3.left_join(right, by=spec, na_matches="never")
+    result["keep"] = left >> t3.left_join(right, by=spec, keep=True)
+    return result
+
+
 ORACLE_CASES: dict[str, Callable[[str], Any]] = {
+    "rolling_joins": _rolling_joins,
     "reshape_metadata": _reshape_metadata,
     "janitor_dupes": _janitor_dupes,
     "janitor_cleaning": _janitor_cleaning,

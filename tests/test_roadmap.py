@@ -110,6 +110,25 @@ def test_missing_checks_and_math(backend):
     assert _col(out, "up")[0] == 1
 
 
+def test_missing_checks_on_integer_text_and_logical_columns():
+    frame = tidy(pl.DataFrame({
+        "g": [1, 1, 2],
+        "n": [1, None, 3],
+        "s": ["a", None, "c"],
+        "b": [True, None, False],
+    }))
+    for name, finite in (("n", [True, False, True]), ("s", [False] * 3), ("b", [False] * 3)):
+        out = (frame >> group_by("g") >> mutate(
+            missing=is_na(name), nan=is_nan(name), finite=is_finite(name), infinite=is_infinite(name),
+        )).collect()
+        assert out["missing"].to_list() == [False, True, False]
+        assert out["nan"].to_list() == [False] * 3
+        assert out["finite"].to_list() == finite
+        assert out["infinite"].to_list() == [False] * 3
+        assert {out[flag].dtype for flag in ("missing", "nan", "finite", "infinite")} == {pl.Boolean}
+    assert (frame >> filter(is_na("s"))).collect()["n"].to_list() == [None]
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_round_is_half_to_even(backend):
     frame = tidy({"x": [0.5, 1.5, -1.5, 1.25, 1.35, 123.0]}, backend=backend)

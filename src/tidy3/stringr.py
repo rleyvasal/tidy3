@@ -204,6 +204,26 @@ def _eager(expr: Expr, columns: dict[str, Any], aggregate: bool = False) -> Any:
     return out[0] if aggregate else out
 
 
+def _vector_frame(string: Any) -> pl.DataFrame:
+    """One string column, without a Python pass over an ordinary list."""
+    if isinstance(string, pl.Series):
+        return string.to_frame(_X)
+    if isinstance(string, pd.Series) or type(string).__name__ == "ndarray":
+        return pl.DataFrame({_X: _values(string)})
+    try:
+        frame = pl.DataFrame({_X: list(string)})
+    except (TypeError, pl.exceptions.PolarsError):
+        frame = None
+    if frame is None or not _string_vector(frame):
+        # NaN and pd.NA are missing values, as _values() reads them.
+        frame = pl.DataFrame({_X: _values(string)})
+    return frame
+
+
+def _string_vector(frame: pl.DataFrame) -> bool:
+    return frame.schema[_X] in (pl.String, pl.Null)
+
+
 def _string(x: Any) -> Expr:
     return col(x) if isinstance(x, str) else Expr(_node(x))
 
@@ -310,18 +330,37 @@ def str_equal(x: Any, y: Any, ignore_case: bool = False) -> Any:
     return _func("str_equal", _string(x), y, ignore_case=ignore_case)
 
 
+def _detect_columns(string: Any, pattern: Any, negate: bool) -> tuple[pl.Series, pl.Series]:
+    """The text and its ``str_detect`` mask. Missing stays missing."""
+    frame = _vector_frame(string)
+    if frame.schema[_X] == pl.Null:
+        frame = frame.cast({_X: pl.String})
+    expr = _func(
+        "str_detect", col(_X), negate=negate, **_pattern_kwargs("str_detect", pattern)
+    )
+    mask = frame.select(to_polars(expr).alias("keep"))["keep"]
+    return frame[_X], mask
+
+
 def str_subset(string: Any, pattern: Any, negate: bool = False) -> list:
     """The strings that match *pattern* (in a pipe, use ``filter(str_detect(...))``)."""
-    values = _require_vector("str_subset", string, "in a pipe use filter(str_detect(...))")
-    keep = str_detect(values, pattern, negate=negate)
-    return [value for value, found in zip(values, keep) if found is True]
+    if not _is_vector(string):
+        raise TypeError(
+            "str_subset() takes a list or Series of strings; "
+            "in a pipe use filter(str_detect(...))"
+        )
+    text, mask = _detect_columns(string, pattern, negate)
+    return text.filter(mask.fill_null(False)).to_list()
 
 
 def str_which(string: Any, pattern: Any, negate: bool = False) -> list:
     """1-based positions of the strings that match *pattern*, as in R."""
-    values = _require_vector("str_which", string, "in a pipe use str_detect()")
-    keep = str_detect(values, pattern, negate=negate)
-    return [i + 1 for i, found in enumerate(keep) if found is True]
+    if not _is_vector(string):
+        raise TypeError(
+            "str_which() takes a list or Series of strings; in a pipe use str_detect()"
+        )
+    _text, mask = _detect_columns(string, pattern, negate)
+    return (mask.arg_true() + 1).to_list()
 
 
 # ── locate ──────────────────────────────────────────────────────────────
@@ -715,6 +754,21 @@ def str_order(
     numeric: bool = False,
 ) -> list[int]:
     """1-based positions that sort *string*, as in R; ``na_last=None`` drops missing."""
+    if not _is_vector(string):
+        raise TypeError("str_order() takes a list or Series of strings; in a pipe use arrange()")
+    frame = _vector_frame(string)
+    if not numeric and _string_vector(frame):
+        # Index before dropping missing rows, so positions stay 1-based in the source.
+        frame = frame.with_row_index("__i")
+        if na_last is None:
+            frame = frame.filter(pl.col(_X).is_not_null())
+        ordered = frame.sort(
+            _X,
+            descending=decreasing,
+            nulls_last=True if na_last is None else na_last,
+            maintain_order=True,
+        )
+        return (ordered["__i"] + 1).to_list()
     values = _require_vector("str_order", string, "in a pipe use arrange()")
     return [i + 1 for i in _order(values, decreasing, na_last, numeric)]
 
@@ -726,12 +780,29 @@ def str_sort(
     numeric: bool = False,
 ) -> list:
     """*string* sorted; ``numeric=True`` sorts ``"x10"`` after ``"x9"``."""
+    if not _is_vector(string):
+        raise TypeError("str_sort() takes a list or Series of strings; in a pipe use arrange()")
+    frame = _vector_frame(string)
+    if not numeric and _string_vector(frame):
+        if na_last is None:
+            frame = frame.filter(pl.col(_X).is_not_null())
+        return frame.sort(
+            _X,
+            descending=decreasing,
+            nulls_last=True if na_last is None else na_last,
+            maintain_order=True,
+        )[_X].to_list()
     values = _require_vector("str_sort", string, "in a pipe use arrange()")
     return [values[i] for i in _order(values, decreasing, na_last, numeric)]
 
 
 def str_unique(string: Any, ignore_case: bool = False) -> list:
     """Distinct strings, in first-seen order."""
+    if not _is_vector(string):
+        raise TypeError("str_unique() takes a list or Series of strings; in a pipe use distinct()")
+    frame = _vector_frame(string)
+    if not ignore_case and _string_vector(frame):
+        return frame[_X].unique(maintain_order=True).to_list()
     values = _require_vector("str_unique", string, "in a pipe use distinct()")
     seen, out = set(), []
     for value in values:
@@ -981,9 +1052,20 @@ def compile_polars(name: str, args: tuple, kw: dict) -> pl.Expr:
     if name == "str_glue":
         return pl.concat_str([arg.cast(pl.String).fill_null("NA") for arg in args])
     if name == "str_conv":
-        return args[0].map_elements(
-            lambda v: _decode(v, kw["encoding"]), return_dtype=pl.String
-        )
+        encoding = kw["encoding"]
+
+        def batch(series: pl.Series) -> pl.Series:
+            # Text is already decoded. Bytes and object columns still decode
+            # one value at a time, which is what latin-1 and invalid bytes need.
+            if series.dtype == pl.String:
+                return series
+            if series.dtype == pl.Null:
+                return series.cast(pl.String)
+            return series.map_elements(
+                lambda value: _decode(value, encoding), return_dtype=pl.String
+            )
+
+        return args[0].map_batches(batch, return_dtype=pl.String, is_elementwise=True)
     x = args[0].cast(pl.String)
     if name in {"str_detect", "str_starts", "str_ends"}:
         if _plain(kw) and name != "str_detect":
@@ -1045,9 +1127,13 @@ def compile_polars(name: str, args: tuple, kw: dict) -> pl.Expr:
     if name == "str_word":
         if not _plain(kw):
             return x.map_elements(lambda v: _word(v, kw), return_dtype=pl.String)
+        start, end = kw["start"], kw["end"]
+        # One field is a list lookup. A split always has a first field, and
+        # a later missing field is null, matching the out-of-range rule.
+        if start > 0 and start == end:
+            return x.str.split(kw["pattern"]).list.get(start - 1, null_on_oob=True)
         pieces = x.str.split(kw["pattern"])
         count = pieces.list.len().cast(pl.Int64)
-        start, end = kw["start"], kw["end"]
         first = count + start + 1 if start < 0 else pl.lit(start, pl.Int64)
         last = count + end + 1 if end < 0 else pl.lit(end, pl.Int64)
         out_of_range = (first > count) | (last > count)
@@ -1122,6 +1208,15 @@ def compile_polars(name: str, args: tuple, kw: dict) -> pl.Expr:
         return pieces.list.get(i - 1 if i > 0 else i, null_on_oob=True)
     if name == "str_split_fixed":
         n = kw["n"]
+        # splitn already returns n fields, with nulls for the ones past the end.
+        # Filling those nulls is the padding; dropping them and padding again
+        # builds the same lists.
+        if _plain(kw):
+            fields = x.str.splitn(kw["pattern"], n)
+            pieces = [
+                fields.struct.field(f"field_{i}").fill_null("") for i in range(n)
+            ]
+            return pl.when(x.is_null()).then(None).otherwise(pl.concat_list(pieces))
         padding = pl.lit(pl.Series([[""] * n], dtype=pl.List(pl.String)))
         padded = pl.concat_list([_pl_split(x, kw, n), padding]).list.head(n)
         return pl.when(x.is_null()).then(None).otherwise(padded)

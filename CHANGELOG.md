@@ -4,6 +4,26 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- `python -m tidy3.bench_api` times every public function against a raw Polars recipe on one shared table. It checks values, names, dtypes, and order before timing, and lists functions that are not operations with a reason instead of a timing. On 100,000 rows the excess over those recipes dropped from 383 ms to 168 ms. The largest closes, best of 3 after one warmup, against the previous one-sample times on the same machine: `excel_numeric_to_date` 42.8 ms → 1.5 ms (raw 0.4 ms), `str_which` 24.0 ms → 3.9 ms and `str_subset` 24.1 ms → 3.8 ms (raw about 1.6 ms), `word` 22.0 ms → 3.4 ms (raw 3.1 ms), `str_sort` 20.5 ms → 4.8 ms and `str_order` 21.5 ms → 4.7 ms (raw about 1.9 ms), `str_conv` 13.2 ms → 0.17 ms, `str_unique` 12.6 ms → 3.2 ms, `str_split_fixed` 58 ms → 18.3 ms (raw 18.1 ms), and `complete()` over `full_seq` 9.6 ms → 0.8 ms (raw 0.5 ms). In-range numeric serials use a Polars date offset; serial 60 stays missing, and out-of-range serials still raise. Text `str_conv` is left as text. Results are unchanged.
+- Uniform zero-padded dates and grouped string factors stay on Polars. One 100,000-row sample: `ymd` 1.65 ms vs 0.71 ms, `mdy` 2.76 ms vs 0.67 ms, `ymd_hms` 5.0 ms vs 3.9 ms, `fct_infreq` 3.24 ms vs 3.26 ms, `fct_reorder` 3.16 ms vs 4.18 ms, `fct_rev` 2.72 ms vs 3.49 ms, `fct_relevel` 4.47 ms vs 3.22 ms.
+- Speed guards compare matching raw Polars operations and record measured timings and ratios separately from CI limits. `python -m tidy3.bench_polars` produces a reproducible `closest()` timing and optional peak-memory report through one million rows, checking complete outputs before measurement.
+- Polars rolling `join_by(closest(...))` joins use a sorted lookup for a single rolling inequality with matching numeric, temporal, or text key types and the default `multiple="all"`. All ties, null grouping keys, row order, and join validation are preserved. Matching carries only keys and row IDs; payload columns are attached after choosing matches. Rolling joins with additional conditions also narrow their candidate columns. On the original 200,000-row, 30-column workload: 861 ms → 36 ms. A 1,000,000-row, 21-column join against 100,000 lookup rows takes 62 ms locally.
+- `is_na`, `is_nan`, `is_finite`, and `is_infinite` compute only the requested flag in Polars, without a Python list per call. `group_keys`, `group_size`, and `n_groups` count rows per group instead of collecting every row position, and the other group metadata functions split one position array rather than one Python list per group. One 1,000,000-row sample with 8 groups: `is_na` 6.9 ms → 0.36 ms, `is_finite` 6.7 ms → 0.76 ms, `n_groups` 28.3 ms → 0.9 ms, `group_indices` 31.2 ms → 6.1 ms, `group_data` 46.4 ms → 21.6 ms. Results are unchanged.
+
+### Fixed
+
+- On Polars, a float grouping key holding both `NaN` and a missing value no longer loses rows in `group_rows`, `group_data`, `group_size`, `group_indices`, or `group_split`. Both are one missing-key group, as on pandas; before, one replaced the other, so its rows disappeared and `group_indices` could return 0.
+- `show(n)` and `options(preview_rows=n)` print all *n* rows. The text preview stopped at Polars' own 10-row limit, and the notebook table stopped at 25, so `show(50)` showed 10 of 50 states.
+- A Polars list column on the pandas backend arrives as NumPy arrays. `unnest_longer`, `unnest`, `unnest_wider`, and `hoist` now read those cells; `unnest_longer` returned no rows. `where(is_character)` no longer selects list, struct, or date columns, and `remove_constant` no longer raises on them.
+- `tidy(polars_frame, backend="pandas")` keeps Date columns as dates. They became datetimes, so `ceiling_date(x, "month")` kept `2024-01-01` instead of moving it to `2024-02-01` as lubridate does, and the result came back as a datetime.
+- Text factors leaving the pandas backend (`collect()`, `collect(as_="arrow")`, `tidy(..., backend="polars")`, and pandas input on the Polars backend) are `pl.Enum` in level order, as Polars-side `fct_*` results are. They were `pl.Categorical`, which lost the order.
+- On Polars, `group_trim` also drops unused levels from the column's Enum, as dplyr does; it had only updated the recorded levels.
+- `build_wider_spec` on no rows types `.name` and `.value` as text and the name columns as in the data, and `pivot_wider_spec` with a spec of no rows returns the distinct id columns instead of raising `IndexError`.
+
 ## 0.7.13 — 2026-10-21
 
 A quoted string in `mutate` is text, as in dplyr, on both backends; columns are `col("hp")` in plain Python and bare names in notebook pipes.

@@ -75,6 +75,45 @@ def test_grouped_relevel_warns_once_per_distinct_missing_set(backend):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_grouped_string_factors_keep_merged_level_order(backend):
+    frame = t.tidy({
+        "g": [2, 2, 1, 1, 1],
+        "species": ["b", "b", "a", "b", "a"],
+        "mass": [1, 1, 10, 0, 10],
+    }, backend=backend)
+    grouped = frame >> t.group_by("g")
+    assert levels(grouped >> t.mutate(species=t.fct_infreq("species"))) == ["a", "b"]
+    assert levels(grouped >> t.mutate(species=t.fct_reorder("species", "mass"))) == ["b", "a"]
+    assert levels(grouped >> t.mutate(species=t.fct_rev("species"))) == ["b", "a"]
+    assert levels(grouped >> t.mutate(species=t.fct_relevel("species", "b"))) == ["b", "a"]
+    with pytest.warns(UserWarning, match=r"unknown levels: \['a'\]"):
+        moved = grouped >> t.mutate(species=t.fct_relevel("species", "a", after=math.inf))
+    assert levels(moved) == ["b", "a"]
+    plain = t.tidy({
+        "species": ["b", "a", "b", None],
+        "mass": [1, 5, 1, 3],
+    }, backend=backend)
+    assert levels(plain >> t.mutate(species=t.fct_infreq("species"))) == ["b", "a"]
+    assert levels(plain >> t.mutate(species=t.fct_reorder("species", "mass"))) == ["b", "a"]
+    assert levels(plain >> t.mutate(species=t.fct_rev("species"))) == ["b", "a"]
+
+
+@pytest.mark.parametrize(
+    ("fun", "expected"),
+    [(t.median, ["a", "b", "c"]), (t.mean, ["a", "b", "c"]), (t.sum, ["a", "c", "b"])],
+)
+def test_reorder_skips_nan_values_on_both_backends(fun, expected):
+    data = {"species": ["a", "a", "b", "b", "c"], "mass": [1.0, float("nan"), 2.0, 2.0, 3.0]}
+    found = {}
+    for backend in BACKENDS:
+        with pytest.warns(UserWarning, match="removing missing x values"):
+            frame = t.tidy(data, backend=backend) >> t.mutate(species=t.fct_reorder("species", "mass", fun))
+            found[backend] = levels(frame)
+    # The NaN is skipped, so "a" summarizes to 1.
+    assert found["polars"] == found["pandas"] == expected
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_reorder_summary_and_missing_values(backend):
     frame = penguins(backend)
     assert levels(frame >> t.mutate(species=t.fct_reorder("species", "mass"))) == ["Adelie", "Chinstrap", "Gentoo", "unused"]
@@ -173,3 +212,20 @@ def test_factor_snapshot_keeps_parse_problems(tmp_path):
     path.unlink()
     assert t.problems(frame).collect()["original"].to_list() == ["oops"]
     assert frame.collect()["mass"].to_list() == [3500., None]
+
+
+def test_pandas_factors_keep_their_levels_when_leaving_pandas():
+    frame = t.tidy({"species": ["Adelie", "Chinstrap", "Gentoo", None]}, backend="pandas")
+    moved = frame >> t.mutate(species=t.fct_relevel("species", "Gentoo"))
+    wanted = pl.Enum(["Gentoo", "Adelie", "Chinstrap"])
+    assert moved.collect()["species"].dtype == wanted
+    assert t.tidy(moved, backend="polars").collect()["species"].dtype == wanted
+    assert moved.collect(as_="arrow").column("species").to_pylist() == ["Adelie", "Chinstrap", "Gentoo", None]
+    # Imported pandas factors keep unused levels and the ordered flag.
+    imported = t.tidy(pd.DataFrame({
+        "species": pd.Categorical(["b", "a"], categories=["z", "b", "a"], ordered=True),
+    }))
+    assert imported.collect()["species"].dtype == pl.Enum(["z", "b", "a"])
+    back = imported.collect(as_="pandas")["species"]
+    assert back.cat.categories.tolist() == ["z", "b", "a"] and back.cat.ordered
+    assert (imported >> t.arrange("species")).collect()["species"].to_list() == ["b", "a"]

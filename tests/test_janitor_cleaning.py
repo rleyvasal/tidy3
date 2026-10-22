@@ -422,6 +422,37 @@ def test_excel_numeric_to_date_in_mutate(backend):
         convert()
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_excel_numeric_column_skips_the_per_value_loop(backend, monkeypatch):
+    """In-range numeric columns use the Polars date offset, not one Python date each."""
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("per-value excel conversion")
+
+    monkeypatch.setattr("tidy3.dates._excel_convert", explode)
+    out = (
+        t.tidy({"serial": [42370, 60, None]}, backend=backend)
+        >> t.mutate(d=t.excel_numeric_to_date("serial"))
+    ).collect()
+    assert out["d"].to_list() == [date(2016, 1, 1), None, None]
+    fractional = (
+        t.tidy({"serial": [40000.5, 1.999999999]}, backend=backend)
+        >> t.mutate(d=t.excel_numeric_to_date("serial"))
+    ).collect()
+    assert fractional["d"].to_list() == [date(2009, 7, 6), date(1900, 1, 2)]
+    mac = (
+        t.tidy({"serial": [1, 0, 60]}, backend=backend)
+        >> t.mutate(d=t.excel_numeric_to_date("serial", date_system="mac pre-2011"))
+    ).collect()
+    assert mac["d"].to_list() == [date(1904, 1, 3), date(1904, 1, 2), None]
+
+
+def test_excel_numeric_column_still_rejects_out_of_range_serials():
+    frame = t.tidy({"serial": [2958466]})
+    with pytest.raises(OverflowError):
+        (frame >> t.mutate(d=t.excel_numeric_to_date("serial"))).collect()
+
+
 def test_excel_numeric_to_date_notebook_bare_name():
     namespace = {name: getattr(t, name) for name in t.__all__}
     namespace["frame"] = t.tidy({"min": [42370.0], "label": ["x"]})

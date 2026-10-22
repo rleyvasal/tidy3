@@ -4,6 +4,13 @@ How tidy3 is timed against raw Polars, pandas, and datar, and how its results ar
 
 Back to the [README](../README.md).
 
+## Raw Polars reference
+
+Use [matching raw Polars operations](benchmarking.md) to measure tidy3's
+overhead. The [closest() report](benchmarks/rolling-joins-polars-2026-10-21.md)
+includes timings, ratios, and peak memory through one million rows. These
+comparisons are separate from the pandas adoption benchmarks below.
+
 ## Benchmark vs datar
 
 ```python notest

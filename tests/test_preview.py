@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import polars as pl
 
 from tidy3 import col, filter, options, tidy
@@ -75,3 +77,25 @@ def test_preview_count_off_shows_unknown_rows():
         assert "shape: (3, 1)" in repr(tidy({"x": [1, 2, 3]}))
     finally:
         options(preview_count=True)
+
+
+def _shown_rows(text: str) -> int:
+    # A table row holds one state code; pandas puts its index in front.
+    return len(re.findall(r"\bS\d\d\b", text))
+
+
+def test_show_and_preview_rows_print_every_requested_row(capsys):
+    # 50 state codes: Polars' own printer stops at 10, the HTML table used to stop at 25.
+    states = {"abb": [f"S{i:02d}" for i in range(50)], "x": list(range(50))}
+    for backend in ("polars", "pandas"):
+        tf = tidy(states, backend=backend)
+        tf.show(50)
+        assert _shown_rows(capsys.readouterr().out) == 50
+        options(preview_rows=50)
+        try:
+            assert _shown_rows(repr(tf)) == 50
+            assert tf._repr_html_().count("<tr>") == 2 + 50  # names, dtypes, rows
+        finally:
+            options(preview_rows=10)
+        assert _shown_rows(repr(tf)) == 10
+        assert repr(tf).splitlines()[-1] == "… 40 more rows"

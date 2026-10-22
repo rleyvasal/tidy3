@@ -113,6 +113,25 @@ def _uses_gpu_engine(engine: Any) -> bool:
     return engine == "gpu" or isinstance(engine, pl.GPUEngine)
 
 
+def _from_pandas(pdf: Any) -> pl.DataFrame:
+    """``pl.from_pandas`` that keeps a text factor's levels as a ``pl.Enum``.
+
+    Plain ``from_pandas`` gives ``pl.Categorical``, which drops level order,
+    while Polars-side ``fct_*`` results are ``pl.Enum``.
+    """
+    import pandas as pd
+
+    df = pl.from_pandas(pdf)
+    casts = []
+    for name, series in pdf.items():
+        if not isinstance(series.dtype, pd.CategoricalDtype):
+            continue
+        levels = series.cat.categories.tolist()
+        if all(isinstance(level, str) for level in levels):
+            casts.append(pl.col(str(name)).cast(pl.String).cast(pl.Enum(levels)))
+    return df.with_columns(casts) if casts else df
+
+
 def _excel_frame(frame: Any, engine: Any) -> pl.DataFrame:
     if isinstance(frame, TidyFrame):
         return frame.collect(as_="polars", engine=engine)
@@ -1146,9 +1165,9 @@ class TidyFrame:
                     return pdf.convert_dtypes(dtype_backend="pyarrow")
                 return pdf
             if as_ == "polars":
-                return pl.from_pandas(pdf)
+                return _from_pandas(pdf)
             if as_ == "arrow":
-                return pl.from_pandas(pdf).to_arrow()
+                return _from_pandas(pdf).to_arrow()
             raise ValueError(
                 "as_ must be 'polars', 'pandas', 'arrow', or 'numpy'"
             )
@@ -1434,7 +1453,8 @@ class TidyFrame:
         return self._lf.head(n).collect()
 
     def show(self, n: int | None = None) -> None:
-        print(self.preview(n))
+        """Print the first *n* rows, all of them, like tibble's ``print(n = )``."""
+        print(self._preview_text(n))
 
     # ── plot3 bridge ────────────────────────────────────────────────────
     def ggplot(self, mapping=None, **kwargs: Any):
@@ -1473,7 +1493,17 @@ class TidyFrame:
     def _preview_text(self, n: int | None = None) -> str:
         pdf, total = self._preview_parts(n)
         shown = len(pdf)
-        lines = repr(pdf).splitlines()
+        # The preview is already cut to *n* rows; stop the engine's own
+        # printer (10 rows in Polars, 60 in pandas) from cutting it again.
+        if isinstance(pdf, pl.DataFrame):
+            with pl.Config(tbl_rows=max(shown, 1)):
+                text = repr(pdf)
+        else:
+            import pandas as pd
+
+            with pd.option_context("display.max_rows", shown + 1, "display.min_rows", shown):
+                text = repr(pdf)
+        lines = text.splitlines()
         if lines and lines[0].startswith("shape:"):
             lines = lines[1:]
         rows = "?" if total is None else f"{total}"
@@ -1518,6 +1548,7 @@ class TidyFrame:
         return df_to_html(
             pdf,
             caption=self._caption(),
+            max_rows=len(pdf),
             total_rows=total,
             rows_unknown=total is None,
         )
@@ -1530,6 +1561,25 @@ class TidyFrame:
         if self.backend == "pandas":
             return len(self._data)
         return int(self._lf.select(pl.len()).collect().item())
+
+
+def _pandas_dates(pdf: Any, schema: Any) -> Any:
+    """Polars Date columns as ``datetime.date`` objects, the pandas backend's dates.
+
+    ``to_pandas()`` makes them ``datetime64``, which tidy3 reads as datetimes:
+    ``ceiling_date`` would then keep a date on a boundary instead of moving it.
+    """
+    import pandas as pd
+
+    for name, dtype in schema.items():
+        if dtype == pl.Date and name in pdf.columns:
+            column = pdf[name]
+            pdf[name] = pd.Series(
+                [None if pd.isna(value) else value.date() for value in column.tolist()],
+                index=pdf.index,
+                dtype="object",
+            )
+    return pdf
 
 
 def tidy(data: Any = None, backend: str | None = None, **kwargs: Any) -> TidyFrame:
@@ -1567,7 +1617,7 @@ def tidy(data: Any = None, backend: str | None = None, **kwargs: Any) -> TidyFra
             if data.backend == "pandas":
                 return data
             return TidyFrame(
-                data.collect(as_="pandas"),
+                _pandas_dates(data.collect(as_="pandas"), data._lf.collect_schema()),
                 groups=data._groups,
                 rowwise=data._rowwise,
                 group_drop=data._group_drop,
@@ -1576,16 +1626,16 @@ def tidy(data: Any = None, backend: str | None = None, **kwargs: Any) -> TidyFra
         if isinstance(data, pd.DataFrame):
             return TidyFrame(data)
         if isinstance(data, pl.LazyFrame):
-            return TidyFrame(data.collect().to_pandas())
+            data = data.collect()
         if isinstance(data, pl.DataFrame):
-            return TidyFrame(data.to_pandas())
+            return TidyFrame(_pandas_dates(data.to_pandas(), data.schema))
         return TidyFrame(pd.DataFrame(data))
 
     if isinstance(data, TidyFrame):
         if data.backend == "polars":
             return data
         return TidyFrame(
-            pl.from_pandas(data._pdf).lazy(),
+            _from_pandas(data._pdf).lazy(),
             groups=data._groups,
             rowwise=data._rowwise,
             group_drop=data._group_drop,
@@ -1609,7 +1659,7 @@ def tidy(data: Any = None, backend: str | None = None, **kwargs: Any) -> TidyFra
                 if isinstance(series.dtype, pd.CategoricalDtype)
             }
             return TidyFrame(
-                pl.from_pandas(data).lazy(),
+                _from_pandas(data).lazy(),
                 category_levels=category_levels,
             )
     except ImportError:

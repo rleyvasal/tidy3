@@ -5,6 +5,8 @@ on:
     paths:
       - "src/tidy3/**"
       - "tests/test_bench_suite.py"
+      - "tests/test_bench_polars.py"
+      - "tests/test_function_speed.py"
       - ".github/workflows/performance.yml"
   workflow_dispatch:
 
@@ -20,7 +22,12 @@ jobs:
           cache: pip
       - name: Install tidy3
         run: python -m pip install -e ".[dev]"
-      - name: Check relative performance budgets
+      - name: Report timings and peak memory against raw Polars
+        run: >-
+          python -m tidy3.bench_polars
+          --repeat 3 --warmup 1 --memory
+          --output raw-polars.json
+      - name: Check pandas adoption budgets
         run: >-
           python -m tidy3.bench_suite
           --rows 500000
@@ -31,3 +38,11 @@ jobs:
           --budget-min-ms 5
           --max-tidy-pandas-geo 1.35
           --max-tidy-polars-geo 1.35
+      - name: Upload raw Polars report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: raw-polars-performance
+          path: |
+            raw-polars.json
+            raw-polars.md

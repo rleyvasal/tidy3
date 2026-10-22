@@ -71,25 +71,50 @@ def _row_count(tf: Any) -> int:
     return int(tf._lf.select(pl.len()).collect().item())
 
 
-def _observed(tf: Any, names: list[str]) -> dict[tuple, np.ndarray]:
-    """Row positions of each key combination that occurs (backend-native)."""
+def _observed(tf: Any, names: list[str], positions: bool = True) -> dict[tuple, Any]:
+    """Row positions of each key combination that occurs (backend-native).
+
+    With ``positions=False`` each key maps to its row count instead, which
+    never materializes the positions.
+    """
     if tf._backend == "pandas":
         frame = tf._pdf.reset_index(drop=True)
         grouped = frame.groupby(names if len(names) > 1 else names[0], sort=False, dropna=False, observed=True)
+        if not positions:
+            return {_key(k): int(v) for k, v in grouped.size().items()}
         return {_key(k): np.asarray(v) for k, v in grouped.indices.items()}
     index = "__tidy3_position"
     while index in names:
         index += "_"
+    # A float key's NaN and null are separate Polars groups but one missing
+    # key here, as in pandas; merge them rather than let one replace the other.
+    if not positions:
+        counts = tf._lf.group_by(names).agg(pl.len().alias(index)).collect()
+        tallies: dict[tuple, int] = {}
+        for row in counts.iter_rows():
+            key = _key(tuple(row[:-1]))
+            tallies[key] = tallies.get(key, 0) + int(row[-1])
+        return tallies
     found = (
         tf._lf.with_row_index(index)
         .group_by(names)
         .agg(pl.col(index))
         .collect()
     )
-    return {
-        _key(tuple(row[:-1])): np.asarray(row[-1], dtype=np.int64)
-        for row in found.iter_rows()
-    }
+    # One flat array split at the group boundaries, not a Python list per group.
+    from tidy3.tidyr import _EXPLODE_OPTIONS
+
+    flat = (
+        found.lazy().select(index).explode(index, **_EXPLODE_OPTIONS).collect()[index]
+        .to_numpy().astype(np.int64, copy=False)
+    )
+    bounds = np.cumsum(found[index].list.len().to_numpy())[:-1]
+    keys = found.select(names).iter_rows()
+    observed: dict[tuple, np.ndarray] = {}
+    for key, part in zip(keys, np.split(flat, bounds)):
+        key = _key(key)
+        observed[key] = np.sort(np.concatenate([observed[key], part])) if key in observed else part
+    return observed
 
 
 def _ordered_keys(tf: Any, names: list[str], keys: list[tuple], expand: bool) -> list[tuple]:
@@ -121,10 +146,13 @@ def _ordered_keys(tf: Any, names: list[str], keys: list[tuple], expand: bool) ->
     return out
 
 
-def _group_table(tf: Any, names: list[str] | None = None) -> tuple[list[str], list[tuple[tuple, np.ndarray]]]:
+def _group_table(
+    tf: Any, names: list[str] | None = None, positions: bool = True
+) -> tuple[list[str], list[tuple[tuple, Any]]]:
     """Each group's key and row positions, in dplyr's order.
 
-    ``names`` groups by other columns than the frame's own groups.
+    ``names`` groups by other columns than the frame's own groups. With
+    ``positions=False`` each group carries its row count instead.
     """
     own = names is None
     names = list(tf._groups or []) if own else list(names)
@@ -133,11 +161,12 @@ def _group_table(tf: Any, names: list[str] | None = None) -> tuple[list[str], li
             rows = tf._pdf.loc[:, names].itertuples(index=False, name=None)
         else:
             rows = tf._lf.select(names).collect().iter_rows()
-        return names, [(_key(tuple(r)), np.array([i])) for i, r in enumerate(rows)]
+        return names, [(_key(tuple(r)), np.array([i]) if positions else 1) for i, r in enumerate(rows)]
     if not names:
-        return names, [((), np.arange(_row_count(tf)))]
-    observed = _observed(tf, names)
-    empty = np.array([], dtype=np.int64)
+        count = _row_count(tf)
+        return names, [((), np.arange(count) if positions else count)]
+    observed = _observed(tf, names, positions)
+    empty = np.array([], dtype=np.int64) if positions else 0
     ordered = _ordered_keys(tf, names, list(observed), expand=own and not tf._group_drop)
     return names, [(key, observed.get(key, empty)) for key in ordered]
 
@@ -199,7 +228,7 @@ def group_keys(data: Any = _MISSING):
     if data is _MISSING:
         return _pipeable("group_keys", group_keys)
     tf = _frame(data)
-    names, table = _group_table(tf)
+    names, table = _group_table(tf, positions=False)
     return _result(tf, _keys_frame(tf, names, [key for key, _ in table]))
 
 
@@ -215,8 +244,8 @@ def group_size(data: Any = _MISSING):
     """Number of rows in each group."""
     if data is _MISSING:
         return _pipeable("group_size", group_size)
-    _, table = _group_table(_frame(data))
-    return [len(positions) for _, positions in table]
+    _, table = _group_table(_frame(data), positions=False)
+    return [count for _, count in table]
 
 
 def group_indices(data: Any = _MISSING):
@@ -250,6 +279,7 @@ def group_trim(data: Any = _MISSING):
 
     levels = dict(tf._category_levels)
     pdf = tf._pdf if tf._backend == "pandas" else None
+    casts = []
     for name in names:
         current = _levels(tf, name)
         if current is None:
@@ -261,13 +291,15 @@ def group_trim(data: Any = _MISSING):
         else:
             used = set(tf._lf.select(pl.col(name).drop_nulls().unique()).collect().to_series().to_list())
         recorded = tf._category_levels.get(name)
-        levels[name] = FactorLevels(
-            [level for level in current if level in used],
-            ordered=bool(getattr(recorded, "ordered", False)),
-        )
+        kept = [level for level in current if level in used]
+        levels[name] = FactorLevels(kept, ordered=bool(getattr(recorded, "ordered", False)))
+        if pdf is None and all(isinstance(level, str) for level in kept):
+            # The Enum's own categories are the levels Polars shows and sorts by.
+            casts.append(pl.col(name).cast(pl.String).cast(pl.Enum(kept)))
     if pdf is not None:
         return tf._with_pdf(pdf, groups=names, category_levels=levels)
-    return tf._with_lf(tf._lf, groups=names, category_levels=levels)
+    lf = tf._lf.with_columns(casts) if casts else tf._lf
+    return tf._with_lf(lf, groups=names, category_levels=levels)
 
 
 def group_walk(fn: Callable[[Any, dict[str, Any]], Any]):

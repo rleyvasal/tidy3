@@ -489,7 +489,31 @@ def test_vector_helpers():
     assert str_detect(["a"], coll("A", ignore_case=True)) == [True]
     assert str_detect(["a\nb"], regex("^b", multiline=True)) == [True]
     assert str_conv([b"caf\xe9"], "latin-1") == ["café"]
+    assert str_conv(["Adelie", None], "not-a-codec") == ["Adelie", None]
     assert str(str_view(["apple", "banana"], "an")) == "[2] │ b<an><an>a"
     assert str(str_view(["a", None])) == "[1] │ a\n[2] │ NA"
     with pytest.raises(TypeError):
         str_subset("x", "a")
+
+
+def test_vector_helpers_read_nan_in_a_list_as_missing():
+    # pandas .tolist() gives NaN for missing text.
+    values = ["banana", float("nan"), "apple", None]
+    assert str_subset(values, "an") == ["banana"]
+    assert str_which(values, "a") == [1, 3]
+    assert str_sort(values) == ["apple", "banana", None, None]
+    assert str_unique(["b", float("nan"), "b", pd.NA]) == ["b", None]
+    assert str_subset([float("nan")], "a") == []
+
+
+def test_str_conv_text_skips_per_value_decode(monkeypatch):
+    def explode(value, encoding):
+        raise AssertionError(f"per-value decode of {value!r} as {encoding}")
+
+    monkeypatch.setattr("tidy3.stringr._decode", explode)
+    out = (
+        tidy({"species": ["Adelie", None]})
+        >> mutate(out=str_conv("species", "utf-8"))
+    ).collect()
+    assert out["out"].to_list() == ["Adelie", None]
+    assert str_conv(["Adelie", None], "utf-8") == ["Adelie", None]
