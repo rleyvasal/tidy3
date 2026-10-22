@@ -25,6 +25,9 @@ dependencies = [
   "pyarrow>=14.0",
   "plot3>=0.6.6",
   "xlsxwriter>=3.0",
+  # Polars serializes plans with Python steps through cloudpickle;
+  # to_polars_code() reads those plans.
+  "cloudpickle>=2.0",
 ]
 
 [project.optional-dependencies]

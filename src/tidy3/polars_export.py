@@ -57,7 +57,15 @@ def _export(frame: Any, *, name: str = "pipeline") -> tuple[str, list[tuple[str,
         # Polars marks JSON plan serialization deprecated; it is the only
         # readable form of the plan.
         warnings.simplefilter("ignore")
-        plan = json.loads(lf.serialize(format="json"))
+        try:
+            plan = json.loads(lf.serialize(format="json"))
+        except pl.exceptions.ComputeError as error:
+            if "cloudpickle" not in str(error):
+                raise
+            raise ExportError(
+                "cannot export this pipeline: Polars needs the cloudpickle package "
+                "to read a plan with Python steps (pip install cloudpickle)"
+            ) from None
     printer = _Printer()
     body = printer.plan(plan)
     args = ", ".join(f"{arg}: pl.DataFrame" for arg, _frame in printer.inputs)
@@ -101,6 +109,8 @@ class _Printer:
         if not isinstance(node, dict) or len(node) != 1:
             raise self.unsupported(f"plan {str(node)[:60]}")
         (kind, body), = node.items()
+        if kind == "Join" and "condition" in body:
+            body = _legacy_join(body)
         method = getattr(self, "p_" + kind, None)
         if method is None:
             raise self.unsupported(f"the Polars plan step {kind}")
@@ -694,6 +704,22 @@ class _Printer:
 
     def e_Function(self, body: dict) -> str:
         return _function(self, [self.expr(node) for node in body["input"]], body["function"], body["input"])
+
+
+def _legacy_join(body: dict) -> dict:
+    """A Polars 2 join, ``condition: {Equi | NonEqui}``, in the 1.x keys."""
+    condition = body["condition"]
+    equi = condition.get("Equi") or {}
+    non_equi = condition.get("NonEqui") or {}
+    if set(condition) - {"Equi", "NonEqui"}:
+        raise ExportError(f"cannot export this pipeline: the join condition {sorted(condition)} has no exporter")
+    rest = {key: value for key, value in body.items() if key != "condition"}
+    return {
+        **rest,
+        "left_on": equi.get("left_on", []),
+        "right_on": equi.get("right_on", []),
+        "predicates": non_equi.get("predicates", []),
+    }
 
 
 def _indent(text: str) -> str:
