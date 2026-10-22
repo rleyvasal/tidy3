@@ -12,7 +12,6 @@ class Options:
     # Count all rows for the shape shown above a preview. Off: "?" and no
     # full pass over a lazy query (as dbplyr shows "??" for database tables).
     preview_count: bool = True
-    backend: str = "polars"  # default engine for tidy(): "polars" | "pandas"
 
 
 _OPTIONS = Options()
@@ -30,5 +29,9 @@ def options(**kwargs) -> Options:
     >>> options(preview_rows=20)
     """
     global _OPTIONS
+    if "backend" in kwargs:
+        from tidy3.frame import _NO_PANDAS_BACKEND
+
+        raise TypeError(_NO_PANDAS_BACKEND)
     _OPTIONS = replace(_OPTIONS, **kwargs)
     return _OPTIONS

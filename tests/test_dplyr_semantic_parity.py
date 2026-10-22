@@ -26,18 +26,15 @@ from tidy3 import (
 )
 
 
-BACKENDS = ["pandas", "polars"]
 
 
 def as_pandas(frame):
     return frame.collect(as_="pandas")
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_aggregate_defaults_propagate_missing_values_like_dplyr(backend):
+def test_aggregate_defaults_propagate_missing_values_like_dplyr():
     frame = tidy(
         {"g": ["a", "a", "b", "b"], "x": [1.0, None, 2.0, 4.0]},
-        backend=backend,
     )
     out = as_pandas(
         frame
@@ -53,14 +50,12 @@ def test_aggregate_defaults_propagate_missing_values_like_dplyr(backend):
     assert out["removed_mean"].tolist() == [1.0, 3.0]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_numeric_cumulative_functions_propagate_missing_values(backend):
+def test_numeric_cumulative_functions_propagate_missing_values():
     frame = tidy(
         {
             "g": ["a", "b", "a", "b", "a"],
             "x": [1.0, 10.0, None, 20.0, 3.0],
         },
-        backend=backend,
     )
     out = as_pandas(
         frame
@@ -78,24 +73,21 @@ def test_numeric_cumulative_functions_propagate_missing_values(backend):
     assert out["average"].tolist()[3] == 15.0
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_consecutive_id_treats_adjacent_missing_values_as_one_run(backend):
+def test_consecutive_id_treats_adjacent_missing_values_as_one_run():
     frame = tidy(
-        {"x": [None, None, 1.0, None, None, 2.0]}, backend=backend
+        {"x": [None, None, 1.0, None, None, 2.0]}
     )
     out = as_pandas(frame >> mutate(run=consecutive_id("x")))
 
     assert out["run"].tolist() == [1, 1, 2, 3, 3, 4]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_consecutive_id_restarts_and_compares_within_groups(backend):
+def test_consecutive_id_restarts_and_compares_within_groups():
     frame = tidy(
         {
             "g": ["a", "b", "a", "b", "a"],
             "x": [1, 1, 1, 2, 2],
         },
-        backend=backend,
     )
     out = as_pandas(
         frame >> mutate(run=consecutive_id("x"), by="g")
@@ -104,13 +96,11 @@ def test_consecutive_id_restarts_and_compares_within_groups(backend):
     assert out["run"].tolist() == [1, 1, 1, 2, 2]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_arrange_is_stable_and_always_places_missing_values_last(backend):
+def test_arrange_is_stable_and_always_places_missing_values_last():
     frame = tidy(
         pd.DataFrame(
             {"id": [1, 2, 3, 4], "x": [2.0, None, 2.0, 1.0]}
         ),
-        backend=backend,
     )
 
     ascending = as_pandas(frame >> arrange("x"))
@@ -120,11 +110,9 @@ def test_arrange_is_stable_and_always_places_missing_values_last(backend):
     assert descending["id"].tolist() == [1, 3, 4, 2]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_persistent_groups_sort_but_transient_by_preserves_encounter_order(backend):
+def test_persistent_groups_sort_but_transient_by_preserves_encounter_order():
     frame = tidy(
         {"g": ["b", "a", "c", "a"], "x": [1, 2, 3, 4]},
-        backend=backend,
     )
 
     persistent = as_pandas(
@@ -138,9 +126,8 @@ def test_persistent_groups_sort_but_transient_by_preserves_encounter_order(backe
     assert counted["g"].tolist() == ["a", "b", "c"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_nth_default_only_applies_when_position_is_absent(backend):
-    frame = tidy({"x": [None, 1.0]}, backend=backend)
+def test_nth_default_only_applies_when_position_is_absent():
+    frame = tidy({"x": [None, 1.0]})
     out = as_pandas(
         frame
         >> summarise(
@@ -157,11 +144,9 @@ def test_nth_default_only_applies_when_position_is_absent(backend):
     assert out.loc[0, "zero"] == 99
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_completed_core_parity_contracts(backend):
+def test_completed_core_parity_contracts():
     frame = tidy(
         {"g": ["b", "a", "b"], "x": [3.0, 1.0, 2.0]},
-        backend=backend,
     )
     arranged = as_pandas(
         frame >> group_by("g") >> arrange("x", by_group=True)
@@ -186,24 +171,22 @@ def test_completed_core_parity_contracts(backend):
     assert unique.loc[0, "n"] == 2
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_mutate_deletes_left_to_right(backend):
+def test_mutate_deletes_left_to_right():
     out = as_pandas(
-        tidy({"x": [1, 2], "y": [3, 4]}, backend=backend)
+        tidy({"x": [1, 2], "y": [3, 4]})
         >> mutate(x=None)
     )
     assert out.to_dict(orient="list") == {"y": [3, 4]}
 
     with pytest.raises(KeyError, match="deleted earlier"):
-        tidy({"x": [1]}, backend=backend) >> mutate(
+        tidy({"x": [1]}) >> mutate(
             x=None, y=col("x")
         )
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_bind_cols_repairs_names_and_recycles_size_one(backend):
+def test_bind_cols_repairs_names_and_recycles_size_one():
     out = as_pandas(
-        tidy({"x": [1, 2, 3]}, backend=backend)
+        tidy({"x": [1, 2, 3]})
         >> bind_cols(pd.DataFrame({"x": [9]}))
     )
     # dplyr's x...1 / x...2, in Python spelling.
@@ -211,13 +194,11 @@ def test_bind_cols_repairs_names_and_recycles_size_one(backend):
     assert out["x_2"].tolist() == [9, 9, 9]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_group_by_drop_false_retains_unused_factor_levels(backend):
+def test_group_by_drop_false_retains_unused_factor_levels():
     frame = tidy(
         pd.DataFrame(
             {"g": pd.Categorical(["a"], categories=["a", "b"])}
         ),
-        backend=backend,
     )
     out = as_pandas(
         frame

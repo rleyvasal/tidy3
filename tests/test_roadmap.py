@@ -72,7 +72,6 @@ from tidy3 import (
     ymd,
 )
 
-BACKENDS = ("polars", "pandas")
 
 
 def _col(frame, name):
@@ -80,11 +79,9 @@ def _col(frame, name):
     return data[name].to_list()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_missing_checks_and_math(backend):
+def test_missing_checks_and_math():
     frame = tidy(
         {"x": [1.0, None, float("nan"), float("inf"), -2.5], "hp": [100, 220, 180, None, 90]},
-        backend=backend,
     )
     out = frame >> mutate(
         missing=is_na("x"),
@@ -99,12 +96,8 @@ def test_missing_checks_and_math(backend):
     assert _col(out, "missing") == [False, True, True, False, False]
     assert _col(out, "finite") == [True, False, False, False, True]
     assert _col(out, "infinite") == [False, False, False, True, False]
-    if backend == "polars":
-        # Polars keeps null and NaN apart. pandas float64 stores null as NaN.
-        assert _col(out, "nan") == [False, False, True, False, False]
-        assert _col(frame >> filter(is_na("x")), "x")[0] is None
-    else:
-        assert _col(out, "nan") == [False, True, True, False, False]
+    assert _col(out, "nan") == [False, False, True, False, False]
+    assert _col(frame >> filter(is_na("x")), "x")[0] is None
     assert _col(out, "capped") == [100, 200, 180, None, 90]
     assert _col(out, "whole")[0] == 1
     assert _col(out, "up")[0] == 1
@@ -129,9 +122,8 @@ def test_missing_checks_on_integer_text_and_logical_columns():
     assert (frame >> filter(is_na("s"))).collect()["n"].to_list() == [None]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_round_is_half_to_even(backend):
-    frame = tidy({"x": [0.5, 1.5, -1.5, 1.25, 1.35, 123.0]}, backend=backend)
+def test_round_is_half_to_even():
+    frame = tidy({"x": [0.5, 1.5, -1.5, 1.25, 1.35, 123.0]})
     out = frame >> mutate(z=round("x"), z1=round("x", 1), tens=round("x", -1))
     assert _col(out, "z") == [0.0, 2.0, -2.0, 1.0, 1.0, 123.0]
     assert _col(out, "z1") == [0.5, 1.5, -1.5, 1.2, 1.4, 123.0]
@@ -140,11 +132,9 @@ def test_round_is_half_to_even(backend):
     assert tens[5] == 120
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_row_sums_and_means(backend):
+def test_row_sums_and_means():
     frame = tidy(
         {"a": [1.0, None, None], "b": [None, None, 4.0], "c": [2.0, None, 6.0]},
-        backend=backend,
     )
     out = frame >> mutate(
         total=row_sums("a", "b", "c"),
@@ -158,9 +148,8 @@ def test_row_sums_and_means(backend):
     assert _col(out, "mean") == [1.5, None, 5.0]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_sum_min_count_is_per_group(backend):
-    frame = tidy({"g": ["a", "a", "b"], "x": [1.0, None, 3.0]}, backend=backend)
+def test_sum_min_count_is_per_group():
+    frame = tidy({"g": ["a", "a", "b"], "x": [1.0, None, 3.0]})
     out = frame >> group_by("g") >> summarise(
         s=sum("x", na_rm=True, min_count=2),
         s1=sum("x", na_rm=True, min_count=1),
@@ -171,45 +160,41 @@ def test_sum_min_count_is_per_group(backend):
     assert found == {"a": 1.0, "b": 3.0}
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_across_abs(backend):
-    frame = tidy({"a": [-1.0, 2.0], "b": [-3.0, 4.0]}, backend=backend)
+def test_across_abs():
+    frame = tidy({"a": [-1.0, 2.0], "b": [-3.0, 4.0]})
     out = frame >> mutate(across(where(is_numeric), abs))
     assert _col(out, "a") == [1.0, 2.0]
     assert _col(out, "b") == [3.0, 4.0]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_as_integer_refuses_fractions(backend):
-    frame = tidy({"x": [2.0, 2.5, None]}, backend=backend)
+def test_as_integer_refuses_fractions():
+    frame = tidy({"x": [2.0, 2.5, None]})
     with pytest.raises(ConversionError, match="2.5") as caught:
         (frame >> mutate(n=as_integer("x"))).collect()
     assert "x" in str(caught.value)
     permissive = frame >> mutate(n=as_integer("x", strict=False))
     assert _col(permissive, "n") == [2, None, None]
-    text = tidy({"x": ["2", "2.0", "2.5"]}, backend=backend)
+    text = tidy({"x": ["2", "2.0", "2.5"]})
     assert _col(text >> mutate(n=as_integer("x", strict=False)), "n") == [2, None, None]
     assert "2.0" in problems(text >> mutate(n=as_integer("x", strict=False))).collect()["original"].to_list()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_as_double_logical_and_character(backend):
-    numbers = tidy({"x": ["1.5", "1,234", ""]}, backend=backend)
+def test_as_double_logical_and_character():
+    numbers = tidy({"x": ["1.5", "1,234", ""]})
     assert _col(numbers >> mutate(n=as_double("x", strict=False)), "n")[0] == 1.5
     assert _col(numbers >> mutate(n=as_double("x", strict=False)), "n")[1:] == [None, None]
-    flags = tidy({"x": ["TRUE", "T", "1", "yes", "false"]}, backend=backend)
+    flags = tidy({"x": ["TRUE", "T", "1", "yes", "false"]})
     assert _col(flags >> mutate(n=as_logical("x", strict=False)), "n") == [
         True, True, None, None, False
     ]
-    parsed = tidy({"x": ["true", "1", "0", "yes"]}, backend=backend)
+    parsed = tidy({"x": ["true", "1", "0", "yes"]})
     assert _col(parsed >> mutate(n=parse_logical("x")), "n") == [True, True, False, None]
-    logical = tidy({"x": [True, False]}, backend=backend)
+    logical = tidy({"x": [True, False]})
     assert _col(logical >> mutate(c=as_character("x")), "c") == ["true", "false"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_parsers_locale_and_problems_are_lazy(backend, monkeypatch):
-    frame = tidy({"x": ["$1,234.50", "nope", "1,5"]}, backend=backend)
+def test_parsers_locale_and_problems_are_lazy(monkeypatch):
+    frame = tidy({"x": ["$1,234.50", "nope", "1,5"]})
     euro = locale(decimal_mark=",", grouping_mark=".")
     out = frame >> mutate(
         n=parse_number("x"),
@@ -218,17 +203,16 @@ def test_parsers_locale_and_problems_are_lazy(backend, monkeypatch):
     # readr skips grouping marks anywhere in parse_number: "1,5" is 15.
     assert _col(out, "n") == [1234.5, None, 15.0]
     assert _col(out, "eu")[2] == 1.5
-    if backend == "polars":
-        calls = []
-        real = pl.LazyFrame.collect
+    calls = []
+    real = pl.LazyFrame.collect
 
-        def spy(self, *args, **kwargs):
-            calls.append(self.collect_schema().names())
-            return real(self, *args, **kwargs)
+    def spy(self, *args, **kwargs):
+        calls.append(self.collect_schema().names())
+        return real(self, *args, **kwargs)
 
-        monkeypatch.setattr(pl.LazyFrame, "collect", spy)
-        assert problems(out).columns == ["row", "column", "original", "expected"]
-        assert calls == []
+    monkeypatch.setattr(pl.LazyFrame, "collect", spy)
+    assert problems(out).columns == ["row", "column", "original", "expected"]
+    assert calls == []
     found = problems(out).collect()
     assert set(found.columns) == {"row", "column", "original", "expected"}
     assert "nope" in found["original"].to_list()
@@ -236,8 +220,7 @@ def test_parsers_locale_and_problems_are_lazy(backend, monkeypatch):
         stop_for_problems(out)
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_dates_orders_cutoff_and_rollback(backend):
+def test_dates_orders_cutoff_and_rollback():
     text = tidy(
         {
             "a": ["2010-01-31", "20100131"],
@@ -245,20 +228,19 @@ def test_dates_orders_cutoff_and_rollback(backend):
             "c": ["31-01-2010", "31-01-2010"],
             "d": ["2010-02", "2010-02"],
         },
-        backend=backend,
     )
     parsed = text >> mutate(y=ymd("a"), m=mdy("b"), day=dmy("c"), month=ym("d"))
     assert _col(parsed, "y") == [date(2010, 1, 31), date(2010, 1, 31)]
     assert _col(parsed, "m") == [date(2010, 1, 31), date(2010, 1, 31)]
     assert _col(parsed, "day") == [date(2010, 1, 31), date(2010, 1, 31)]
     assert _col(parsed, "month") == [date(2010, 2, 1), date(2010, 2, 1)]
-    short = tidy({"x": ["68-01-01", "69-01-01"]}, backend=backend)
+    short = tidy({"x": ["68-01-01", "69-01-01"]})
     assert _col(short >> mutate(d=ymd("x")), "d") == [None, None]
     assert _col(short >> mutate(d=ymd("x", cutoff=68)), "d") == [
         date(2068, 1, 1),
         date(1969, 1, 1),
     ]
-    dated = tidy({"d": [date(2010, 1, 31), date(2012, 2, 29), date(2010, 3, 31)]}, backend=backend)
+    dated = tidy({"d": [date(2010, 1, 31), date(2012, 2, 29), date(2010, 3, 31)]})
     moved = dated >> mutate(
         plus=col("d") + months(1),
         rolled=add_with_rollback("d", years(1)),
@@ -276,11 +258,9 @@ def test_dates_orders_cutoff_and_rollback(backend):
         (dated >> mutate(bad=months(1) - col("d"))).collect()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_floor_and_ceiling_dates(backend):
+def test_floor_and_ceiling_dates():
     frame = tidy(
         {"d": [date(2010, 1, 31), date(2010, 1, 25), date(2010, 2, 3), date(2010, 1, 1)]},
-        backend=backend,
     )
     out = frame >> mutate(
         fw=floor_date("d", "week"),
@@ -314,15 +294,14 @@ def test_today_and_now_default_to_utc():
         now("Not/Azone")
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_parse_date_cutoff(backend):
-    frame = tidy({"x": ["68/01/02", "69/01/02"]}, backend=backend)
+def test_parse_date_cutoff():
+    frame = tidy({"x": ["68/01/02", "69/01/02"]})
     assert _col(frame >> mutate(d=parse_date("x", "%y/%m/%d")), "d") == [None, None]
     assert _col(frame >> mutate(d=parse_date("x", "%y/%m/%d", cutoff=68)), "d") == [
         date(2068, 1, 2),
         date(1969, 1, 2),
     ]
-    stamped = tidy({"x": ["2010-01-31T15:00:00Z"]}, backend=backend)
+    stamped = tidy({"x": ["2010-01-31T15:00:00Z"]})
     assert _col(stamped >> mutate(d=as_datetime("x")), "d") == [datetime(2010, 1, 31, 15, 0)]
     assert _col(stamped >> mutate(d=as_date("x", strict=False)), "d") == [None]
 
@@ -392,12 +371,10 @@ def test_excel_extra_is_optional(tmp_path: Path):
 # ── regressions from the 0.7.9 review ───────────────────────────────────
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_parse_number_reads_a_minus_as_readr_does(backend):
+def test_parse_number_reads_a_minus_as_readr_does():
     # Checked against readr: a minus counts only right before the number.
     frame = tidy(
         {"price": ["-$1,234", "$-5", "USD -7.5", "Price - 12", "1,23", "1e3", "1.2.3"]},
-        backend=backend,
     )
     assert _col(frame >> mutate(n=parse_number("price")), "n") == [
         None, -5.0, -7.5, None, 123.0, 1000.0, 1.2
@@ -419,10 +396,9 @@ def test_read_csv_trims_before_guessing_types_and_reads_na(tmp_path: Path):
     assert scan_csv(path).collect()["cyl"].dtype == pl.String
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_years_and_months_roll_back_once(backend):
+def test_years_and_months_roll_back_once():
     # lubridate's add_with_rollback adds 12 * years + months in one step.
-    frame = tidy({"d": [date(2024, 2, 29), date(2024, 1, 31)]}, backend=backend)
+    frame = tidy({"d": [date(2024, 2, 29), date(2024, 1, 31)]})
     out = frame >> mutate(
         both=col("d") + (years(1) + months(1)),
         back=col("d") - (years(1) + months(1)),
@@ -433,11 +409,9 @@ def test_years_and_months_roll_back_once(backend):
     assert _col(out, "rolled") == [date(2025, 3, 29), date(2025, 2, 28)]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_months_of_a_column(backend):
+def test_months_of_a_column():
     frame = tidy(
         {"d": [date(2024, 1, 31), date(2024, 1, 31), date(2010, 3, 31)], "k": [1, None, -1]},
-        backend=backend,
     )
     out = frame >> mutate(
         plus=col("d") + months(col("k")),
@@ -449,8 +423,7 @@ def test_months_of_a_column(backend):
     assert _col(out, "both") == [date(2025, 2, 28), None, date(2009, 4, 30)]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_week_floor_and_ceiling_start_at_midnight(backend):
+def test_week_floor_and_ceiling_start_at_midnight():
     frame = tidy(
         {
             "t": [
@@ -459,7 +432,6 @@ def test_week_floor_and_ceiling_start_at_midnight(backend):
                 datetime(2026, 10, 18, 0, 0),
             ]
         },
-        backend=backend,
     )
     out = frame >> mutate(f=floor_date("t", "week"), c=ceiling_date("t", "week"))
     assert _col(out, "f") == [datetime(2026, 10, 18)] * 3
@@ -551,9 +523,8 @@ def test_unicode_digits_fall_back_to_the_per_value_path():
     assert _col(frame >> mutate(n=as_integer("x", strict=False)), "n") == [12, 3, None]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_parsers_treat_empty_text_as_a_failure_not_a_crash(backend):
-    frame = tidy({"x": ["", "  ", "5"]}, backend=backend)
+def test_parsers_treat_empty_text_as_a_failure_not_a_crash():
+    frame = tidy({"x": ["", "  ", "5"]})
     out = frame >> mutate(d=parse_double("x"), i=parse_integer("x"))
     assert _col(out, "d") == [None, None, 5.0]
     assert _col(out, "i") == [None, None, 5]
@@ -570,16 +541,14 @@ def test_problems_after_read_csv_do_not_read_the_file_again(tmp_path: Path):
     assert found["original"].to_list() == ["abc"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_as_integer_treats_a_missing_float_as_missing(backend):
+def test_as_integer_treats_a_missing_float_as_missing():
     # pandas stores the missing hp as NaN; that is NA, not a failure.
-    frame = tidy({"hp": [110.0, None, 93.0]}, backend=backend)
+    frame = tidy({"hp": [110.0, None, 93.0]})
     assert _col(frame >> mutate(n=as_integer("hp")), "n") == [110, None, 93]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_helpers_around_a_summary_give_one_value_per_group(backend):
-    cars = tidy({"cyl": [4, 4, 6], "hp": [93.0, 62.0, 110.0]}, backend=backend)
+def test_helpers_around_a_summary_give_one_value_per_group():
+    cars = tidy({"cyl": [4, 4, 6], "hp": [93.0, 62.0, 110.0]})
     whole = cars >> summarise(m=round(mean("hp"), -1), low=pmin(mean("hp"), 80))
     assert _col(whole, "m") == [90.0]
     assert _col(whole, "low") == [80.0]
@@ -588,9 +557,8 @@ def test_helpers_around_a_summary_give_one_value_per_group(backend):
     assert _col(grouped, "a") == [77.5, 110.0]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_helpers_take_constants(backend):
-    cars = tidy({"hp": [110.0, 250.0], "cyl": [6, 8]}, backend=backend)
+def test_helpers_take_constants():
+    cars = tidy({"hp": [110.0, 250.0], "cyl": [6, 8]})
     out = cars >> mutate(r=round(2.675, 2), capped=pmin("hp", 200), tens=round("cyl", -1))
     assert _col(out, "r") == [2.67, 2.67]
     assert _col(out, "capped") == [110.0, 200.0]
@@ -599,8 +567,7 @@ def test_helpers_take_constants(backend):
 
 
 @pytest.mark.parametrize("convert", [as_character, as_string])
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_text_follows_the_column_type(backend, convert):
+def test_text_follows_the_column_type(convert):
     cars = tidy(
         {
             "mpg": [21.0, 0.1 + 0.2, None],
@@ -609,7 +576,6 @@ def test_text_follows_the_column_type(backend, convert):
             "day": [date(2010, 1, 31), None, date(2010, 2, 1)],
             "at": [datetime(2010, 1, 31, 15, 30), datetime(2010, 1, 31, 15, 30, 0, 250000), None],
         },
-        backend=backend,
     )
     out = cars >> mutate(
         mpg=convert("mpg"),
@@ -629,13 +595,12 @@ def test_text_follows_the_column_type(backend, convert):
     assert _col(out, "at") == ["2010-01-31 15:30:00", "2010-01-31 15:30:00.250", None]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_text_keeps_float32_and_reads_back_exactly(backend):
+def test_text_keeps_float32_and_reads_back_exactly():
     data = pl.DataFrame({"wt": pl.Series([22.8, 0.1], dtype=pl.Float32)})
-    frame = tidy(data if backend == "polars" else data.to_pandas(), backend=backend)
+    frame = tidy(data)
     assert _col(frame >> mutate(wt=as_string("wt")), "wt") == ["22.8", "0.1"]
     # An id stored as a float: convert to an integer first for "1001".
-    ids = tidy({"id": [1001.0, 1002.0]}, backend=backend)
+    ids = tidy({"id": [1001.0, 1002.0]})
     assert _col(ids >> mutate(id=as_string(as_integer("id"))), "id") == ["1001", "1002"]
     assert _col(ids >> mutate(id=as_string("id")), "id") == ["1001.0", "1002.0"]
 
@@ -649,17 +614,15 @@ def test_text_nan_and_time_zone_on_polars():
     assert _col(tidy(zoned) >> mutate(at=as_string("at")), "at") == ["2010-01-31 07:30:00-08:00"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_text_of_constants_and_summaries(backend):
-    cars = tidy({"cyl": [4, 4, 6], "hp": [93.0, 62.0, 110.0]}, backend=backend)
+def test_text_of_constants_and_summaries():
+    cars = tidy({"cyl": [4, 4, 6], "hp": [93.0, 62.0, 110.0]})
     assert _col(cars >> mutate(k=as_string(5.0)), "k") == ["5.0"] * 3
     grouped = cars >> group_by("cyl") >> summarise(m=as_string(mean("hp")))
     assert _col(grouped, "m") == ["77.5", "110.0"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_aliases_name_themselves_in_errors(backend):
-    frame = tidy({"x": ["1.5", "abc"]}, backend=backend)
+def test_aliases_name_themselves_in_errors():
+    frame = tidy({"x": ["1.5", "abc"]})
     with pytest.raises(ConversionError, match=r"^as_numeric\(\)"):
         (frame >> mutate(y=as_numeric("x"))).collect()
     with pytest.raises(ConversionError, match=r"^as_double\(\)"):

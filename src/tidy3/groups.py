@@ -45,9 +45,6 @@ def _levels(tf: Any, name: str) -> list[Any] | None:
     levels = tf._category_levels.get(name)
     if levels is not None:
         return list(levels)
-    if tf._backend == "pandas":
-        column = tf._pdf[name]
-        return list(column.cat.categories) if isinstance(column.dtype, pd.CategoricalDtype) else None
     dtype = tf._lf.collect_schema()[name]
     return dtype.categories.to_list() if isinstance(dtype, pl.Enum) else None
 
@@ -66,8 +63,6 @@ def _key(values: Any) -> tuple:
 
 
 def _row_count(tf: Any) -> int:
-    if tf._backend == "pandas":
-        return len(tf._pdf)
     return int(tf._lf.select(pl.len()).collect().item())
 
 
@@ -77,12 +72,6 @@ def _observed(tf: Any, names: list[str], positions: bool = True) -> dict[tuple, 
     With ``positions=False`` each key maps to its row count instead, which
     never materializes the positions.
     """
-    if tf._backend == "pandas":
-        frame = tf._pdf.reset_index(drop=True)
-        grouped = frame.groupby(names if len(names) > 1 else names[0], sort=False, dropna=False, observed=True)
-        if not positions:
-            return {_key(k): int(v) for k, v in grouped.size().items()}
-        return {_key(k): np.asarray(v) for k, v in grouped.indices.items()}
     index = "__tidy3_position"
     while index in names:
         index += "_"
@@ -162,10 +151,7 @@ def _group_table(
             # Iterating a frame with no columns would yield no rows at all.
             count = _row_count(tf)
             return names, [((), np.array([i]) if positions else 1) for i in range(count)]
-        if tf._backend == "pandas":
-            rows = tf._pdf.loc[:, names].itertuples(index=False, name=None)
-        else:
-            rows = tf._lf.select(names).collect().iter_rows()
+        rows = tf._lf.select(names).collect().iter_rows()
         return names, [(_key(tuple(r)), np.array([i]) if positions else 1) for i, r in enumerate(rows)]
     if not names:
         count = _row_count(tf)
@@ -178,24 +164,6 @@ def _group_table(
 
 def _keys_frame(tf: Any, names: list[str], keys: list[tuple]) -> Any:
     """The key columns for *keys*, in the frame's backend and column types."""
-    if tf._backend == "pandas":
-        frame = pd.DataFrame({name: [k[i] for k in keys] for i, name in enumerate(names)})
-        for name in names:
-            levels = _levels(tf, name)
-            if levels is not None:
-                # Keep unused levels (empty groups) that the data never shows.
-                recorded = tf._category_levels.get(name)
-                frame[name] = pd.Categorical(
-                    frame[name],
-                    categories=levels,
-                    ordered=bool(getattr(recorded, "ordered", False)),
-                )
-                continue
-            try:
-                frame[name] = frame[name].astype(tf._pdf[name].dtype)
-            except (TypeError, ValueError):
-                pass
-        return frame
     schema = tf._lf.collect_schema()
     return pl.DataFrame(
         {name: [k[i] for k in keys] for i, name in enumerate(names)}, strict=False
@@ -217,9 +185,7 @@ def group_data(data: Any = _MISSING):
     tf = _frame(data)
     names, table = _group_table(tf)
     out = _keys_frame(tf, names, [key for key, _ in table])
-    if tf._backend == "pandas":
-        out[".rows"] = [(positions + 1).tolist() for _, positions in table]
-    elif not names:
+    if not names:
         # Ungrouped: one group, no key columns to attach to.
         out = pl.DataFrame({".rows": _rows_column(table)})
     else:
@@ -293,26 +259,18 @@ def group_trim(data: Any = _MISSING):
     from tidy3.frame import FactorLevels
 
     levels = dict(tf._category_levels)
-    pdf = tf._pdf if tf._backend == "pandas" else None
     casts = []
     for name in names:
         current = _levels(tf, name)
         if current is None:
             continue
-        if pdf is not None:
-            used = set(pdf[name].dropna().tolist())
-            if isinstance(pdf[name].dtype, pd.CategoricalDtype):
-                pdf = pdf.assign(**{name: pdf[name].cat.remove_unused_categories()})
-        else:
-            used = set(tf._lf.select(pl.col(name).drop_nulls().unique()).collect().to_series().to_list())
+        used = set(tf._lf.select(pl.col(name).drop_nulls().unique()).collect().to_series().to_list())
         recorded = tf._category_levels.get(name)
         kept = [level for level in current if level in used]
         levels[name] = FactorLevels(kept, ordered=bool(getattr(recorded, "ordered", False)))
-        if pdf is None and all(isinstance(level, str) for level in kept):
+        if all(isinstance(level, str) for level in kept):
             # The Enum's own categories are the levels Polars shows and sorts by.
             casts.append(pl.col(name).cast(pl.String).cast(pl.Enum(kept)))
-    if pdf is not None:
-        return tf._with_pdf(pdf, groups=names, category_levels=levels)
     lf = tf._lf.with_columns(casts) if casts else tf._lf
     return tf._with_lf(lf, groups=names, category_levels=levels)
 
@@ -349,8 +307,6 @@ def nest_by(*cols: Any, name: str = "data"):
 
         keys = resolve_selection(tf, cols) if cols else list(tf._groups or [])
         nested = tf >> group_nest(*keys, name=name)
-        return nested._with_lf(nested._lf, groups=keys, rowwise=True) if (
-            nested._backend == "polars"
-        ) else nested._with_pdf(nested._pdf, groups=keys, rowwise=True)
+        return nested._with_lf(nested._lf, groups=keys, rowwise=True)
 
     return Verb(_apply, "nest_by")

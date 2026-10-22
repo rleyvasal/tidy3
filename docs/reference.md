@@ -39,7 +39,7 @@ result.write_ipc("summary.arrow")        # Arrow IPC / Feather
 
 With the default Polars backend, these execute the lazy plan and stream its
 result to disk, avoiding a second fully materialized DataFrame in memory.
-The same methods also work with `backend="pandas"`. GPU writers execute the
+GPU writers execute the
 plan on the GPU, then materialize before serialization because current GPU
 file sinks are not stable across all formats; `auto` and `streaming` retain
 direct lazy sinks.
@@ -145,30 +145,22 @@ instead of nesting. Python-callback verbs (`group_map` / `group_modify` /
 not for hot large-data paths. Prefer declarative `summarise` when
 performance matters.
 
-## Backends
+## pandas input and output
 
-The default engine is **Polars lazy**. For 1:1 engine comparisons (e.g.
-against datar, which is pandas-only) the same pipeline also runs on an
-**eager pandas backend**:
+tidy3 runs on Polars. A pandas DataFrame is accepted wherever a frame is, and
+becomes a lazy Polars frame that keeps its factor levels and ordered flags.
+`collect(as_="pandas")` hands a result back to pandas, restoring those levels:
 
 ```python
 import pandas as pd
 
 df = pd.DataFrame({"x": [-1.5, 0.5, 2.0], "y": [10, 20, 30]})
 
-tidy(df, backend="pandas") >> filter(col("x") > 0)   # per frame
-options(backend="pandas")                            # session default
-options(backend="polars")                            # back to the default
+(tidy(df) >> filter(col("x") > 0)).collect(as_="pandas")
 ```
 
-Expressions (`col("x") * 2`, `mean("y")`, comparisons, `cum_sum`, …) are
-backend-neutral: they compile to `pl.Expr` on polars and evaluate natively on
-pandas, with dplyr window semantics after `group_by` on both. The pandas
-backend covers the documented verb/expression subset; anything
-polars-specific raises a clear error pointing back to `backend="polars"`.
-
 A quoted string assigned in `mutate`, `transmute`, `summarise`, or `reframe`
-is text, as in dplyr, on both backends: `mtcars >> mutate(source="mtcars")`
+is text, as in dplyr: `mtcars >> mutate(source="mtcars")`
 writes `"mtcars"` in every row. A column is `col("hp")` in plain Python and
 the bare name `hp` in a notebook pipe, which `nb_export` writes as
 `col("hp")`. Strings that name columns elsewhere (`select("hp")`,
@@ -235,8 +227,8 @@ is the first row with no missing cells. `find_header(data, value="Total", column
 searches one column; `column` is a name or a 1-based position. The name
 row and the rows above it are removed by default. A missing header cell
 becomes the string `"NA"`, including NaN. janitor leaves a missing name as
-`NA` (and `as.character(NaN)` is `"NaN"`); a string name can be stored on
-both backends. Each cell is converted on its own: `1.0` becomes `"1"` and
+`NA` (and `as.character(NaN)` is `"NaN"`); a string name can be stored.
+Each cell is converted on its own: `1.0` becomes `"1"` and
 `TRUE` becomes `"TRUE"`. janitor 2.2.1 instead coerces the whole header
 row with `unlist` before converting, so a row of `1` and `TRUE` becomes
 two `"1"` names there. Duplicate names are made unique (`id`, `id_2`)
@@ -304,8 +296,7 @@ cars >> mutate(total=row_sums("mpg", "hp", "wt", na_rm=True, min_count=1))
 `is_na` is true for a Polars null and for NaN, and the result is never
 itself missing, so `filter` keeps the row. `is_nan` is true only for NaN.
 `is_finite` is true only for a finite number. `is_infinite` is true only
-for positive or negative infinity. On the pandas backend a missing float is
-stored as NaN, so that cell is both `is_na` and `is_nan`. The string
+for positive or negative infinity. The string
 `"nan"` is text, not a missing number.
 
 `round` follows R's `round()` (R 4.0 and later). An exact tie goes to the
@@ -339,7 +330,7 @@ does the string `"1"`. Numbers work (`0` is false). `as_date` accepts ISO `YYYY-
 clock time.
 
 `as_character` and `as_string` write each value as its column type shows
-it, the same way on both backends: a float stays a float (`21.0` is
+it: a float stays a float (`21.0` is
 `"21.0"`, a `float32` `22.8` is `"22.8"`), an integer is `"21"`, a date is
 `"2010-01-31"`, and a datetime is `"2010-01-31 15:30:00"`, with fractional
 seconds only when it has them and an offset (`"-08:00"`) when it has a
@@ -483,7 +474,7 @@ to the next boundary: `ceiling_date` of 2010-02-01 to a month is
 2010-03-01, and of any date to a day is the next day. `days_in_month` is 29 for 29 February 2012.
 
 Timezone-aware `floor_date` and `ceiling_date` keep the zone and round to
-local boundaries on both backends, including weeks and daylight saving
+local boundaries, including weeks and daylight saving
 transitions. Both occurrences of a repeated hour stay distinct. Flooring
 `2024-11-03 01:30:00.125-04:00` to a second keeps that occurrence and drops
 the fraction. Ceiling the first 01:30 of an autumn fallback to an hour
@@ -547,8 +538,6 @@ against R, dplyr, readr, and lubridate. These differences are deliberate:
 - A two-digit year needs an explicit `cutoff`; readr and lubridate assume 68.
 - `read_csv` guesses whole-number columns as integers (as Polars does);
   readr guesses double. The values are the same.
-- On the pandas backend a missing float is NaN, so `is_nan` is true there
-  for missing values too.
 
 ### Factor ordering
 
@@ -641,8 +630,7 @@ missing columns while `any_of(names)` silently ignores them.
 
 ### Reshape and missing data
 
-The familiar tidyr operations work as pipe verbs or `TidyFrame` methods on
-both backends:
+The familiar tidyr operations work as pipe verbs or `TidyFrame` methods:
 
 ```python
 from tidy3 import (
@@ -797,7 +785,7 @@ As in tidyr, values that the id and name columns do not uniquely identify
 become list columns with a warning; pass `values_fn="list"` to ask for lists,
 or `values_fn="mean"` (`sum`, `first`, …) to summarise duplicates.
 `pivot_longer()` supports the `.value` sentinel, and `separate(convert=True)`
-performs R-style logical/numeric inference on both backends. Schema-dependent
+performs R-style logical/numeric inference. Schema-dependent
 reshape and conversion operations issue a metadata-only query on Polars.
 
 Use `across` as a positional argument to `mutate`, `transmute`, or
@@ -1013,7 +1001,7 @@ Advanced specifications work with left/right/inner/full/semi/anti joins.
 Polars uses its native inequality-join plan when no equality partition is
 needed; equality-partitioned inequalities first reduce candidates by key.
 
-Joins return rows in dplyr's order on both backends: x's rows in order, each
+Joins return rows in dplyr's order: x's rows in order, each
 followed by its matches in y's order, and then, for `right_join` and
 `full_join`, the rows of y that matched nothing, in y's order. So
 `islands >> right_join(penguins, by="island")` lists penguins grouped by the
@@ -1039,7 +1027,7 @@ tidy(sales) >> slice_max("amount", n=2, by="region")
 `summarise`, `reframe`, `slice`, and every `slice_*` variant. Like dplyr,
 it cannot be combined with an already grouped or rowwise frame.
 
-Portable helpers run with the same grouped semantics on both backends:
+Portable helpers run with dplyr's grouped semantics:
 
 ```python
 tidy(events) >> mutate(
@@ -1128,7 +1116,7 @@ Every frame-returning Phase 1–8 verb stays lazy on the Polars backend. `pull`,
 `setequal`, plotting, previews, and explicit `collect` are intentional
 materialization boundaries. Schema-dependent reshape operations may run a
 small metadata query as described above. `slice_sample(weight_by=...)`,
-including `replace=True`, is supported on both backends. Group-context helpers
+including `replace=True`, is supported. Group-context helpers
 and additional vector helpers remain future phases.
 
 ### Strings (stringr)
@@ -1197,7 +1185,7 @@ How this differs from R:
   look-around. `str_locate_all`, `str_match_all`, `str_width`, `str_wrap`,
   `str_conv`, `word` with a regex separator, and `str_split` with both a regex
   and `n=` run row by row in Python, so they are slower on large frames.
-- `str_to_title("don't")` gives `"Don'T"` on both backends (R: `"Don't"`).
+- `str_to_title("don't")` gives `"Don'T"` (R: `"Don't"`).
 - There is no `str_sub<-`; build the new string with `str_c()` and
   `str_sub()`. `str_interp` (deprecated in stringr) is not included.
 
@@ -1205,7 +1193,7 @@ How this differs from R:
 
 Grouped `mutate()` expressions automatically reuse embedded or repeated
 statistics. Expressions such as the following compute each group mean and
-standard deviation once on both backends; temporary columns never appear in
+standard deviation once; temporary columns never appear in
 the result:
 
 ```python

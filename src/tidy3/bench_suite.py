@@ -37,7 +37,6 @@ class Workload:
     category: str
     name: str
     pandas: Callable[[], Any]
-    tidy_pandas: Callable[[], Any]
     tidy_polars: Callable[[], Any]
     # When False, the workload is still timed and correctness-checked but
     # excluded from geometric adoption budgets (Python-callback / experimental).
@@ -161,9 +160,6 @@ def _build_workloads(
             engine=polars_engine,
         )
 
-    def tp(pipe):
-        return lambda: pipe(tidy(pdf, backend="pandas")).collect(as_="pandas")
-
     def tl(pipe):
         return lambda: collect_polars(pipe(tidy(pldf)))
 
@@ -213,9 +209,6 @@ def _build_workloads(
         margin=col("amount") - col("cost"),
         positive=if_else(col("score") > 0, 1, 0),
     )
-    projected_pandas = lambda: projection_pipe(
-        tidy(pdf, backend="pandas")
-    ).collect(as_="pandas", columns=projected_columns)
     projected_polars = lambda: collect_polars(
         projection_pipe(tidy(pldf)), columns=projected_columns
     )
@@ -261,9 +254,6 @@ def _build_workloads(
     def raw_join():
         return pdf.merge(dimension, on="customer_id", how="left", sort=False)
 
-    pandas_join = lambda: (
-        tidy(pdf, backend="pandas") >> left_join(dimension, on="customer_id")
-    ).collect(as_="pandas")
     polars_join = lambda: collect_polars(
         tidy(pldf) >> left_join(pl_dimension, on="customer_id")
     )
@@ -313,9 +303,6 @@ def _build_workloads(
             >> filter(col("revenue") > 1_000)
         )
 
-    customer_pandas = lambda: customer_pipe(
-        tidy(pdf, backend="pandas"), dimension
-    ).collect(as_="pandas")
     customer_polars = lambda: collect_polars(
         customer_pipe(tidy(pldf), pl_dimension)
     )
@@ -459,9 +446,6 @@ def _build_workloads(
             >> arrange("region", "channel")
         )
 
-    join_aggregate_pandas = lambda: join_aggregate_pipe(
-        tidy(pdf, backend="pandas"), dimension
-    ).collect(as_="pandas")
     join_aggregate_polars = lambda: collect_polars(
         join_aggregate_pipe(tidy(pldf), pl_dimension)
     )
@@ -484,9 +468,6 @@ def _build_workloads(
             }
         )
 
-    group_callback_pandas = lambda: (
-        tidy(pdf, backend="pandas") >> group_modify(callback, "segment")
-    ).collect(as_="pandas")
     group_callback_polars = lambda: (
         tidy(pldf) >> group_modify(callback, "segment")
     ).collect(as_="pandas")
@@ -510,63 +491,56 @@ def _build_workloads(
         # (no Python explosion of nested structs); output is the small
         # segment/rows summary, matching the raw baseline shape.
         nested = frame >> group_nest("segment", name="records")
-        if nested.backend == "polars":
-            return nested.with_polars(
-                lambda lf: lf.select(
-                    pl.col("segment"),
-                    pl.col("records").list.len().alias("rows"),
-                )
-            ).collect(as_="pandas")
+        return nested.with_polars(
+            lambda lf: lf.select(
+                pl.col("segment"),
+                pl.col("records").list.len().alias("rows"),
+            )
+        ).collect(as_="pandas")
         out = nested.collect(as_="pandas")
         out["rows"] = out["records"].map(len)
         return out[["segment", "rows"]]
 
-    group_nest_pandas = lambda: nested_counts(tidy(pdf, backend="pandas"))
     group_nest_polars = lambda: nested_counts(tidy(pldf))
 
     return [
-        Workload("Everyday", "filter + select", raw_filter, tp(filter_pipe), tl(filter_pipe)),
-        Workload("Everyday", "mutate 4 features", raw_mutate, tp(mutate_pipe), tl(mutate_pipe)),
+        Workload("Everyday", "filter + select", raw_filter, tl(filter_pipe)),
+        Workload("Everyday", "mutate 4 features", raw_mutate, tl(mutate_pipe)),
         Workload(
             "Everyday",
             "projected feature handoff",
             raw_projected_features,
-            projected_pandas,
             projected_polars,
         ),
-        Workload("Everyday", "group + 5 summaries", raw_group, tp(group_pipe), tl(group_pipe)),
-        Workload("Everyday", "sort 2 columns", raw_sort, tp(sort_pipe), tl(sort_pipe)),
-        Workload("Everyday", "distinct 2 columns", raw_distinct, tp(distinct_pipe), tl(distinct_pipe)),
-        Workload("Everyday", "dimension left join", raw_join, pandas_join, polars_join),
-        Workload("Everyday", "3 grouped windows", raw_window, tp(window_pipe), tl(window_pipe)),
+        Workload("Everyday", "group + 5 summaries", raw_group, tl(group_pipe)),
+        Workload("Everyday", "sort 2 columns", raw_sort, tl(sort_pipe)),
+        Workload("Everyday", "distinct 2 columns", raw_distinct, tl(distinct_pipe)),
+        Workload("Everyday", "dimension left join", raw_join, polars_join),
+        Workload("Everyday", "3 grouped windows", raw_window, tl(window_pipe)),
         Workload(
             "Real-world",
             "customer aggregation",
             raw_customer_features,
-            customer_pandas,
             customer_polars,
         ),
-        Workload("Real-world", "ML feature matrix", raw_ml_features, tp(ml_pipe), tl(ml_pipe)),
+        Workload("Real-world", "ML feature matrix", raw_ml_features, tl(ml_pipe)),
         Workload(
             "Real-world",
             "ML features staged",
             raw_ml_features,
-            tp(ml_staged_pipe),
             tl(ml_staged_pipe),
         ),
-        Workload("Real-world", "event history features", raw_event_features, tp(event_pipe), tl(event_pipe)),
+        Workload("Real-world", "event history features", raw_event_features, tl(event_pipe)),
         Workload(
             "Real-world",
             "join-filter-aggregate",
             raw_join_aggregate,
-            join_aggregate_pandas,
             join_aggregate_polars,
         ),
         Workload(
             "Materialization",
             "group callback summarize",
             raw_group_callback,
-            group_callback_pandas,
             group_callback_polars,
             budget=False,
         ),
@@ -574,7 +548,6 @@ def _build_workloads(
             "Materialization",
             "group nest and count",
             raw_group_nest,
-            group_nest_pandas,
             group_nest_polars,
         ),
     ]
@@ -661,7 +634,7 @@ def run(
         ]
         if not workloads:
             raise ValueError(f"no workloads match {match!r}")
-    engines = ["pandas", "tidy3[pandas]", "tidy3[polars]"]
+    engines = ["pandas", "tidy3[polars]"]
     print(
         f"tidy3 comprehensive benchmark: rows={rows:,}, repeat={repeat}, "
         f"warmup={warmup}, output={output}, polars_engine={polars_engine}"
@@ -671,8 +644,7 @@ def run(
     results: dict[str, dict[str, dict[str, float]]] = {}
     current_category = None
     header = (
-        f"  {'workload':<25} {'pandas':>11} "
-        f"{'tidy3[pandas]':>20} {'tidy3[polars]':>20}"
+        f"  {'workload':<25} {'pandas':>11} {'tidy3[polars]':>20}"
     )
     for workload in workloads:
         if workload.category != current_category:
@@ -682,7 +654,6 @@ def run(
             print("  " + "-" * (len(header) - 2))
         functions = {
             "pandas": workload.pandas,
-            "tidy3[pandas]": workload.tidy_pandas,
             "tidy3[polars]": workload.tidy_polars,
         }
         warm_results = {}
@@ -691,9 +662,6 @@ def run(
                 warm_results[engine] = function()
         if not warm_results:
             warm_results = {engine: function() for engine, function in functions.items()}
-        _assert_equivalent(
-            warm_results["pandas"], warm_results["tidy3[pandas]"], workload.name
-        )
         _assert_equivalent(
             warm_results["pandas"], warm_results["tidy3[polars]"], workload.name
         )
@@ -705,9 +673,6 @@ def run(
             for engine in order:
                 measured, final_results[engine] = _measure(functions[engine], 1)
                 samples[engine].extend(measured)
-        _assert_equivalent(
-            final_results["pandas"], final_results["tidy3[pandas]"], workload.name
-        )
         _assert_equivalent(
             final_results["pandas"], final_results["tidy3[polars]"], workload.name
         )
@@ -726,8 +691,6 @@ def run(
         marker = "" if workload.budget else "  [experimental]"
         print(
             f"  {workload.name:<25} {baseline * 1000:>9.1f}ms "
-            f"{medians['tidy3[pandas]'] * 1000:>9.1f}ms "
-            f"{medians['tidy3[pandas]'] / baseline:>5.2f}x "
             f"{medians['tidy3[polars]'] * 1000:>9.1f}ms "
             f"{medians['tidy3[polars]'] / baseline:>5.2f}x"
             f"{marker}"
@@ -760,7 +723,6 @@ def _main() -> None:
         default="auto",
         help="Polars execution mode; gpu is strict and fails on CPU fallback",
     )
-    parser.add_argument("--max-tidy-pandas-geo", type=float)
     parser.add_argument("--max-tidy-polars-geo", type=float)
     parser.add_argument("--budget-min-ms", type=float, default=10.0)
     args = parser.parse_args()
@@ -774,7 +736,6 @@ def _main() -> None:
         polars_engine=args.polars_engine,
     )
     budgets = {
-        "tidy3[pandas]": args.max_tidy_pandas_geo,
         "tidy3[polars]": args.max_tidy_polars_geo,
     }
     budget_workloads = getattr(run, "_budget_workloads", None)

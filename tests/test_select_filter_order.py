@@ -93,16 +93,6 @@ def test_missing_column_still_errors():
         ).collect()
 
 
-def test_pandas_backend_select_then_filter():
-    out = (
-        tidy(_cars(), backend="pandas")
-        >> select("wt", "mpg", "cyl")
-        >> filter(col("hp") < 250)
-    ).collect(as_="pandas")
-    assert list(out.columns) == ["wt", "mpg", "cyl"]
-    assert len(out) == 2
-
-
 def test_select_then_arrange_uses_dropped_column():
     out = (
         tidy(_cars())
@@ -175,21 +165,3 @@ def test_filter_arrange_slice_stack_after_select():
     assert out.columns == ["wt", "mpg"]
     assert out["wt"].to_list() == [1.0]
     assert out["mpg"].to_list() == [30.0]
-
-
-def test_pandas_select_then_arrange_and_slice_max():
-    arranged = (
-        tidy(_cars(), backend="pandas")
-        >> select("wt", "mpg")
-        >> arrange(desc("hp"))
-    ).collect(as_="pandas")
-    assert list(arranged.columns) == ["wt", "mpg"]
-    assert arranged["wt"].tolist() == [3.0, 2.0, 1.0]
-
-    top = (
-        tidy(_cars(), backend="pandas")
-        >> select("wt", "mpg")
-        >> slice_max(order_by="hp", n=1, with_ties=False)
-    ).collect(as_="pandas")
-    assert list(top.columns) == ["wt", "mpg"]
-    assert top["wt"].tolist() == [3.0]

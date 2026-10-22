@@ -75,8 +75,6 @@ def _full_seq_values(values: list[Any], period: float, tol: float) -> list[Any]:
 
 def _full_seq_array(values: list[Any], period: float, tol: float) -> list[float] | None:
     """The sequence when every value is a finite number. None asks for the slow path."""
-    import numpy as np
-
     try:
         numbers = np.asarray(values, dtype=np.float64)
     except (TypeError, ValueError):
@@ -123,15 +121,12 @@ def _column_full_seq(lf: pl.LazyFrame, column: str, period: float, tol: float) -
 def _value_list(tf: Any, name: str, spec: Any) -> list[Any]:
     """Unique sorted values for a named ``expand()``/``complete()`` input."""
     if isinstance(spec, FullSeq):
-        if tf._backend == "pandas":
-            present = tf._pdf[spec.column].dropna().tolist()
-        else:
-            fast = _column_full_seq(tf._lf, spec.column, spec.period, spec.tol)
-            if fast is not None:
-                return fast
-            present = (
-                tf._lf.select(pl.col(spec.column).drop_nulls()).collect().to_series().to_list()
-            )
+        fast = _column_full_seq(tf._lf, spec.column, spec.period, spec.tol)
+        if fast is not None:
+            return fast
+        present = (
+            tf._lf.select(pl.col(spec.column).drop_nulls()).collect().to_series().to_list()
+        )
         return _full_seq_values(present, spec.period, spec.tol)
     values = list(spec.tolist() if hasattr(spec, "tolist") else spec)
     return _unique_sorted(values)
@@ -149,16 +144,6 @@ def _unique_sorted(values: list[Any]) -> list[Any]:
 
 def _named_values_frame(tf: Any, name: str, values: list[Any], backend: str) -> Any:
     """One-column frame of *values*, cast to the column's type when present."""
-    if backend == "pandas":
-        import pandas as pd
-
-        frame = pd.DataFrame({name: values})
-        if name in tf._pdf.columns:
-            try:
-                frame[name] = frame[name].astype(tf._pdf[name].dtype)
-            except (TypeError, ValueError):
-                pass
-        return frame
     frame = pl.DataFrame({name: values}, strict=False).lazy()
     schema = tf._lf.collect_schema()
     if name in schema:
@@ -167,8 +152,6 @@ def _named_values_frame(tf: Any, name: str, values: list[Any], backend: str) -> 
 
 
 def _columns(tf: Any) -> list[str]:
-    if tf._backend == "pandas":
-        return [str(name) for name in tf._pdf.columns]
     return tf._lf.collect_schema().names()
 
 
@@ -188,61 +171,6 @@ def _result_groups(tf: Any, columns: Iterable[str]) -> list[str] | None:
     return groups or None
 
 
-def _pandas_nested_frames(
-    pdf: Any,
-    identifiers: list[str],
-    nested: list[str],
-    *,
-    column: str,
-) -> Any:
-    """Build one nested DataFrame per group without ``to_dict(records)``.
-
-    Matches ``group_nest``'s pandas representation: nested cells are
-    DataFrames (not lists of dicts), which is far cheaper on wide frames
-    and still unnests via ``unnest()``.
-    """
-    import pandas as pd
-
-    if not identifiers:
-        return pd.DataFrame({column: [pdf.loc[:, nested].reset_index(drop=True)]})
-
-    if not len(pdf):
-        return pd.DataFrame([], columns=[*identifiers, column])
-    keys, frames = nested_frames(pdf, identifiers, nested, sort=False)
-    return pd.DataFrame({**keys, column: frames}, columns=[*identifiers, column])
-
-
-def nested_frames(
-    pdf: Any, keys: list[str], nested: list[str] | None, *, sort: bool
-) -> tuple[dict[str, list[Any]], list[Any]]:
-    """Group keys and one DataFrame per group, built from one sorted copy.
-
-    Rows are sorted by group once and each group's frame is a slice of that
-    copy with a fresh index; copy-on-write keeps the frames independent.
-    Groups come in first-appearance order, or sorted (missing last) when
-    *sort* is true, as ``groupby`` orders them. Key values are each group's
-    first row; a group with no nested columns gets an empty frame of its size.
-    """
-    import pandas as pd
-
-    grouping_key = keys[0] if len(keys) == 1 else keys
-    gid = pdf.groupby(grouping_key, sort=sort, dropna=False, observed=True).ngroup().to_numpy()
-    order = np.argsort(gid, kind="stable")
-    bounds = np.concatenate([[0], np.cumsum(np.bincount(gid))])
-    first = order[bounds[:-1]]
-    key_values = {key: pdf[key].iloc[first].tolist() for key in keys}
-    frames = []
-    if nested:
-        body = pdf.loc[:, nested].iloc[order]
-        for start, stop in zip(bounds[:-1].tolist(), bounds[1:].tolist()):
-            frame = body.iloc[start:stop]
-            frame.index = pd.RangeIndex(stop - start)
-            frames.append(frame)
-    else:
-        frames = [pd.DataFrame(index=range(stop - start)) for start, stop in zip(bounds[:-1].tolist(), bounds[1:].tolist())]
-    return key_values, frames
-
-
 def _is_float_dtype(dtype: Any) -> bool:
     try:
         return dtype.base_type() in {pl.Float32, pl.Float64}
@@ -257,10 +185,6 @@ def drop_na(*cols: Any) -> Verb:
         selected = resolve_selection(tf, cols) if cols else _columns(tf)
         if not selected:
             return tf
-        if tf._backend == "pandas":
-            return tf._with_pdf(
-                tf._pdf.dropna(subset=selected), groups=tf._groups
-            )
         schema = tf._lf.collect_schema()
         predicates = []
         for name in selected:
@@ -285,10 +209,6 @@ def replace_na(replace: dict[str, Any]) -> Verb:
         missing = [name for name in replace if name not in columns]
         if missing:
             raise KeyError(f"replace_na() columns not found: {missing}")
-        if tf._backend == "pandas":
-            return tf._with_pdf(
-                tf._pdf.fillna(value=replace), groups=tf._groups
-            )
         schema = tf._lf.collect_schema()
         expressions = []
         for name, value in replace.items():
@@ -317,29 +237,6 @@ def fill(
     def _apply(tf):
         selected = resolve_selection(tf, cols)
         groups, transient = _operation_groups(tf, by, "fill")
-        if tf._backend == "pandas":
-            pdf = tf._pdf.copy(deep=False)
-
-            def apply_direction(frame, method):
-                if groups:
-                    return frame.groupby(
-                        list(groups), sort=False, dropna=False
-                    )[selected].transform(method)
-                return getattr(frame[selected], method)()
-
-            # Replace whole columns: writing through .loc into a shallow
-            # copy changes the caller's frame on pandas 2 (no copy-on-write).
-            if direction in {"down", "downup"}:
-                pdf[selected] = apply_direction(pdf, "ffill")
-            if direction in {"up", "updown"}:
-                pdf[selected] = apply_direction(pdf, "bfill")
-            if direction == "downup":
-                pdf[selected] = apply_direction(pdf, "bfill")
-            elif direction == "updown":
-                pdf[selected] = apply_direction(pdf, "ffill")
-            return tf._with_pdf(
-                pdf, groups=None if transient else tf._groups
-            )
 
         schema = tf._lf.collect_schema()
         strategies = {
@@ -394,11 +291,6 @@ def _factor_units(tf: Any, specs: tuple[Any, ...]) -> dict[str, Any]:
         name for spec in specs if not isinstance(spec, Nesting)
         for name in resolve_selection(tf, [spec])
     ]
-    if tf._backend == "pandas":
-        return {
-            name: tf._pdf[name].dtype for name in bare
-            if isinstance(tf._pdf[name].dtype, pd.CategoricalDtype)
-        }
     schema = tf._lf.collect_schema()
     return {name: schema[name] for name in bare if isinstance(schema[name], pl.Enum)}
 
@@ -440,46 +332,6 @@ def expand(*cols: Any, **values: Any) -> Verb:
             raise ValueError(
                 f"expand() cannot expand grouping columns: {overlap}"
             )
-        if tf._backend == "pandas":
-            import pandas as pd
-
-            pdf = tf._pdf
-            if groups:
-                result = pdf.loc[:, groups].drop_duplicates()
-                for unit in units:
-                    if unit[0] in levels:
-                        name = unit[0]
-                        every = _pandas_levels(pdf[name].dropna())
-                        values = pd.concat([
-                            pdf.loc[:, groups].drop_duplicates().merge(every, how="cross"),
-                            pdf.loc[pdf[name].isna(), [*groups, name]].drop_duplicates(),
-                        ], ignore_index=True)
-                    else:
-                        values = pdf.loc[:, [*groups, *unit]].drop_duplicates()
-                    result = result.merge(
-                        values, on=groups, how="inner", sort=False
-                    )
-            else:
-                result = None
-                for unit in units:
-                    values = (
-                        _pandas_levels(pdf[unit[0]]) if unit[0] in levels
-                        else pdf.loc[:, unit].drop_duplicates()
-                    )
-                    if result is None:
-                        result = values
-                    else:
-                        result = result.merge(values, how="cross")
-            for name, listed in named.items():
-                frame = _named_values_frame(tf, name, listed, "pandas")
-                result = frame if result is None else result.merge(frame, how="cross")
-            if result is None:
-                result = pdf.iloc[:0, :0]
-            ordered = [*groups, *selected]
-            result = result.loc[:, ordered].sort_values(
-                ordered, kind="stable", na_position="last"
-            ).reset_index(drop=True)
-            return tf._with_pdf(result, groups=groups or None, rowwise=False)
 
         if groups:
             result = tf._lf.select(groups).unique(maintain_order=True)
@@ -529,20 +381,14 @@ def expand(*cols: Any, **values: Any) -> Verb:
     return Verb(_apply, "expand")
 
 
-def _grid_units(args: tuple[Any, ...], kwargs: dict[str, Any], *, crossing: bool) -> tuple[list[Any], str]:
-    """A Polars LazyFrame for each expand_grid()/crossing() input, and the backend.
-
-    The result is pandas-backed only when the first table input is.
-    """
+def _grid_units(args: tuple[Any, ...], kwargs: dict[str, Any], *, crossing: bool) -> list[Any]:
+    """A Polars LazyFrame for each expand_grid()/crossing() input."""
     from tidy3.frame import TidyFrame, tidy
 
-    backend = "polars"
     units = []
     for arg in args:
         if isinstance(arg, TidyFrame):
-            if not units:
-                backend = arg._backend
-            unit = arg._lf if arg._backend == "polars" else pl.from_pandas(arg._pdf).lazy()
+            unit = arg._lf
         elif isinstance(arg, pl.DataFrame):
             unit = arg.lazy()
         elif isinstance(arg, pl.LazyFrame):
@@ -558,10 +404,10 @@ def _grid_units(args: tuple[Any, ...], kwargs: dict[str, Any], *, crossing: bool
         if crossing:
             listed = _unique_sorted(listed)
         units.append(pl.LazyFrame({name: listed}, strict=False))
-    return units, backend
+    return units
 
 
-def _cross(units: list[Any], backend: str) -> Any:
+def _cross(units: list[Any]) -> Any:
     from tidy3.frame import TidyFrame
 
     if not units:
@@ -571,10 +417,7 @@ def _cross(units: list[Any], backend: str) -> Any:
         for unit in units[1:]:
             # The first input varies slowest, as in tidyr.
             result = result.join(unit, how="cross", maintain_order="left")
-    frame = TidyFrame(result)
-    if backend == "pandas":
-        return frame._with_pdf(result.collect().to_pandas(), groups=None)
-    return frame
+    return TidyFrame(result)
 
 
 def expand_grid(*frames: Any, **values: Any) -> Any:
@@ -586,8 +429,7 @@ def expand_grid(*frames: Any, **values: Any) -> Any:
         expand_grid(x=[1, 2], y=["a", "b"])
         expand_grid(stores, week=range(1, 53))
     """
-    units, backend = _grid_units(frames, values, crossing=False)
-    return _cross(units, backend)
+    return _cross(_grid_units(frames, values, crossing=False))
 
 
 def crossing(*frames: Any, **values: Any) -> Any:
@@ -595,8 +437,7 @@ def crossing(*frames: Any, **values: Any) -> Any:
 
     Missing values sort last, as in tidyr ``crossing()``.
     """
-    units, backend = _grid_units(frames, values, crossing=True)
-    return _cross(units, backend)
+    return _cross(_grid_units(frames, values, crossing=True))
 
 
 def uncount(weights: Any, *, remove: bool = True, id: str | None = None) -> Verb:
@@ -611,19 +452,6 @@ def uncount(weights: Any, *, remove: bool = True, id: str | None = None) -> Verb
         name = weights if isinstance(weights, str) else None
         if name is not None and name not in columns:
             raise KeyError(f"uncount() weights column not found: {name!r}")
-        if tf._backend == "pandas":
-            pdf = tf._pdf
-            counts = pdf[name] if name else _constant_series(len(pdf), weights)
-            _check_weights(counts.isna().any(), (counts < 0).any(), (counts % 1 != 0).any())
-            counts = counts.astype("int64")
-            out = pdf.loc[pdf.index.repeat(counts)]
-            if id is not None:
-                out = out.assign(**{id: out.groupby(level=0).cumcount() + 1})
-            out = out.reset_index(drop=True)
-            if remove and name is not None:
-                out = out.drop(columns=name)
-            ordered = list(out.columns)
-            return tf._with_pdf(out, groups=_result_groups(tf, ordered))
         count = pl.col(name) if name else pl.lit(weights)
         missing, negative, fractional = (
             tf._lf.select(
@@ -661,12 +489,6 @@ _EXPLODE_OPTIONS = (
 )
 
 
-def _constant_series(length: int, value: Any) -> Any:
-    import pandas as pd
-
-    return pd.Series([value] * length)
-
-
 def _check_weights(missing: bool, negative: bool, fractional: bool) -> None:
     if missing:
         raise ValueError("uncount() weights must not be missing")
@@ -699,22 +521,6 @@ def complete(
         keys = [*groups, *(name for unit in units for name in unit), *values]
         marker = _temp_name(_columns(tf), "__tidy3_complete")
         replacements = fill or {}
-        if tf._backend == "pandas":
-            original = tf._pdf.assign(**{marker: True})
-            output = expanded._pdf.merge(
-                original, on=keys, how="left", sort=False
-            )
-            for name, value in replacements.items():
-                if name not in output.columns:
-                    raise KeyError(f"complete() fill column not found: {name!r}")
-                mask = output[name].isna()
-                if not explicit:
-                    mask &= output[marker].isna()
-                output.loc[mask, name] = value
-            output = output.drop(columns=marker)
-            return tf._with_pdf(
-                output, groups=groups or None, rowwise=False
-            )
 
         original = tf._lf.with_columns(pl.lit(True).alias(marker))
         output = expanded._lf.join(
@@ -800,72 +606,6 @@ def _pivot_longer_core(
         variable = _temp_name(all_columns, "__tidy3_name")
         row = _temp_name([*all_columns, variable], "__tidy3_row")
 
-        if tf._backend == "pandas":
-            import pandas as pd
-
-            pdf = tf._pdf.copy(deep=False)
-            pdf[row] = range(len(pdf))
-            out = pdf.melt(
-                id_vars=[*identifiers, row],
-                value_vars=pivoted,
-                var_name=variable,
-                value_name=values_to,
-            )
-            if cols_vary == "fastest":
-                out = out.sort_values(row, kind="stable")
-            names = out[variable].astype("string")
-            if names_prefix:
-                names = names.str.replace(
-                    rf"^(?:{names_prefix})", "", regex=True
-                )
-            if len(name_columns) == 1:
-                out[name_columns[0]] = names
-            elif len(name_columns) > 1:
-                if names_pattern:
-                    pieces = names.str.extract(names_pattern)
-                else:
-                    pieces = names.str.split(
-                        names_sep, n=len(name_columns) - 1, expand=True
-                    )
-                if pieces.shape[1] != len(name_columns):
-                    raise ValueError(
-                        "name split did not produce the requested number of columns"
-                    )
-                for index, name in enumerate(name_columns):
-                    out[name] = pieces.iloc[:, index]
-            out = out.drop(columns=variable)
-            if value_sentinel:
-                value_names = out[".value"].drop_duplicates().tolist()
-                duplicate_outputs = set(identifiers) & set(value_names)
-                if duplicate_outputs:
-                    raise ValueError(
-                        "pivot_longer() .value names collide with identifiers: "
-                        f"{sorted(duplicate_outputs)}"
-                    )
-                other_names = [
-                    name for name in name_columns if name != ".value"
-                ]
-                index = [*identifiers, row, *other_names]
-                out = out.pivot(
-                    index=index,
-                    columns=".value",
-                    values=values_to,
-                ).reset_index()
-                out.columns.name = None
-                if values_drop_na:
-                    out = out.dropna(subset=value_names, how="all")
-                ordered = [*identifiers, *other_names, *value_names]
-            else:
-                if values_drop_na:
-                    out = out.dropna(subset=[values_to])
-                ordered = [*identifiers, *name_columns, values_to]
-            out = out.drop(columns=row).reset_index(drop=True)
-            out = out.loc[:, ordered]
-            return tf._with_pdf(
-                out,
-                groups=_result_groups(tf, ordered),
-                rowwise=False,
-            )
 
         lf = tf._lf.with_row_index(row).unpivot(
             on=pivoted,
@@ -955,7 +695,6 @@ def _pivot_longer_core(
     return Verb(_apply, "pivot_longer")
 
 
-
 def _transform_columns(tf: Any, transform: Any, columns: list[str], what: str) -> Any:
     """Apply ``names_transform``/``values_transform`` to *columns*.
 
@@ -974,15 +713,6 @@ def _transform_columns(tf: Any, transform: Any, columns: list[str], what: str) -
     if unknown:
         raise KeyError(f"{what} names unknown columns: {unknown}")
     casts = {int: pl.Int64, float: pl.Float64, str: pl.String, bool: pl.Boolean}
-    if tf._backend == "pandas":
-        pdf = tf._pdf.copy()
-        for name, fn in mapping.items():
-            if fn in casts:
-                pdf[name] = pdf[name].map(lambda v, fn=fn: None if v is None or v != v else fn(v))
-                pdf[name] = pdf[name].astype({int: "Int64", float: "float64", str: "object", bool: "boolean"}[fn])
-            else:
-                pdf[name] = pdf[name].map(lambda v, fn=fn: None if v is None or v != v else fn(v))
-        return tf._with_pdf(pdf, groups=tf._groups)
     expressions = []
     for name, fn in mapping.items():
         if fn in casts:
@@ -1051,13 +781,6 @@ def _level_values(tf: Any, name: str) -> list[Any]:
     levels = tf._category_levels.get(name)
     if levels is not None:
         return list(levels)
-    if tf._backend == "pandas":
-        import pandas as pd
-
-        column = tf._pdf[name]
-        if isinstance(column.dtype, pd.CategoricalDtype):
-            return list(column.cat.categories)
-        return sorted(column.dropna().unique().tolist())
     dtype = tf._lf.collect_schema()[name]
     if isinstance(dtype, pl.Enum):
         return dtype.categories.to_list()
@@ -1169,14 +892,10 @@ def pivot_wider(
 
 def _rename_select(out: Any, renames: dict[str, str], ordered: list[str]) -> Any:
     """Rename then reorder columns, natively (lazily on Polars)."""
-    if out._backend == "pandas":
-        return out._with_pdf(out._pdf.rename(columns=renames).loc[:, ordered], groups=out._groups)
     return out._with_lf(out._lf.rename(renames).select(ordered), groups=out._groups)
 
 
 def _with_frame_groups(out: Any, groups: Any, levels: dict[str, list[Any]]) -> Any:
-    if out._backend == "pandas":
-        return out._with_pdf(out._pdf, groups=groups, category_levels=levels)
     return out._with_lf(out._lf, groups=groups, category_levels=levels)
 
 
@@ -1192,11 +911,6 @@ def _pivot_combinations(tf, name_columns, names, names_expand, names_sort) -> li
     if names_expand:
         # Every combination of every possible value, sorted (as tidyr).
         return list(itertools.product(*[_level_values(tf, n) for n in name_columns]))
-    if tf._backend == "pandas":
-        seen = tf._pdf.loc[:, name_columns].drop_duplicates()
-        if names_sort:
-            seen = seen.sort_values(name_columns, kind="stable")
-        return list(seen.itertuples(index=False, name=None))
     seen = tf._lf.select(name_columns).unique(maintain_order=True).collect()
     if names_sort:
         seen = seen.sort(name_columns)
@@ -1226,22 +940,6 @@ def _expand_ids(tf: Any, out: Any, ids: list[str], values_fill: Any) -> Any:
 
     combos = list(itertools.product(*[_level_values(tf, n) for n in ids]))
     fill = [c for c in _columns(out) if c not in ids]
-    if out._backend == "pandas":
-        import pandas as pd
-
-        pdf = out._pdf
-        grid = pd.DataFrame(combos, columns=ids)
-        for name in ids:
-            if isinstance(pdf[name].dtype, pd.CategoricalDtype) or name in tf._category_levels:
-                categories = _level_values(tf, name)
-                grid[name] = pd.Categorical(grid[name], categories=categories)
-                pdf = pdf.assign(**{name: pd.Categorical(pdf[name], categories=categories)})
-            else:
-                grid[name] = grid[name].astype(pdf[name].dtype)
-        joined = grid.merge(pdf, on=ids, how="left", sort=False)
-        if values_fill is not None:
-            joined[fill] = joined[fill].fillna(values_fill)
-        return out._with_pdf(joined, groups=out._groups)
     schema = out._lf.collect_schema()
     grid = pl.LazyFrame(
         {name: [combo[i] for combo in combos] for i, name in enumerate(ids)},
@@ -1288,13 +986,6 @@ def _summarise_unused(tf: Any, out: Any, ids: list[str], unused: list[str], unus
     stray = [c for c in fns if c not in unused]
     if stray:
         raise KeyError(f"unused_fn names columns that are not unused: {stray}")
-    if out._backend == "pandas":
-        pdf = tf._pdf
-        if not ids:
-            summary = pdf.agg(fns).to_frame().T
-            return out._with_pdf(out._pdf.reset_index(drop=True).join(summary), groups=out._groups)
-        summary = pdf.groupby(ids, sort=False, dropna=False, observed=True).agg(fns).reset_index()
-        return out._with_pdf(out._pdf.merge(summary, on=ids, how="left", sort=False), groups=out._groups)
     exprs = [_summary_expr(tf, column, fn, ids) for column, fn in fns.items()]
     if not ids:
         return out._with_lf(out._lf.join(tf._lf.select(exprs), how="cross"), groups=out._groups)
@@ -1311,7 +1002,7 @@ def _spec_frame(spec: Any) -> Any:
     from tidy3.frame import TidyFrame
 
     if isinstance(spec, TidyFrame):
-        frame = spec._lf.collect() if spec._backend == "polars" else pl.from_pandas(spec._pdf)
+        frame = spec._lf.collect()
     elif isinstance(spec, pl.DataFrame):
         frame = spec
     elif hasattr(spec, "to_dict") and hasattr(spec, "columns"):
@@ -1424,50 +1115,27 @@ def pivot_longer_spec(
         ids = [c for c in columns if c not in set(table[".name"].to_list())]
         row = _temp_name(columns, "__tidy3_row")
         order = _temp_name([*columns, row], "__tidy3_combo")
-        if tf._backend == "pandas":
-            import pandas as pd
-
-            pdf = tf._pdf.reset_index(drop=True)
-            pieces = []
-            for position, combo in enumerate(combos):
-                piece = pdf[ids].copy()
-                for key, value in zip(keys, combo):
-                    piece[key] = value
-                for value in values:
-                    source = lookup.get((value, combo))
-                    piece[value] = pdf[source] if source is not None else None
-                piece[row] = range(len(pdf))
-                piece[order] = position
-                pieces.append(piece)
-            out = pd.concat(pieces, ignore_index=True).sort_values(
-                [row, order] if cols_vary == "fastest" else [order, row], kind="stable"
-            )
-            if values_drop_na:
-                out = out.dropna(subset=values, how="all")
-            out = out.drop(columns=[row, order]).reset_index(drop=True)
-            result = tf._with_pdf(out.loc[:, [*ids, *keys, *values]], groups=None)
-        else:
-            base = tf._lf.with_row_index(row)
-            pieces = []
-            for position, combo in enumerate(combos):
-                pieces.append(
-                    base.select(
-                        pl.col(row),
-                        *[pl.col(i) for i in ids],
-                        *[pl.lit(v).alias(k) for k, v in zip(keys, combo)],
-                        *[
-                            (pl.col(lookup[(value, combo)]) if (value, combo) in lookup else pl.lit(None)).alias(value)
-                            for value in values
-                        ],
-                        pl.lit(position).alias(order),
-                    )
+        base = tf._lf.with_row_index(row)
+        pieces = []
+        for position, combo in enumerate(combos):
+            pieces.append(
+                base.select(
+                    pl.col(row),
+                    *[pl.col(i) for i in ids],
+                    *[pl.lit(v).alias(k) for k, v in zip(keys, combo)],
+                    *[
+                        (pl.col(lookup[(value, combo)]) if (value, combo) in lookup else pl.lit(None)).alias(value)
+                        for value in values
+                    ],
+                    pl.lit(position).alias(order),
                 )
-            lf = pl.concat(pieces, how="diagonal_relaxed").sort(
-                [row, order] if cols_vary == "fastest" else [order, row], maintain_order=True
             )
-            if values_drop_na:
-                lf = lf.filter(~pl.all_horizontal(pl.col(v).is_null() for v in values))
-            result = tf._with_lf(lf.select([*ids, *keys, *values]), groups=None)
+        lf = pl.concat(pieces, how="diagonal_relaxed").sort(
+            [row, order] if cols_vary == "fastest" else [order, row], maintain_order=True
+        )
+        if values_drop_na:
+            lf = lf.filter(~pl.all_horizontal(pl.col(v).is_null() for v in values))
+        result = tf._with_lf(lf.select([*ids, *keys, *values]), groups=None)
         return _transform_columns(result, values_transform, values, "values_transform")
 
     return Verb(_apply, "pivot_longer_spec")
@@ -1515,8 +1183,7 @@ def build_wider_spec(
     )
     # Typed even with no rows, as in tidyr: text labels, name columns as in data.
     schema = (
-        tf._lf.collect_schema() if tf._backend != "pandas"
-        else pl.from_pandas(tf._pdf.loc[:, name_columns]).schema
+        tf._lf.collect_schema()
     )
     return tidy(spec.with_columns(
         pl.col(".name").cast(pl.String),
@@ -1650,95 +1317,6 @@ def _pivot_wider_core(
             temp_id = _temp_name(all_columns, "__tidy3_id")
             identifiers = [temp_id]
 
-        if tf._backend == "pandas":
-            pdf = tf._pdf.copy(deep=False)
-            if temp_id:
-                pdf[temp_id] = 0
-            if names is None:
-                name_values = pdf.loc[:, name_columns].drop_duplicates()
-                if names_sort:
-                    name_values = name_values.sort_values(
-                        name_columns, kind="stable"
-                    )
-                combinations = list(
-                    name_values.itertuples(index=False, name=None)
-                )
-            elif len(name_columns) == 1:
-                combinations = [(value,) for value in names]
-            else:
-                combinations = [tuple(value) for value in names]
-            as_lists = values_fn == "list" or (
-                values_fn is None
-                and bool(pdf.duplicated(subset=[*identifiers, *name_columns]).any())
-            )
-            if as_lists and values_fn is None:
-                _warn_not_unique(value_columns, [*identifiers, *name_columns], temp_id)
-            if as_lists:
-                out = pdf.pivot_table(
-                    index=identifiers,
-                    columns=name_argument,
-                    values=value_argument,
-                    aggfunc=list,
-                    sort=names_sort,
-                )
-                # Combinations with no rows are missing (tidyr's NULL).
-                out = out.astype(object).where(out.notna(), None)
-            elif values_fn is None:
-                out = pdf.pivot(
-                    index=identifiers,
-                    columns=name_argument,
-                    values=value_argument,
-                )
-            else:
-                aggfunc = "size" if values_fn == "len" else values_fn
-                out = pdf.pivot_table(
-                    index=identifiers,
-                    columns=name_argument,
-                    values=value_argument,
-                    aggfunc=aggfunc,
-                    sort=names_sort,
-                )
-            if len(value_columns) > 1:
-                desired = [
-                    (value, *combination)
-                    for value in value_columns
-                    for combination in combinations
-                ]
-            elif len(name_columns) > 1:
-                desired = combinations
-            else:
-                desired = [combination[0] for combination in combinations]
-            out = out.reindex(columns=desired)
-            out = out.reset_index()
-            out.columns.name = None
-            generated = [
-                (
-                    f"{value}_{'_'.join(map(str, combination))}"
-                    if len(value_columns) > 1
-                    else "_".join(map(str, combination))
-                )
-                for value in value_columns
-                for combination in combinations
-            ] if len(value_columns) > 1 else [
-                "_".join(map(str, combination))
-                for combination in combinations
-            ]
-            out.columns = [*identifiers, *generated]
-            if temp_id:
-                out = out.drop(columns=temp_id)
-                identifiers = []
-            value_names = generated
-            out = out.rename(
-                columns={name: f"{names_prefix}{name}" for name in value_names}
-            )
-            if values_fill is not None:
-                out = out.fillna(values_fill)
-            ordered = list(out.columns)
-            return tf._with_pdf(
-                out,
-                groups=_result_groups(tf, ordered),
-                rowwise=False,
-            )
 
         lf = tf._lf
         if temp_id:
@@ -1886,67 +1464,6 @@ def separate(
         ]
         if collisions:
             raise ValueError(f"separate() output columns already exist: {collisions}")
-        if tf._backend == "pandas":
-            import pandas as pd
-
-            maxsplit = len(names) - 1 if extra == "merge" else -1
-            pieces = tf._pdf[column].astype("string").str.split(
-                sep, n=maxsplit, expand=True, regex=True
-            )
-            if pieces.shape[1] > len(names):
-                pieces = pieces.iloc[:, : len(names)]
-            if pieces.shape[1] < len(names):
-                padded = pd.DataFrame(
-                    pd.NA, index=pieces.index, columns=range(len(names))
-                )
-                offset = len(names) - pieces.shape[1] if fill == "left" else 0
-                for index in range(pieces.shape[1]):
-                    padded.iloc[:, offset + index] = pieces.iloc[:, index]
-                pieces = padded
-            if fill == "left":
-                pieces = pieces.apply(
-                    lambda row: pd.Series(
-                        [pd.NA] * (len(names) - row.notna().sum())
-                        + row.dropna().tolist(),
-                        index=pieces.columns,
-                    ),
-                    axis=1,
-                )
-            output = tf._pdf.copy(deep=False)
-            position = columns.index(column)
-            if remove:
-                output = output.drop(columns=column)
-            for index, name in enumerate(names):
-                if name is None:
-                    continue
-                values = pieces.iloc[:, index]
-                if convert:
-                    values = values.replace("NA", pd.NA)
-                    observed = values.dropna().astype("string").str.upper()
-                    if len(observed) and observed.isin(
-                        ["TRUE", "FALSE", "T", "F"]
-                    ).all():
-                        upper = values.astype("string").str.upper()
-                        values = upper.map(
-                            {
-                                "TRUE": True,
-                                "T": True,
-                                "FALSE": False,
-                                "F": False,
-                            }
-                        ).astype("boolean")
-                    else:
-                        try:
-                            values = pd.to_numeric(values, errors="raise")
-                        except (TypeError, ValueError):
-                            pass
-                output.insert(position, name, values)
-                position += 1
-            return tf._with_pdf(
-                output,
-                groups=_result_groups(tf, output.columns),
-                rowwise=False,
-            )
 
         sentinel = "\x1f"
         text = pl.col(column).cast(pl.String)
@@ -2076,29 +1593,6 @@ def unite(
         if column in columns and column not in selected:
             raise ValueError(f"unite() output column already exists: {column!r}")
         position = min(columns.index(name) for name in selected)
-        if tf._backend == "pandas":
-            import pandas as pd
-
-            values = tf._pdf[selected].astype("string")
-            if na_rm:
-                combined = values.fillna("").agg(
-                    lambda row: sep.join(value for value in row if value != ""),
-                    axis=1,
-                )
-            else:
-                combined = values.fillna("NA").agg(sep.join, axis=1)
-            output = tf._pdf.copy(deep=False)
-            if remove:
-                output = output.drop(columns=selected)
-            if column in output:
-                output[column] = combined
-            else:
-                output.insert(position, column, combined)
-            return tf._with_pdf(
-                output,
-                groups=_result_groups(tf, output.columns),
-                rowwise=False,
-            )
 
         values = [pl.col(name).cast(pl.String) for name in selected]
         if not na_rm:
@@ -2173,19 +1667,11 @@ def nest(
             }
             if renames:
                 tf = (
-                    tf._with_pdf(tf._pdf.rename(columns=renames), groups=tf._groups)
-                    if tf._backend == "pandas"
-                    else tf._with_lf(tf._lf.rename(renames), groups=tf._groups)
+                    tf._with_lf(tf._lf.rename(renames), groups=tf._groups)
                 )
                 nested = [renames.get(name, name) for name in nested]
                 columns = _columns(tf)
 
-        if tf._backend == "pandas":
-            output = _pandas_nested_frames(
-                tf._pdf, identifiers, nested, column=column
-            )
-            groups = _result_groups(tf, identifiers)
-            return tf._with_pdf(output, groups=groups, rowwise=False)
 
         # Prefer exclude() when nesting "everything except keys" so the plan
         # tracks the schema without rebuilding a Python name list at collect.
@@ -2256,38 +1742,6 @@ def _unnest_longer_core(
             raise ValueError(f"unnest_longer() output column exists: {value_name!r}")
         if indices_to and indices_to in columns:
             raise ValueError(f"unnest_longer() index column exists: {indices_to!r}")
-        if tf._backend == "pandas":
-            import pandas as pd
-
-            pdf = tf._pdf.copy(deep=False)
-            if not keep_empty:
-                keep = pdf[column].map(
-                    lambda value: _list_cell(value) and len(value) > 0
-                )
-                pdf = pdf.loc[keep]
-            if indices_to:
-                pdf[indices_to] = pdf[column].map(
-                    lambda value: list(range(1, len(value) + 1))
-                    if _list_cell(value)
-                    else [pd.NA]
-                    if keep_empty
-                    else []
-                )
-                pdf = pdf.explode([column, indices_to], ignore_index=True)
-            else:
-                pdf = pdf.explode(column, ignore_index=True)
-            if value_name != column:
-                pdf = pdf.rename(columns={column: value_name})
-            if indices_to:
-                ordered = list(pdf.columns)
-                ordered.remove(indices_to)
-                ordered.insert(ordered.index(value_name), indices_to)
-                pdf = pdf.loc[:, ordered]
-            return tf._with_pdf(
-                pdf,
-                groups=_result_groups(tf, pdf.columns),
-                rowwise=False,
-            )
 
         lf = tf._lf
         explode_columns = [column]
@@ -2334,101 +1788,6 @@ def unnest(
         columns = _columns(tf)
         if column not in columns:
             raise KeyError(f"column not found: {column!r}")
-        if tf._backend == "pandas":
-            import pandas as pd
-
-            pdf = tf._pdf.copy(deep=False)
-            sample = next(
-                (
-                    value
-                    for value in pdf[column]
-                    if value is not None and not (isinstance(value, float) and pd.isna(value))
-                ),
-                None,
-            )
-
-            # Nested DataFrames from nest() / group_nest() / nest_join().
-            if isinstance(sample, pd.DataFrame):
-                pieces: list[pd.DataFrame] = []
-                parent_columns = [name for name in pdf.columns if name != column]
-                for _, row in pdf.iterrows():
-                    nested = row[column]
-                    parent = {name: row[name] for name in parent_columns}
-                    if not isinstance(nested, pd.DataFrame) or nested.empty:
-                        if keep_empty:
-                            pieces.append(pd.DataFrame([parent]))
-                        continue
-                    body = nested.reset_index(drop=True)
-                    if names_sep is not None:
-                        body = body.add_prefix(f"{column}{names_sep}")
-                    collisions = set(body.columns) & set(parent_columns)
-                    if collisions:
-                        raise ValueError(
-                            f"unnest() output columns collide: {sorted(collisions)}; "
-                            "supply names_sep"
-                        )
-                    parent_frame = pd.DataFrame(
-                        [parent] * len(body), columns=parent_columns
-                    )
-                    pieces.append(
-                        pd.concat(
-                            [parent_frame.reset_index(drop=True), body],
-                            axis=1,
-                        )
-                    )
-                if not pieces:
-                    return tf._with_pdf(
-                        pdf.iloc[0:0].drop(columns=column),
-                        groups=_result_groups(
-                            tf, [name for name in columns if name != column]
-                        ),
-                        rowwise=False,
-                    )
-                output = pd.concat(pieces, ignore_index=True)
-                return tf._with_pdf(
-                    output,
-                    groups=_result_groups(tf, output.columns),
-                    rowwise=False,
-                )
-
-            if not keep_empty:
-                keep = pdf[column].map(
-                    lambda value: _list_cell(value) and len(value) > 0
-                )
-                pdf = pdf.loc[keep]
-            pdf = pdf.explode(column, ignore_index=True)
-            first = next(
-                (value for value in pdf[column] if isinstance(value, dict)),
-                None,
-            )
-            if first is None:
-                return tf._with_pdf(
-                    pdf,
-                    groups=_result_groups(tf, pdf.columns),
-                    rowwise=False,
-                )
-            expanded = pd.DataFrame(
-                pdf[column]
-                .map(lambda value: value if isinstance(value, dict) else {})
-                .tolist(),
-                index=pdf.index,
-            )
-            if names_sep is not None:
-                expanded = expanded.add_prefix(f"{column}{names_sep}")
-            collisions = set(expanded.columns) & (set(columns) - {column})
-            if collisions:
-                raise ValueError(
-                    f"unnest() output columns collide: {sorted(collisions)}; supply names_sep"
-                )
-            position = columns.index(column)
-            output = pdf.drop(columns=column)
-            for offset, name in enumerate(expanded.columns):
-                output.insert(position + offset, name, expanded[name])
-            return tf._with_pdf(
-                output,
-                groups=_result_groups(tf, output.columns),
-                rowwise=False,
-            )
 
         dtype = tf._lf.collect_schema()[column]
         if dtype.base_type() != pl.List:
@@ -2479,39 +1838,6 @@ def _unnest_wider_core(column: str, *, names_sep: str | None = None) -> Verb:
         columns = _columns(tf)
         if column not in columns:
             raise KeyError(f"column not found: {column!r}")
-        if tf._backend == "pandas":
-            import pandas as pd
-
-            values = tf._pdf[column]
-            first = next((value for value in values if value is not None), None)
-            if isinstance(first, dict):
-                expanded = pd.DataFrame(values.map(lambda value: value or {}).tolist(), index=tf._pdf.index)
-            elif _list_cell(first):
-                if names_sep is None:
-                    raise ValueError("names_sep is required for unnamed list values")
-                expanded = pd.DataFrame(values.tolist(), index=tf._pdf.index)
-                expanded.columns = [
-                    f"{column}{names_sep}{index + 1}"
-                    for index in range(expanded.shape[1])
-                ]
-            else:
-                raise TypeError("unnest_wider() requires dict/struct or list values")
-            collisions = set(expanded.columns) & (set(columns) - {column})
-            if collisions:
-                if names_sep is None:
-                    raise ValueError(
-                        f"unnest_wider() output columns collide: {sorted(collisions)}; supply names_sep"
-                    )
-                expanded = expanded.add_prefix(f"{column}{names_sep}")
-            position = columns.index(column)
-            left = tf._pdf.drop(columns=column)
-            for offset, name in enumerate(expanded.columns):
-                left.insert(position + offset, name, expanded[name])
-            return tf._with_pdf(
-                left,
-                groups=_result_groups(tf, left.columns),
-                rowwise=False,
-            )
 
         dtype = tf._lf.collect_schema()[column]
         if dtype.base_type() == pl.Struct:
@@ -2556,18 +1882,7 @@ def separate_longer_delim(cols: Any, delim: str) -> Verb:
         raise ValueError("separate_longer_delim() delim must be non-empty")
 
     def _apply(tf):
-        if tf._backend == "polars":
-            return _pl_separate_longer_delim(tf, cols, delim)
-        selected = resolve_selection(tf, [cols])
-        if len(selected) != 1:
-            raise ValueError("separate_longer_delim() currently accepts one column")
-        column = selected[0]
-        pdf = tf.collect(as_="pandas").copy()
-        pdf[column] = pdf[column].map(
-            lambda value: value.split(delim) if isinstance(value, str) else [value]
-        )
-        pdf = pdf.explode(column, ignore_index=True)
-        return tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns))
+        return _pl_separate_longer_delim(tf, cols, delim)
 
     return Verb(_apply, "separate_longer_delim")
 
@@ -2597,61 +1912,11 @@ def separate_wider_delim(
         raise ValueError("too_few must be align_start, align_end, or error")
     if too_many not in {"error", "drop", "merge"}:
         raise ValueError("too_many must be error, drop, or merge")
-    width = len(names)
 
     def _apply(tf):
-        if tf._backend == "polars":
-            return _pl_separate_wider_delim(tf, column, list(names), delim, too_few, too_many, names_sep, cols_remove)
-        import pandas as pd
-
-        selected = resolve_selection(tf, [column])
-        if len(selected) != 1:
-            raise ValueError("separate_wider_delim() requires one column")
-        source = selected[0]
-        pdf = tf.collect(as_="pandas").copy()
-        present = pdf[source].notna()
-        pieces = [
-            str(value).split(delim) if keep else None
-            for value, keep in zip(pdf[source], present)
-        ]
-        counts = [len(values) for values in pieces if values is not None]
-        too_short = sum(count < width for count in counts)
-        too_long = sum(count > width for count in counts)
-        if too_few == "error" and too_short:
-            raise ValueError(
-                f"separate_wider_delim() expected {width} pieces in each value "
-                f"of {source!r}; {too_short} value(s) had fewer. "
-                'Use too_few="align_start" or "align_end" to fill with missing.'
-            )
-        if too_many == "error" and too_long:
-            raise ValueError(
-                f"separate_wider_delim() expected {width} pieces in each value "
-                f"of {source!r}; {too_long} value(s) had more. "
-                'Use too_many="drop" or "merge".'
-            )
-
-        def align(values):
-            if values is None:
-                return [None] * width
-            if len(values) > width:
-                if too_many == "merge":
-                    return [*values[: width - 1], delim.join(values[width - 1 :])]
-                return values[:width]
-            pad = [None] * (width - len(values))
-            return pad + values if too_few == "align_end" else values + pad
-
-        expanded = pd.DataFrame(
-            [align(values) for values in pieces],
-            columns=[_output_name(source, name, names_sep) for name in names],
-            index=pdf.index,
-            dtype=object,
-        )
-        # The new columns take the place of the split one, as in tidyr.
-        pdf = _replace_column(pdf, source, expanded, cols_remove)
-        return tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns))
+        return _pl_separate_wider_delim(tf, column, list(names), delim, too_few, too_many, names_sep, cols_remove)
 
     return Verb(_apply, "separate_wider_delim")
-
 
 
 # ── Polars versions of the separate_* verbs (no pandas round trip) ──────
@@ -2821,15 +2086,6 @@ def _pl_separate_longer_position(tf, column, width, keep_empty):
     return tf._with_lf(lf, groups=_result_groups(tf, lf.collect_schema().names()))
 
 
-def _replace_column(pdf: Any, source: str, expanded: Any, remove: bool) -> Any:
-    """Put *expanded* where *source* was (and keep *source* after it if asked)."""
-    import pandas as pd
-
-    at = pdf.columns.get_loc(source)
-    middle = [expanded] if remove else [expanded, pdf[[source]]]
-    return pd.concat([pdf.iloc[:, :at], *middle, pdf.iloc[:, at + 1 :]], axis=1)
-
-
 def _one_column(tf: Any, column: Any, verb: str) -> str:
     selected = resolve_selection(tf, [column])
     if len(selected) != 1:
@@ -2896,28 +2152,7 @@ def separate_wider_regex(
         return [None] * len(names)
 
     def _apply(tf):
-        if tf._backend == "polars":
-            return _pl_separate_wider_regex(tf, column, pieces, too_few, names_sep, cols_remove)
-        import pandas as pd
-
-        source = _one_column(tf, column, "separate_wider_regex")
-        pdf = tf.collect(as_="pandas").reset_index(drop=True)
-        rows = [split(value) for value in pdf[source]]
-        failed = sum(row is None for row in rows)
-        if failed:
-            raise ValueError(
-                f"separate_wider_regex(): each value of {source!r} must match the "
-                f"whole pattern; {failed} value(s) did not. "
-                'Use too_few="align_start" to keep partial matches.'
-            )
-        expanded = pd.DataFrame(
-            rows,
-            columns=[_output_name(source, name, names_sep) for name in names],
-            index=pdf.index,
-            dtype=object,
-        )
-        pdf = _replace_column(pdf, source, expanded, cols_remove)
-        return tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns))
+        return _pl_separate_wider_regex(tf, column, pieces, too_few, names_sep, cols_remove)
 
     return Verb(_apply, "separate_wider_regex")
 
@@ -2951,48 +2186,9 @@ def separate_wider_position(
     if too_many not in {"error", "drop"}:
         raise ValueError("too_many must be error or drop")
     total = sum(int(width) for _, width in pieces)
-    names = [name for name, _ in pieces if name is not None]
 
     def _apply(tf):
-        if tf._backend == "polars":
-            return _pl_separate_wider_position(tf, column, pieces, total, too_few, too_many, names_sep, cols_remove)
-        import pandas as pd
-
-        source = _one_column(tf, column, "separate_wider_position")
-        pdf = tf.collect(as_="pandas").reset_index(drop=True)
-        rows, short, long = [], 0, 0
-        for value in pdf[source]:
-            if value is None or (isinstance(value, float) and value != value):
-                rows.append([None] * len(names))
-                continue
-            text = str(value)
-            short += len(text) < total
-            long += len(text) > total
-            row, start = [], 0
-            for name, width in pieces:
-                part = text[start : start + int(width)]
-                start += int(width)
-                if name is not None:
-                    row.append(part if part else None)
-            rows.append(row)
-        if short and too_few == "error":
-            raise ValueError(
-                f"separate_wider_position(): expected {total} characters in each "
-                f'value of {source!r}; {short} value(s) were shorter. Use too_few="align_start".'
-            )
-        if long and too_many == "error":
-            raise ValueError(
-                f"separate_wider_position(): expected {total} characters in each "
-                f'value of {source!r}; {long} value(s) were longer. Use too_many="drop".'
-            )
-        expanded = pd.DataFrame(
-            rows,
-            columns=[_output_name(source, name, names_sep) for name in names],
-            index=pdf.index,
-            dtype=object,
-        )
-        pdf = _replace_column(pdf, source, expanded, cols_remove)
-        return tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns))
+        return _pl_separate_wider_position(tf, column, pieces, total, too_few, too_many, names_sep, cols_remove)
 
     return Verb(_apply, "separate_wider_position")
 
@@ -3007,21 +2203,7 @@ def separate_longer_position(column: Any, width: int, *, keep_empty: bool = Fals
         raise ValueError("separate_longer_position() width must be positive")
 
     def _apply(tf):
-        if tf._backend == "polars":
-            return _pl_separate_longer_position(tf, column, int(width), keep_empty)
-        source = _one_column(tf, column, "separate_longer_position")
-        pdf = tf.collect(as_="pandas").copy()
-
-        def chunks(value: Any) -> list[Any]:
-            if value is None or (isinstance(value, float) and value != value):
-                return [None]
-            text = str(value)
-            parts = [text[i : i + int(width)] for i in range(0, len(text), int(width))]
-            return parts or ([None] if keep_empty else [])
-
-        pdf[source] = pdf[source].map(chunks)
-        pdf = pdf[pdf[source].map(len) > 0].explode(source, ignore_index=True)
-        return tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns))
+        return _pl_separate_longer_position(tf, column, int(width), keep_empty)
 
     return Verb(_apply, "separate_longer_position")
 
@@ -3035,19 +2217,6 @@ def chop(*cols: Any) -> Verb:
         chopped = resolve_selection(tf, cols)
         columns = _columns(tf)
         keys = [name for name in columns if name not in chopped]
-        if tf._backend == "pandas":
-            pdf = tf._pdf
-            if keys:
-                out = (
-                    pdf.groupby(keys, sort=False, dropna=False)[chopped]
-                    .agg(list)
-                    .reset_index()
-                )
-            else:
-                import pandas as pd
-
-                out = pd.DataFrame({name: [pdf[name].tolist()] for name in chopped})
-            return tf._with_pdf(out.loc[:, columns], groups=_result_groups(tf, columns))
         lf = (
             tf._lf.group_by(keys, maintain_order=True).agg(chopped)
             if keys
@@ -3070,29 +2239,6 @@ def unchop(*cols: Any, keep_empty: bool = False) -> Verb:
     def _apply(tf):
         listed = resolve_selection(tf, cols)
         columns = _columns(tf)
-        if tf._backend == "pandas":
-            pdf = tf._pdf.copy()
-
-            def as_list(value: Any) -> list[Any]:
-                if value is None or (isinstance(value, float) and value != value):
-                    return []
-                return list(value)
-
-            for name in listed:
-                pdf[name] = pdf[name].map(as_list)
-            sizes = pdf[listed[0]].map(len)
-            if not keep_empty:
-                pdf = pdf[sizes > 0]
-            else:
-                for name in listed:
-                    pdf[name] = pdf[name].map(lambda v: v if v else [None])
-            out = pdf.explode(listed, ignore_index=True)
-            whole = [name for name in listed if _all_ints(out[name].dropna())]
-            out = out.infer_objects()
-            for name in whole:
-                # Whole numbers with gaps: nullable Int64, not float (as in R).
-                out[name] = out[name].astype("Int64")
-            return tf._with_pdf(out, groups=_result_groups(tf, columns))
         lf = tf._lf
         if not keep_empty:
             lf = lf.filter(pl.col(listed[0]).list.len().fill_null(0) > 0)
@@ -3102,24 +2248,11 @@ def unchop(*cols: Any, keep_empty: bool = False) -> Verb:
     return Verb(_apply, "unchop")
 
 
-def _all_ints(values: Any) -> bool:
-    import numpy as np
-
-    return len(values) > 0 and all(
-        isinstance(v, (int, np.integer)) and not isinstance(v, (bool, np.bool_))
-        for v in values
-    )
-
-
 def unnest_auto(column: str) -> Verb:
     """``unnest_wider`` for named elements, ``unnest_longer`` otherwise (tidyr)."""
 
     def _apply(tf):
-        if tf._backend == "pandas":
-            values = [v for v in tf._pdf[column].tolist() if v is not None]
-            named = bool(values) and all(isinstance(v, dict) for v in values)
-        else:
-            named = isinstance(tf._lf.collect_schema()[column], pl.Struct)
+        named = isinstance(tf._lf.collect_schema()[column], pl.Struct)
         verb = unnest_wider(column) if named else unnest_longer(column)
         return tf >> verb
 
@@ -3141,54 +2274,9 @@ def hoist(
     ``transform`` converts the new columns (``transform={"n": int}``).
     """
     def _apply(tf):
-        if tf._backend == "polars":
-            specs = list(named_paths.items()) or [(str(path), path) for path in paths]
-            return _pl_hoist(tf, column, specs, remove, transform)
-        import copy
-
-        import pandas as pd
-
-        pdf = tf.collect(as_="pandas").copy()
         specs = list(named_paths.items()) or [(str(path), path) for path in paths]
-        hoisted = {}
-        for name, path in specs:
-            keys = list(path) if isinstance(path, (list, tuple)) else [path]
-            hoisted[name] = pdf[column].map(lambda value, keys=keys: _pluck(value, keys))
-        at = pdf.columns.get_loc(column)
-        new = pd.DataFrame(hoisted, index=pdf.index)
-        if remove:
-            def strip(value: Any) -> Any:
-                if not isinstance(value, dict):
-                    return value
-                value = copy.deepcopy(value)
-                for _, path in specs:
-                    keys = list(path) if isinstance(path, (list, tuple)) else [path]
-                    _drop_path(value, keys)
-                return value
-
-            pdf[column] = pdf[column].map(strip)
-        empty = remove and all(
-            isinstance(v, dict) and not v for v in pdf[column] if v is not None
-        )
-        parts = [pdf.iloc[:, :at], new]
-        if not empty:
-            parts.append(pdf[[column]])
-        parts.append(pdf.iloc[:, at + 1 :])
-        pdf = pd.concat(parts, axis=1)
-        out = tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns))
-        return _transform_columns(out, transform, list(hoisted), "transform")
+        return _pl_hoist(tf, column, specs, remove, transform)
     return Verb(_apply, "hoist")
-
-
-def _drop_path(value: Any, keys: list[Any]) -> None:
-    """Remove the element at *keys* from nested dicts (in place)."""
-    for key in keys[:-1]:
-        if not isinstance(value, dict) or key not in value:
-            return
-        value = value[key]
-    if isinstance(value, dict):
-        value.pop(keys[-1], None)
-
 
 
 def _pl_path(base: pl.Expr, dtype: Any, keys: list[Any]) -> tuple[pl.Expr | None, Any]:
@@ -3255,35 +2343,12 @@ def _pl_hoist(tf: Any, column: str, specs: list[tuple[str, Any]], remove: bool, 
     return _transform_columns(result, transform, [name for name, _ in specs], "transform")
 
 
-def _list_cell(value: Any) -> bool:
-    """A pandas list-column cell. Polars list columns arrive as NumPy arrays."""
-    return isinstance(value, (list, tuple, np.ndarray))
-
-
-def _pluck(value: Any, keys: list[Any]) -> Any:
-    for key in keys:
-        if value is None:
-            return None
-        if isinstance(value, dict):
-            value = value.get(key)
-        elif _list_cell(value) and isinstance(key, int):
-            value = value[key] if -len(value) <= key < len(value) else None
-        else:
-            return None
-    return value.item() if isinstance(value, np.generic) else value
-
-
 def pack(name: str, *cols: Any) -> Verb:
     """Pack selected columns into a structured column."""
     def _apply(tf):
         selected = resolve_selection(tf, cols or [c for c in _columns(tf) if c not in (tf._groups or [])])
-        if tf._backend == "polars":
-            lf = tf._lf.with_columns(pl.struct(selected).alias(name)).drop(selected)
-            return tf._with_lf(lf, groups=_result_groups(tf, lf.collect_schema().names()))
-        pdf = tf.collect(as_="pandas").copy()
-        pdf[name] = pdf[selected].to_dict(orient="records")
-        pdf = pdf.drop(columns=selected)
-        return tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns))
+        lf = tf._lf.with_columns(pl.struct(selected).alias(name)).drop(selected)
+        return tf._with_lf(lf, groups=_result_groups(tf, lf.collect_schema().names()))
     return Verb(_apply, "pack")
 
 
@@ -3292,12 +2357,7 @@ def unpack(column: str) -> Verb:
     def _apply(tf):
         import pandas as pd
 
-        if tf._backend == "polars":
-            return tf >> unnest_wider(column)
-        pdf = tf.collect(as_="pandas").copy()
-        expanded = pd.json_normalize(pdf[column]).set_index(pdf.index)
-        pdf = pd.concat([pdf.drop(columns=column), expanded], axis=1)
-        return tf._with_pdf(pdf, groups=_result_groups(tf, pdf.columns), rowwise=False)
+        return tf >> unnest_wider(column)
     return Verb(_apply, "unpack")
 
 

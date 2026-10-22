@@ -9,7 +9,6 @@ import pytest
 
 pytest.importorskip("IPython")
 
-BACKENDS = ["polars", "pandas"]
 
 
 @pytest.fixture
@@ -33,66 +32,59 @@ def run(ip, source):
     return out.collect(as_="pandas").to_dict("list") if hasattr(out, "collect") else out
 
 
-def setup(ip, backend, variables):
+def setup(ip, variables):
     ip.run_cell(
-        f'd = tidy({{"g": ["a", "b", "a"], "x": [1.0, 2.0, 3.0], "n": [1, 2, 1]}}, backend="{backend}")\n'
+        f'd = tidy({{"g": ["a", "b", "a"], "x": [1.0, 2.0, 3.0], "n": [1, 2, 1]}})\n'
         + variables,
         silent=True,
     )
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_column_beats_variable_and_variable_fills_in(shell, backend):
-    setup(shell, backend, "x = 100\nlimit = 1.5\nfactor = 10")
+def test_column_beats_variable_and_variable_fills_in(shell):
+    setup(shell, "x = 100\nlimit = 1.5\nfactor = 10")
     assert run(shell, "d >> filter(x > limit)")["x"] == [2.0, 3.0]
     assert run(shell, "d >> mutate(z = x * factor)")["z"] == [10.0, 20.0, 30.0]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_env_forces_the_notebook_variable(shell, backend):
-    setup(shell, backend, "x = 2.5")
+def test_env_forces_the_notebook_variable(shell):
+    setup(shell, "x = 2.5")
     assert run(shell, "d >> filter(x > env.x)")["x"] == [3.0]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_mutate_sees_columns_created_earlier_in_the_same_call(shell, backend):
-    setup(shell, backend, "y = 1000")
+def test_mutate_sees_columns_created_earlier_in_the_same_call(shell):
+    setup(shell, "y = 1000")
     out = run(shell, "d >> mutate(y = x * 2, w = y + 1)")
     assert out["w"] == [3.0, 5.0, 7.0]
     assert run(shell, "d >> mutate(w = y + 1)")["w"] == [1001, 1001, 1001]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_selections_prefer_columns_and_fall_back_to_values(shell, backend):
-    setup(shell, backend, "g = 'zz'\nx = 'zz'\ncols = ['g', 'x']")
+def test_selections_prefer_columns_and_fall_back_to_values(shell):
+    setup(shell, "g = 'zz'\nx = 'zz'\ncols = ['g', 'x']")
     assert list(run(shell, "d >> select(g, x)")) == ["g", "x"]
     assert list(run(shell, "d >> select([g, n])")) == ["g", "n"]
     assert list(run(shell, "d >> select(cols)")) == ["g", "x"]
     assert run(shell, "d >> count(g)")["nn"] == [2, 1]  # "nn": the frame has an n
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_rebinding_a_tidy3_name_keeps_its_function(shell, backend):
-    setup(shell, backend, "n = 7")
+def test_rebinding_a_tidy3_name_keeps_its_function(shell):
+    setup(shell, "n = 7")
     out = run(shell, "d >> mutate(k = n(), m = x + n)")
     assert out["k"] == [3, 3, 3]  # n() still counts rows, as in R
     assert out["m"] == [2.0, 4.0, 4.0]  # bare n is the column
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_local_names_and_function_arguments_are_untouched(shell, backend):
-    setup(shell, backend, "score = 99\ndigits = 0")
+def test_local_names_and_function_arguments_are_untouched(shell):
+    setup(shell, "score = 99\ndigits = 0")
     out = run(shell, "d >> filter(if_any(starts_with('x'), lambda score: score > 2))")
     assert out["x"] == [3.0]
     assert run(shell, "d >> mutate(r = (x / 3).round(digits))")["r"] == [0.0, 1.0, 1.0]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_all_of_takes_a_variable_of_names(shell, backend):
+def test_all_of_takes_a_variable_of_names(shell):
     # tidyselect: all_of(vars) reads the variable, even one the same cell
     # defines (the mask runs before the cell, so it cannot see it yet).
     shell.run_cell(
-        f'df = tidy({{"a": [1.0, 3.0], "b": [2.0, 4.0], "c": ["x", "y"]}}, backend="{backend}")',
+        f'df = tidy({{"a": [1.0, 3.0], "b": [2.0, 4.0], "c": ["x", "y"]}})',
         silent=True,
     )
     result = shell.run_cell(
@@ -109,13 +101,12 @@ def test_all_of_takes_a_variable_of_names(shell, backend):
     assert list(ns["kept"].columns) == ["c"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_a_variable_made_earlier_in_the_cell_stays_a_variable(shell, backend):
+def test_a_variable_made_earlier_in_the_cell_stays_a_variable(shell):
     # kmeans = KMeans(...).fit(X) then mutate(cluster = kmeans.labels_ + 1)
     # in one cell: the mask runs before the cell, so it must read the cell's
     # own assignments, as a script's export does.
     shell.run_cell(
-        f'df = tidy({{"x": [1.0, 2.0, 3.0]}}, backend="{backend}")', silent=True
+        f'df = tidy({{"x": [1.0, 2.0, 3.0]}})', silent=True
     )
     result = shell.run_cell(
         "import types, numpy as np\n"

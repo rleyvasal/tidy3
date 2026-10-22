@@ -40,7 +40,6 @@ from tidy3 import (
     transform_source,
 )
 
-BACKENDS = ["polars", "pandas"]
 
 
 def values(frame, column):
@@ -50,15 +49,14 @@ def values(frame, column):
     ]
 
 
-@pytest.fixture(params=BACKENDS)
-def cars(request):
+@pytest.fixture
+def cars():
     return tidy(
         {
             "name": ["chevrolet chevelle", "buick skylark", "Chevy nova", None],
             "brand": ["chevrolet", "buick", "chevy", "ford"],
             "mpg": [18, 15, 16, 20],
-        },
-        backend=request.param,
+        }
     )
 
 
@@ -151,9 +149,8 @@ def test_case(cars):
     assert values(out, "s") == ["Chevrolet chevelle", "Buick skylark", "Chevy nova", None]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_whitespace_and_padding(backend):
-    frame = tidy({"x": ["  a  b ", "c", None]}, backend=backend)
+def test_whitespace_and_padding():
+    frame = tidy({"x": ["  a  b ", "c", None]})
     out = frame >> mutate(
         both=str_trim("x"),
         left=str_trim("x", side="left"),
@@ -299,11 +296,10 @@ def cells(frame, column):
     return [plain(v) for v in frame.collect(as_="pandas")[column].tolist()]
 
 
-@pytest.fixture(params=BACKENDS)
-def foods(request):
+@pytest.fixture
+def foods():
     return tidy(
-        {"x": ["apple pie", "banana split", "Cherry tart", None]},
-        backend=request.param,
+        {"x": ["apple pie", "banana split", "Cherry tart", None]}
     )
 
 
@@ -395,14 +391,12 @@ def test_split_variants(foods):
     assert str_count(["it's a dog's life"], boundary("word")) == [4]
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
-def test_str_equal_normalizes_to_nfc(backend):
+def test_str_equal_normalizes_to_nfc():
     frame = tidy(
         {
             "x": ["\u00e9", "\u00c9", "\u212b", "\ufb01", "e\u0301", None],
             "y": ["e\u0301", "e\u0301", "\u00c5", "fi", "\u00e9", None],
         },
-        backend=backend,
     )
     out = frame >> mutate(
         equal=str_equal("x", col("y")),

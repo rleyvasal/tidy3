@@ -1,8 +1,6 @@
 """dplyr-style verbs as pipeable objects (``df >> filter(...)``).
 
-Each verb dispatches on the frame's backend: polars (lazy — expressions are
-compiled to ``pl.Expr``) or pandas (eager — expressions are evaluated by
-``tidy3.pandas_engine``).
+Expressions compile to ``pl.Expr`` and run in a lazy Polars query.
 """
 
 from __future__ import annotations
@@ -16,7 +14,7 @@ from typing import Any, Callable
 import polars as pl
 
 from tidy3.expr import Expr, to_polars
-from tidy3.join_spec import JoinSpec, join_by
+from tidy3.join_spec import JOIN_SUFFIX, RIGHT_TAG, JoinSpec, join_by, join_names
 from tidy3.tidyselect import (
     AcrossSpec,
     ColumnSet,
@@ -91,12 +89,6 @@ def _factor_levels(levels: Any, *, ordered: bool | None = None) -> Any:
     return _as_levels(levels, ordered)
 
 
-def _levels_from_series(series: Any) -> Any:
-    return _factor_levels(
-        series.cat.categories.tolist(), ordered=bool(series.cat.ordered)
-    )
-
-
 def _enum_ordered(
     name: str,
     produced: dict[str, bool],
@@ -119,10 +111,12 @@ def _enum_ordered(
     return bool(getattr(recorded, "ordered", True))
 
 
-def _pe():
-    from tidy3 import pandas_engine
-
-    return pandas_engine
+def _summary_size_error(name: str, size: int) -> ValueError:
+    """dplyr's error for a summary that is not one value per group."""
+    return ValueError(
+        f"summarise(): `{name}` must be size 1, not {size}. "
+        "To return more or less than 1 row per group, use reframe()."
+    )
 
 
 class Verb:
@@ -186,7 +180,7 @@ class Verb:
         token = _FRAME_COLUMNS.set(columns)
         try:
             result = self._fn(other)
-            if isinstance(result, TidyFrame) and result._backend != "pandas":
+            if isinstance(result, TidyFrame):
                 # Resolve the lazy plan's schema (no rows are read) so a
                 # missing column fails here, naming this verb, not at display.
                 result._lf.collect_schema()
@@ -479,8 +473,6 @@ def _group_context(tf: Any, groups: list[str] | None):
     """Create a metadata-only view used while expanding tidy-select specs."""
     if groups == tf._groups:
         return tf
-    if tf._backend == "pandas":
-        return tf._with_pdf(tf._pdf, groups=groups, rowwise=False)
     return tf._with_lf(tf._lf, groups=groups, rowwise=False)
 
 
@@ -781,11 +773,6 @@ def _maybe_widen_for_select_base(
     if needed and not needed <= pre_names:
         # Column never existed (even before select) — let the normal path error.
         return tf, False
-    if tf._backend == "pandas":
-        return (
-            tf._with_pdf(pre, groups=tf._groups, select_base=base),
-            True,
-        )
     return tf._with_lf(pre, groups=tf._groups, select_base=base), True
 
 
@@ -802,13 +789,6 @@ def _reproject_after_select_base(tf: Any, result: Any) -> Any:
     if base is None:
         return result
     groups = None if result._groups is None else list(result._groups)
-    if result._backend == "pandas":
-        sel = base["sel"]
-        mapping = base["mapping"]
-        pdf = result._pdf[sel].rename(columns=mapping)
-        # Keep select_base pointed at the wide frame for later row verbs.
-        new_base = {**base, "data": result._pdf}
-        return result._with_pdf(pdf, groups=groups, select_base=new_base)
     expressions = base["expressions"]
     lf = result._lf.select(expressions)
     new_base = {**base, "data": result._lf}
@@ -852,22 +832,6 @@ def filter(*predicates: Any, by: Any = None) -> Verb:  # noqa: A001
         # When we widen, reproject updates base["data"] to the filtered wide plan.
         keep_base = wide._select_base
 
-        if wide._backend == "pandas":
-            work = wide._pdf
-            marker = None
-            if wide._rowwise:
-                marker = _temp_column(_frame_columns(wide), "__tidy3_rowwise")
-                work = work.assign(**{marker: range(len(work))})
-                groups = [marker]
-            pdf = _pe().do_filter(work, resolved, groups)
-            if marker is not None:
-                pdf = pdf.drop(columns=marker)
-            out = wide._with_pdf(
-                pdf,
-                groups=None if transient else wide._groups,
-                select_base=keep_base,
-            )
-            return _reproject_after_filter(wide, out) if widened else out
         expr = _plx(resolved[0])
         for p in resolved[1:]:
             expr = expr & _plx(p)
@@ -904,22 +868,6 @@ def filter_out(*predicates: Any, by: Any = None) -> Verb:
         )
         keep_base = wide._select_base
 
-        if wide._backend == "pandas":
-            work = wide._pdf
-            marker = None
-            if wide._rowwise:
-                marker = _temp_column(_frame_columns(wide), "__tidy3_rowwise")
-                work = work.assign(**{marker: range(len(work))})
-                groups = [marker]
-            pdf = _pe().do_filter_out(work, resolved, groups)
-            if marker is not None:
-                pdf = pdf.drop(columns=marker)
-            out = wide._with_pdf(
-                pdf,
-                groups=None if transient else wide._groups,
-                select_base=keep_base,
-            )
-            return _reproject_after_filter(wide, out) if widened else out
         expr = _plx(resolved[0])
         for predicate in resolved[1:]:
             expr = expr & _plx(predicate)
@@ -972,10 +920,10 @@ def mutate(
         assignments = _resolve_in_order(
             _expanded_assignments(context, specs, kwargs, "mutate"), input_columns
         )
-        from tidy3.forcats import contains_factor, prepare_polars, SORT_GROUPS
+        from tidy3.forcats import contains_factor, prepare_polars
 
         has_factors = any(contains_factor(value) for value in assignments.values())
-        if has_factors and tf._backend != "pandas":
+        if has_factors:
             tf = tf.compute()
         deleted_so_far: set[str] = set()
         for name, value in assignments.items():
@@ -1004,80 +952,12 @@ def mutate(
             for name, value in assignments.items()
             if value is not None
         }
-        if tf._backend != "pandas":
-            # mutate(cluster = [0, 1, 0]): a vector, one value per row, as in
-            # dplyr and the pandas backend (pl.lit would repeat the whole list
-            # in every row). NumPy arrays already arrive as a column.
-            assignments = {
-                name: pl.Series(name, list(value)) if isinstance(value, (list, tuple)) else value
-                for name, value in assignments.items()
-            }
+        assignments = {
+            name: pl.Series(name, list(value)) if isinstance(value, (list, tuple)) else value
+            for name, value in assignments.items()
+        }
         input_columns = [name for name in input_columns if name not in deletions]
         stages = _assignment_stages(assignments)
-        if tf._backend == "pandas":
-            from tidy3.convert import merge_pandas_problems, problem_sink
-
-            work = tf._pdf
-            marker = None
-            if tf._rowwise:
-                marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
-                work = work.assign(**{marker: range(len(work))})
-                groups = [marker]
-            with problem_sink() as found:
-                for stage in stages:
-                    cached, stage, cache_columns = (
-                        _aggregate_cache_plan(stage, list(work.columns))
-                        if groups and not tf._rowwise
-                        else ({}, stage, [])
-                    )
-                    if cached:
-                        work = _pe().do_mutate(work, cached, groups)
-                    token = SORT_GROUPS.set(not transient)
-                    try:
-                        work = _pe().do_mutate(work, stage, groups)
-                    finally:
-                        SORT_GROUPS.reset(token)
-                    if cache_columns:
-                        work = work.drop(columns=cache_columns)
-            pdf = work
-            if marker is not None:
-                pdf = pdf.drop(columns=marker)
-            if deletions:
-                pdf = pdf.drop(columns=deletions, errors="ignore")
-            problems = merge_pandas_problems(getattr(tf, "_problems", None), found)
-            category_levels = (
-                {
-                    str(name): _levels_from_series(series)
-                    for name, series in pdf.items()
-                    if str(series.dtype) == "category"
-                }
-                if has_factors else {
-                    name: _factor_levels(levels)
-                    for name, levels in tf._category_levels.items()
-                }
-            )
-            for name in assignments:
-                if name in pdf and str(pdf[name].dtype) == "category":
-                    category_levels[name] = _levels_from_series(pdf[name])
-            result = tf._with_pdf(
-                pdf, groups=None if transient else tf._groups, problems=problems,
-                category_levels=category_levels,
-            )
-            ordered = _mutate_column_order(
-                result,
-                input_columns,
-                assignments,
-                groups,
-                keep=keep,
-                before=before,
-                after=after,
-            )
-            return tf._with_pdf(
-                pdf.loc[:, ordered],
-                groups=None if transient else tf._groups,
-                problems=problems,
-                category_levels=category_levels,
-            )
         from tidy3.convert import merge_problem_plans, output_column, problem_plans
 
         plans = []
@@ -1237,26 +1117,10 @@ def select(*cols: Any, **renames: Any) -> Verb:
                 *ordered,
             ]
         sel = [value for value in ordered if isinstance(value, str)]
-        computed = [value for value in ordered if not isinstance(value, str)]
         output_names = [mapping.get(name, name) for name in sel]
         if len(set(output_names)) != len(output_names):
             raise ValueError("select() produced duplicate column names")
         groups = [mapping.get(g, g) for g in tf._groups] if tf._groups else None
-        if tf._backend == "pandas":
-            if computed:
-                raise TypeError(
-                    "pandas backend select() does not support computed columns; "
-                    "use mutate()"
-                )
-            pdf = tf._pdf[sel].rename(columns=mapping)
-            # Snapshot pre-projection rows so a later filter can widen.
-            select_base = {
-                "data": tf._pdf,
-                "sel": list(sel),
-                "mapping": dict(mapping),
-                "expressions": None,
-            }
-            return tf._with_pdf(pdf, groups=groups, select_base=select_base)
         expressions = [
             (
                 pl.col(value).alias(mapping[value])
@@ -1291,8 +1155,6 @@ def drop(*cols: Any) -> Verb:
                 raise ValueError(
                     f"drop(): cannot drop grouping column(s) {bad}; ungroup() first"
                 )
-        if tf._backend == "pandas":
-            return tf._with_pdf(tf._pdf.drop(columns=selected), groups=tf._groups)
         return tf._with_lf(tf._lf.drop(*selected), groups=tf._groups)
 
     return Verb(_apply, "drop")
@@ -1340,12 +1202,6 @@ def rename(*specs: Any, **kwargs: str) -> Verb:
             mapping.get(name, name): levels
             for name, levels in tf._category_levels.items()
         }
-        if tf._backend == "pandas":
-            return tf._with_pdf(
-                tf._pdf.rename(columns=mapping),
-                groups=groups,
-                category_levels=category_levels,
-            )
         return tf._with_lf(
             tf._lf.rename(mapping),
             groups=groups,
@@ -1356,8 +1212,6 @@ def rename(*specs: Any, **kwargs: str) -> Verb:
 
 
 def _frame_columns(tf: Any) -> list[str]:
-    if tf._backend == "pandas":
-        return [str(column) for column in tf._pdf.columns]
     return tf._lf.collect_schema().names()
 
 
@@ -1392,8 +1246,6 @@ def relocate(
         else:
             position = 0
         ordered = [*remaining[:position], *moving, *remaining[position:]]
-        if tf._backend == "pandas":
-            return tf._with_pdf(tf._pdf[ordered], groups=tf._groups)
         return tf._with_lf(tf._lf.select(ordered), groups=tf._groups)
 
     return Verb(_apply, "relocate")
@@ -1433,12 +1285,6 @@ def rename_with(fn: Callable[[str], str], *cols: Any) -> Verb:
             mapping.get(name, name): levels
             for name, levels in tf._category_levels.items()
         }
-        if tf._backend == "pandas":
-            return tf._with_pdf(
-                tf._pdf.rename(columns=mapping),
-                groups=groups,
-                category_levels=category_levels,
-            )
         return tf._with_lf(
             tf._lf.rename(mapping),
             groups=groups,
@@ -1472,7 +1318,6 @@ def make_clean_names(
     >>> make_clean_names(["First Name", "Age (%)", "Phone-Number!"])
     ['first_name', 'age_percent', 'phone_number']
     """
-    import re
     import unicodedata
 
     allowed = {
@@ -1596,10 +1441,6 @@ def clean_names(*, case: str = "snake", unique: bool = True) -> Verb:
             mapping.get(name, name): levels
             for name, levels in tf._category_levels.items()
         }
-        if tf._backend == "pandas":
-            pdf = tf._pdf.copy()
-            pdf.columns = new_names
-            return tf._with_pdf(pdf, groups=groups, category_levels=category_levels)
         return tf._with_lf(
             tf._lf.rename(mapping),
             groups=groups,
@@ -1660,10 +1501,6 @@ def set_names(*names: Any) -> Verb:
             mapping.get(name, name): levels
             for name, levels in tf._category_levels.items()
         }
-        if tf._backend == "pandas":
-            pdf = tf._pdf.copy()
-            pdf.columns = new_names
-            return tf._with_pdf(pdf, groups=groups, category_levels=category_levels)
         # Polars: rename via mapping old→new
         return tf._with_lf(
             tf._lf.rename(mapping),
@@ -1696,11 +1533,6 @@ def pull(var: str | int = -1, *, name: str | int | None = None) -> Verb:
         name_column = (
             _column_position(columns, name, "pull") if name is not None else None
         )
-        if tf._backend == "pandas":
-            out = tf._pdf[column].copy()
-            if name_column is not None:
-                out.index = tf._pdf[name_column].to_numpy()
-            return out
         selected = [column] if name_column is None else [column, name_column]
         out = tf._lf.select(selected).collect()
         if name_column is None:
@@ -1736,21 +1568,14 @@ def glimpse(data: Any = None, n: int = 10) -> Any:
             n_rows = len(tf)
         except Exception:
             n_rows = None
-        if tf._backend == "pandas":
-            print(f"Rows: {n_rows if n_rows is not None else len(tf._pdf)}")
-            print(f"Columns: {tf.width}")
-            for column, dtype in tf._pdf.dtypes.items():
-                values = ", ".join(repr(value) for value in preview[column].tolist())
-                print(f"$ {column} <{dtype}> {values}")
-        else:
-            schema = tf._lf.collect_schema()
-            print(f"Rows: {n_rows if n_rows is not None else '?'}")
-            print(f"Columns: {len(schema)}")
-            for column, dtype in schema.items():
-                values = ", ".join(
-                    repr(value) for value in preview.get_column(column).to_list()
-                )
-                print(f"$ {column} <{dtype}> {values}")
+        schema = tf._lf.collect_schema()
+        print(f"Rows: {n_rows if n_rows is not None else '?'}")
+        print(f"Columns: {len(schema)}")
+        for column, dtype in schema.items():
+            values = ", ".join(
+                repr(value) for value in preview.get_column(column).to_list()
+            )
+            print(f"$ {column} <{dtype}> {values}")
         return tf
 
     return Verb(_apply, "glimpse")
@@ -1773,13 +1598,6 @@ def arrange(*keys: Any, by_group: bool = False) -> Verb:
             tuple([*(wide._groups or []), *keys]) if by_group else keys
         )
         keep_base = wide._select_base
-        if wide._backend == "pandas":
-            out = wide._with_pdf(
-                _pe().do_arrange(wide._pdf, effective_keys),
-                groups=wide._groups,
-                select_base=keep_base,
-            )
-            return _finish_select_base_verb(wide, out, widened=widened)
         expressions = []
         descending = []
         for key in effective_keys:
@@ -1835,11 +1653,6 @@ def distinct(
             selected = columns
         selected = [*selected, *computed_map]
         keys = list(dict.fromkeys([*(work._groups or []), *selected]))
-        if work._backend == "pandas":
-            output = work._pdf.drop_duplicates(subset=keys).reset_index(drop=True)
-            if (plain_cols or computed_map) and not keep_all:
-                output = output.loc[:, keys]
-            return work._with_pdf(output, groups=work._groups)
         lf = work._lf.unique(
             subset=keys,
             keep="first",
@@ -1880,10 +1693,6 @@ def get_dupes(*cols: Any) -> Verb:
             >> select(*keys, "dupe_count", *(name for name in columns if name not in keys))
             >> arrange(desc("dupe_count"), *sort_keys)
         )
-        if out._backend == "pandas":
-            return out._with_pdf(
-                out._pdf, groups=tf._groups, rowwise=tf._rowwise, group_drop=tf._group_drop
-            )
         return out._with_lf(
             out._lf, groups=tf._groups, rowwise=tf._rowwise, group_drop=tf._group_drop
         )
@@ -1925,11 +1734,6 @@ def slice(*rows: Any, by: Any = None) -> Verb:  # noqa: A001
 
     def _apply(tf):
         groups, transient = _operation_groups(tf, by, "slice")
-        if tf._backend == "pandas":
-            return tf._with_pdf(
-                _pe().do_slice(tf._pdf, positions, groups),
-                groups=None if transient else tf._groups,
-            )
         columns = _frame_columns(tf)
         row_name = _temp_column(columns, "__tidy3_slice_row")
         global_name = _temp_column([*columns, row_name], "__tidy3_slice_global")
@@ -2020,11 +1824,6 @@ def slice_head(
 
     def _apply(tf):
         groups, transient = _operation_groups(tf, by, "slice_head")
-        if tf._backend == "pandas":
-            pdf = _pe().do_slice_size(
-                tf._pdf, n, prop, groups, tail=False
-            )
-            return tf._with_pdf(pdf, groups=None if transient else tf._groups)
         target = _windowed(_slice_target(n, prop), groups)
         predicate = _slice_local_index(groups) < target
         return tf._with_lf(
@@ -2041,9 +1840,6 @@ def slice_tail(
 
     def _apply(tf):
         groups, transient = _operation_groups(tf, by, "slice_tail")
-        if tf._backend == "pandas":
-            pdf = _pe().do_slice_size(tf._pdf, n, prop, groups, tail=True)
-            return tf._with_pdf(pdf, groups=None if transient else tf._groups)
         target = _windowed(_slice_target(n, prop), groups)
         predicate = _slice_local_index(groups) >= (
             _slice_group_len(groups) - target
@@ -2082,23 +1878,6 @@ def _slice_extreme(
         wide, widened = _maybe_widen_for_select_base(tf, needed)
         groups, transient = _operation_groups(wide, by, verb_name)
         keep_base = wide._select_base
-        if wide._backend == "pandas":
-            pdf = _pe().do_slice_extreme(
-                wide._pdf,
-                order_by,
-                n,
-                prop,
-                groups,
-                largest=largest,
-                with_ties=with_ties,
-                na_rm=na_rm,
-            )
-            out = wide._with_pdf(
-                pdf,
-                groups=None if transient else wide._groups,
-                select_base=keep_base,
-            )
-            return _finish_select_base_verb(wide, out, widened=widened)
         columns = _frame_columns(wide)
         order_name = _temp_column(columns, "__tidy3_slice_order")
         global_name = _temp_column([*columns, order_name], "__tidy3_slice_global")
@@ -2215,10 +1994,6 @@ def rowwise(*cols: Any) -> Verb:
 
     def _apply(tf):
         identifiers = resolve_selection(tf, cols) if cols else None
-        if tf._backend == "pandas":
-            return tf._with_pdf(
-                tf._pdf, groups=identifiers, rowwise=True
-            )
         return tf._with_lf(tf._lf, groups=identifiers, rowwise=True)
 
     return Verb(_apply, "rowwise")
@@ -2252,32 +2027,6 @@ def group_by(
             name: _resolved_value(context, value)
             for name, value in computed_map.items()
         }
-        if tf._backend == "pandas":
-            pdf = tf._pdf
-            for stage in _assignment_stages(assignments):
-                pdf = _pe().do_mutate(pdf, stage, None)
-            selected = resolve_selection(
-                tf._with_pdf(pdf, groups=None, rowwise=False), plain_cols
-            )
-            groups = list(
-                dict.fromkeys(
-                    [
-                        *((tf._groups or []) if add else []),
-                        *selected,
-                        *computed_map,
-                    ]
-                )
-            )
-            group_drop = (
-                tf._group_drop if drop is None and tf._groups else
-                True if drop is None else drop
-            )
-            return tf._with_pdf(
-                pdf,
-                groups=groups,
-                rowwise=False,
-                group_drop=group_drop,
-            )
         lf = tf._lf
         for stage in _assignment_stages(assignments):
             lf = lf.with_columns(
@@ -2322,8 +2071,6 @@ def ungroup(*cols: Any) -> Verb:
             groups = groups or None
         else:
             groups = None
-        if tf._backend == "pandas":
-            return tf._with_pdf(tf._pdf, groups=groups, rowwise=False)
         return tf._with_lf(tf._lf, groups=groups, rowwise=False)
 
     return Verb(_apply, "ungroup")
@@ -2341,15 +2088,8 @@ def with_groups(cols: Any, fn: Any) -> Verb:
         original_groups = tf._groups
         grouped = tf >> group_by(*selected)
         result = fn(grouped)
-        if not hasattr(result, "_backend"):
+        if not hasattr(result, "_lf"):
             raise TypeError("with_groups() fn must return a TidyFrame")
-        if result._backend == "pandas":
-            return result._with_pdf(
-                result._pdf,
-                groups=original_groups,
-                rowwise=False,
-                group_drop=tf._group_drop,
-            )
         return result._with_lf(
             result._lf,
             groups=original_groups,
@@ -2374,8 +2114,8 @@ def _grouped_parts(
     # dplyr order: groups sorted by key, missing last.
     names, table = _group_table(tf, None if not cols else names)
     # One materialized copy of the frame, in its own backend.
-    frame = tf._pdf.reset_index(drop=True) if tf._backend == "pandas" else tf._lf.collect()
-    if tf._backend != "pandas" and table:
+    frame = tf._lf.collect()
+    if table:
         import numpy as np
 
         # One gather in group order, then zero-copy slices: cheaper than a
@@ -2385,13 +2125,11 @@ def _grouped_parts(
     parts: list[tuple[dict[str, Any], Any, tuple[int, ...]]] = []
     for index, (key_tuple, positions) in enumerate(table):
         subset = (
-            frame.iloc[positions].reset_index(drop=True)
-            if tf._backend == "pandas"
-            else ordered.slice(int(starts[index]), len(positions))
+            ordered.slice(int(starts[index]), len(positions))
         )
         key_map = dict(zip(names, key_tuple))
         row_positions = tuple(positions.tolist())
-        parts.append((key_map, tidy(subset, backend=tf._backend), row_positions))
+        parts.append((key_map, tidy(subset), row_positions))
     return parts
 
 
@@ -2427,7 +2165,7 @@ def _as_polars_frame(value: Any) -> pl.DataFrame:
     from tidy3.frame import TidyFrame
 
     if isinstance(value, TidyFrame):
-        return value._lf.collect() if value._backend == "polars" else pl.from_pandas(value._pdf)
+        return value._lf.collect()
     if isinstance(value, pl.LazyFrame):
         return value.collect()
     if isinstance(value, pl.DataFrame):
@@ -2454,15 +2192,7 @@ def group_modify(fn: Any, *cols: Any) -> Verb:
                 _reset_group_rows(token)
             outputs.append(result)
         if not outputs:
-            return tidy({}, backend=tf._backend)
-        if tf._backend == "pandas":
-            import pandas as pd
-
-            frames = [
-                r.collect(as_="pandas") if hasattr(r, "collect") else pd.DataFrame(r)
-                for r in outputs
-            ]
-            return tidy(pd.concat(frames, ignore_index=True), backend="pandas")
+            return tidy({})
         # Polars: bind the callback results without a pandas round trip.
         frames = [_as_polars_frame(r) for r in outputs]
         return tidy(pl.concat(frames, how="diagonal_relaxed").lazy())
@@ -2486,8 +2216,6 @@ def group_nest(*cols: Any, name: str = "data") -> Verb:
         raise TypeError("group_nest() name must be a non-empty string")
 
     def _apply(tf):
-        from tidy3.frame import tidy
-
         keys = resolve_selection(tf, cols) if cols else list(tf._groups or [])
         if not keys:
             raise ValueError("group_nest() requires grouping columns or group_by()")
@@ -2496,21 +2224,6 @@ def group_nest(*cols: Any, name: str = "data") -> Verb:
             column for column in _frame_columns(tf) if column not in key_set
         ]
 
-        if tf._backend == "pandas":
-            import pandas as pd
-
-            from tidy3.tidyr import nested_frames
-
-            pdf = tf._pdf
-            rows = len(pdf)
-            if rows:
-                # sort=True: dplyr returns groups sorted by key, missing last.
-                values, frames = nested_frames(pdf, keys, nested_cols, sort=True)
-            if not rows:
-                empty = {key: pd.Series(dtype=pdf[key].dtype) for key in keys}
-                empty[name] = pd.Series(dtype=object)
-                return tidy(pd.DataFrame(empty), backend="pandas")
-            return tidy(pd.DataFrame({**values, name: frames}), backend="pandas")
 
         if nested_cols:
             # exclude() keeps the plan free of a Python column list rebuild
@@ -2592,32 +2305,6 @@ def _complete_polars_empty_groups(
     )
 
 
-def _complete_pandas_empty_groups(
-    tf: Any, out: Any, groups: list[str], defaults: dict[str, Any]
-) -> Any:
-    """pandas twin of :func:`_complete_polars_empty_groups`.
-
-    *defaults* are the values an empty group gets (``n()`` is 0).
-    """
-    keys = _dplyr_group_keys(
-        tf, list(out.loc[:, groups].itertuples(index=False, name=None)), groups
-    )
-    marker = _temp_column([*out.columns, *groups], "__tidy3_observed_group")
-    joined = keys.merge(
-        out.assign(**{marker: True}), on=groups, how="left", sort=False
-    )
-    missing = joined[marker].isna()
-    for name, default in defaults.items():
-        filled = joined[name].where(~missing, default)
-        try:
-            # Keep the summary's type: counts stay integers.
-            filled = filled.astype(out[name].dtype)
-        except (TypeError, ValueError):
-            pass
-        joined[name] = filled
-    return joined.drop(columns=marker)
-
-
 def summarise(
     *specs: Any,
     by: Any = None,
@@ -2661,14 +2348,6 @@ def summarise(
         if tf._rowwise:
             marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
             keys = [*(tf._groups or []), marker]
-            if tf._backend == "pandas":
-                work = tf._pdf.assign(**{marker: range(len(tf._pdf))})
-                pdf = _pe().do_reframe(
-                    work, assignments, keys, sort_groups=False
-                ).drop(columns=marker)
-                return tf._with_pdf(
-                    pdf, groups=result_groups, rowwise=result_rowwise
-                )
             named = []
             for name, expr in assignments.items():
                 named.append(_pl_expr(expr).alias(name))
@@ -2681,20 +2360,6 @@ def summarise(
             return tf._with_lf(
                 lf, groups=result_groups, rowwise=result_rowwise
             )
-        if tf._backend == "pandas":
-            out = _pe().do_summarise(
-                tf._pdf,
-                assignments,
-                operation_groups,
-                sort_groups=not transient,
-                observed=True,
-            )
-            if operation_groups and not transient and not tf._group_drop:
-                empty = _pe().do_summarise(tf._pdf.iloc[:0], assignments, None)
-                out = _complete_pandas_empty_groups(
-                    tf, out, list(operation_groups), empty.iloc[0].to_dict()
-                )
-            return tf._with_pdf(out, groups=result_groups, rowwise=result_rowwise)
         named = []
         sizes: dict[str, str] = {}
         occupied = [*_frame_columns(tf), *assignments]
@@ -2746,7 +2411,7 @@ def _pl_check_summary_sizes(lf: pl.LazyFrame, sizes: dict[str, str]) -> pl.LazyF
 
         def check(count: int, name: str = name) -> bool:
             if count != 1:
-                raise _pe().summary_size_error(name, count)
+                raise _summary_size_error(name, count)
             return True
 
         checks.append(
@@ -2767,22 +2432,6 @@ def reframe(*specs: Any, by: Any = None, **kwargs: Any) -> Verb:
         groups, transient = _operation_groups(tf, by, "reframe")
         context = _group_context(tf, groups)
         assignments = _expanded_assignments(context, specs, kwargs, "reframe")
-        if tf._backend == "pandas":
-            work = tf._pdf
-            marker = None
-            if tf._rowwise:
-                marker = _temp_column(_frame_columns(tf), "__tidy3_rowwise")
-                work = work.assign(**{marker: range(len(work))})
-                groups = [*(tf._groups or []), marker]
-            pdf = _pe().do_reframe(
-                work,
-                assignments,
-                groups,
-                sort_groups=not transient and marker is None,
-            )
-            if marker is not None:
-                pdf = pdf.drop(columns=marker)
-            return tf._with_pdf(pdf, groups=None, rowwise=False)
 
         named = [_pl_expr(expr).alias(name) for name, expr in assignments.items()]
         lf = tf._lf
@@ -2818,10 +2467,7 @@ def reframe(*specs: Any, by: Any = None, **kwargs: Any) -> Verb:
 
 
 def _count_name(tf: Any, requested: str | None, groups: list[str]) -> str:
-    if tf._backend == "pandas":
-        columns = list(tf._pdf.columns)
-    else:
-        columns = tf._lf.collect_schema().names()
+    columns = tf._lf.collect_schema().names()
     if requested is None:
         name = "n"
         while name in columns:
@@ -2852,21 +2498,6 @@ def _count_rows(
     )
     eff = list(dict.fromkeys([*(tf._groups or []), *cols]))
     out_name = _count_name(tf, name, eff)
-    if tf._backend == "pandas":
-        pdf = _pe().do_count(
-            tf._pdf,
-            tuple(eff),
-            out_name,
-            wt=wt,
-            sort=False,
-            observed=True,
-        )
-        if eff and not drop:
-            # dplyr's drop = FALSE groups: unused factor levels count 0.
-            pdf = _complete_pandas_empty_groups(tf, pdf, eff, {out_name: 0})
-        if sort:
-            pdf = pdf.sort_values(out_name, ascending=False, kind="stable")
-        return tf._with_pdf(pdf.reset_index(drop=True), groups=result_groups)
 
     if wt is None:
         agg = pl.len()
@@ -2970,11 +2601,6 @@ def _add_count_rows(
     )
     eff = list(dict.fromkeys([*(tf._groups or []), *cols]))
     out_name = _count_name(tf, name, eff)
-    if tf._backend == "pandas":
-        pdf = _pe().do_add_count(
-            tf._pdf, tuple(eff), out_name, wt=wt, sort=sort
-        )
-        return tf._with_pdf(pdf, groups=tf._groups)
     if wt is None:
         value = pl.len()
     elif isinstance(wt, str):
@@ -3035,10 +2661,6 @@ def sample_n(n: int, *, seed: int | None = None) -> Verb:
         raise TypeError("sample_n() n must be an integer")
 
     def _apply(tf):
-        if tf._backend == "pandas":
-            return tf._with_pdf(
-                _pe().do_sample_n(tf._pdf, n, seed, tf._groups), groups=tf._groups
-            )
         target = pl.lit(n) if n >= 0 else pl.len() + n
         pred = pl.int_range(pl.len()).shuffle(seed=seed) < target
         return tf._with_lf(tf._lf.filter(_windowed(pred, tf._groups)), groups=tf._groups)
@@ -3056,10 +2678,6 @@ def sample_frac(frac: float, *, seed: int | None = None) -> Verb:
         raise ValueError("sample_frac() frac must be a finite number")
 
     def _apply(tf):
-        if tf._backend == "pandas":
-            return tf._with_pdf(
-                _pe().do_sample_frac(tf._pdf, frac, seed, tf._groups), groups=tf._groups
-            )
         factor = frac if frac >= 0 else 1.0 + frac
         target = (pl.len() * factor).floor()
         pred = pl.int_range(pl.len()).shuffle(seed=seed) < target
@@ -3082,17 +2700,6 @@ def slice_sample(
 
     def _apply(tf):
         groups, transient = _operation_groups(tf, by, "slice_sample")
-        if tf._backend == "pandas":
-            pdf = _pe().do_slice_sample(
-                tf._pdf,
-                n,
-                prop,
-                weight_by,
-                replace,
-                seed,
-                groups,
-            )
-            return tf._with_pdf(pdf, groups=None if transient else tf._groups)
         if weight_by is not None:
             columns = _frame_columns(tf)
             row_name = _temp_column(columns, "__tidy3_sample_row")
@@ -3372,72 +2979,16 @@ def _align_factor_keys(
     return aligned, right, restore
 
 
-def _align_pandas_factor_keys(
-    left: Any, right: Any, pairs: list[tuple[str, str]]
-) -> tuple[Any, Any]:
-    """Two factor keys with different levels compare on the union, x's first.
-
-    A factor joined to text already merges as text on pandas, as in dplyr.
-    """
-    import pandas as pd
-
-    for left_name, right_name in pairs:
-        left_type, right_type = left[left_name].dtype, right[right_name].dtype
-        if (
-            isinstance(left_type, pd.CategoricalDtype)
-            and isinstance(right_type, pd.CategoricalDtype)
-            and list(left_type.categories) != list(right_type.categories)
-        ):
-            dtype = pd.CategoricalDtype(
-                _union_levels(list(left_type.categories), list(right_type.categories))
-            )
-            left = left.assign(**{left_name: left[left_name].astype(dtype)})
-            right = right.assign(**{right_name: right[right_name].astype(dtype)})
-    return left, right
-
-
-def _pandas_factor_levels(pdf: Any) -> dict[str, Any]:
-    import pandas as pd
-
-    return {
-        str(name): _levels_from_series(pdf[name])
-        for name in pdf.columns
-        if isinstance(pdf[name].dtype, pd.CategoricalDtype)
-    }
-
-
-def _restore_pandas_keys(result: Any, source: Any, names: list[str]) -> Any:
-    """A filtering join returns x's rows, so x's keys keep x's own type."""
-    import pandas as pd
-
-    restored = {
-        name: result[name].astype(source[name].dtype)
-        for name in names
-        if isinstance(source[name].dtype, pd.CategoricalDtype)
-    }
-    return result.assign(**restored) if restored else result
-
-
-def _right_frame(right: Any, backend: str) -> Any:
-    """Resolve the right side of a join for the given backend."""
+def _right_frame(right: Any) -> pl.LazyFrame:
+    """The right side of a join as a Polars LazyFrame."""
     from tidy3.frame import TidyFrame, tidy
 
     cls = type(right)
     is_tf = isinstance(right, TidyFrame) or (
         cls.__module__ == "tidy3.frame" and cls.__name__ == "TidyFrame"
     )
-    if backend == "pandas":
-        if is_tf:
-            return right.collect(as_="pandas")
-        import pandas as pd
-
-        if isinstance(right, pd.DataFrame):
-            return right
-        return tidy(right, backend="pandas")._pdf
     if is_tf:
-        if right.backend == "polars":
-            return right._lf
-        return pl.from_pandas(right.collect(as_="pandas")).lazy()
+        return right._lf
     return tidy(right)._lf
 
 
@@ -3763,7 +3314,7 @@ def _join_by_output(
     """Name and order the joined columns as dplyr does, then add the guards."""
     equality_map = {condition.left: condition.right for condition in equality}
     equality_right = {condition.right for condition in equality}
-    left_out, right_out = _pe().join_names(
+    left_out, right_out = join_names(
         list(left_columns),
         list(right_columns),
         list(equality_map),
@@ -3799,7 +3350,7 @@ def _join_suffix(suffix: Any) -> tuple[str, str]:
     ``("", suffix)`` does, and warns.
     """
     if suffix is None:
-        return _pe().JOIN_SUFFIX
+        return JOIN_SUFFIX
     if isinstance(suffix, str):
         warnings.warn(
             f"join suffix={suffix!r} is deprecated; pass a pair, e.g. "
@@ -3854,28 +3405,7 @@ def _join_by_operation(
         raise TypeError(
             f"unsupported join arguments: {sorted(params)}"
         )
-    resolved = _right_frame(right, tf._backend)
-    if tf._backend == "pandas":
-        pairs = [(condition.left, condition.right) for condition in spec.equality]
-        left, resolved = _align_pandas_factor_keys(tf._pdf, resolved, pairs)
-        pdf = _pe().do_join_by(
-            left,
-            resolved,
-            spec,
-            how,
-            suffix=suffix,
-            keep=keep,
-            na_matches=na_matches,
-            multiple=multiple,
-            unmatched=unmatched,
-            relationship=relationship,
-        )
-        if how in {"semi", "anti"}:
-            pdf = _restore_pandas_keys(pdf, tf._pdf, [left_name for left_name, _ in pairs])
-            return tf._with_pdf(pdf, groups=tf._groups)
-        return tf._with_pdf(
-            pdf, groups=tf._groups, category_levels=_pandas_factor_levels(pdf)
-        )
+    resolved = _right_frame(right)
     aligned, resolved, finish = _align_factor_keys(
         tf,
         resolved,
@@ -3909,9 +3439,7 @@ def _mutating_join(
         if isinstance(on, JoinSpec):
             # Polars only: the pandas join_by path keeps nullable integer
             # columns that a plain pandas merge would turn into floats.
-            if tf._backend == "pandas":
-                return _join_by_operation(tf, right, on, how, kwargs)
-            r = _right_frame(right, tf._backend)
+            r = _right_frame(right)
             keys = _equality_keys(on, r, kwargs)
             if keys is not None:
                 # Unequal key types (an empty y has Null columns) need the
@@ -3925,19 +3453,10 @@ def _mutating_join(
             if renames:
                 r = r.rename(renames)
         else:
-            r = _right_frame(right, tf._backend)
-            keys = _join_keys(tf._pdf if tf._backend == "pandas" else tf._lf, r, on)
+            r = _right_frame(right)
+            keys = _join_keys(tf._lf, r, on)
         if set(kwargs) <= {"suffix"}:
             suffix = _join_suffix(kwargs.get("suffix"))
-            if tf._backend == "pandas":
-                key_list = [keys] if isinstance(keys, str) else list(keys)
-                left, r = _align_pandas_factor_keys(
-                    tf._pdf, r, [(key, key) for key in key_list]
-                )
-                pdf = _pe().do_join(left, r, keys, pandas_how or how, suffix=suffix)
-                return tf._with_pdf(
-                    pdf, groups=tf._groups, category_levels=_pandas_factor_levels(pdf)
-                )
             params: dict[str, Any] = {
                 "nulls_equal": True,
                 # dplyr's order: x's rows in order with their matches,
@@ -3946,7 +3465,7 @@ def _mutating_join(
             }
             if how == "full":
                 params["coalesce"] = True
-            tag = _pe().RIGHT_TAG
+            tag = RIGHT_TAG
             key_list = [keys] if isinstance(keys, str) else list(keys)
             tf, r, _finish = _align_factor_keys(
                 tf, r, [(key, key) for key in key_list], filtering=False
@@ -3955,7 +3474,7 @@ def _mutating_join(
             left_columns = tf._lf.collect_schema().names()
             right_columns = r.collect_schema().names()
             key_columns = [keys] if isinstance(keys, str) else list(keys)
-            left_out, right_out = _pe().join_names(
+            left_out, right_out = join_names(
                 left_columns, right_columns, key_columns, key_columns, False, suffix
             )
             ordered = [pl.col(column).alias(left_out[column]) for column in left_columns]
@@ -4092,54 +3611,13 @@ def nest_join(
         columns = _frame_columns(tf)
         if name in columns:
             raise ValueError(f"nest_join() output column exists: {name!r}")
-        r = _right_frame(right, tf._backend)
+        r = _right_frame(right)
         keys = _join_keys(
-            tf._pdf if tf._backend == "pandas" else tf._lf,
+            tf._lf,
             r,
             join_keys,
         )
         key_columns = [keys] if isinstance(keys, str) else list(keys)
-        if tf._backend == "pandas":
-            import pandas as pd
-
-            nested_columns = [
-                column
-                for column in r.columns
-                if keep or column not in key_columns
-            ]
-            empty_nested = pd.DataFrame(columns=nested_columns)
-            # Pre-slice once; build nested DataFrames via group positions
-            # (no to_dict(records) Python row materialization).
-            if nested_columns:
-                body = r.loc[:, nested_columns]
-            else:
-                body = pd.DataFrame(index=r.index)
-            grouping_key = (
-                key_columns[0] if len(key_columns) == 1 else key_columns
-            )
-            rows: list[dict[str, Any]] = []
-            for key, positions in r.groupby(
-                grouping_key,
-                sort=False,
-                dropna=na_matches == "never",
-                observed=True,
-            ).groups.items():
-                key_tuple = key if isinstance(key, tuple) else (key,)
-                row = dict(zip(key_columns, key_tuple))
-                row[name] = body.loc[positions].reset_index(drop=True)
-                rows.append(row)
-            nested = pd.DataFrame(rows, columns=[*key_columns, name])
-            output = tf._pdf.merge(
-                nested, on=key_columns, how="left", sort=False
-            )
-
-            def _as_nested(value: Any) -> pd.DataFrame:
-                if isinstance(value, pd.DataFrame):
-                    return value
-                return empty_nested.copy()
-
-            output[name] = output[name].map(_as_nested)
-            return tf._with_pdf(output, groups=tf._groups, rowwise=False)
 
         right_columns = r.collect_schema().names()
         nested_columns = [
@@ -4191,17 +3669,9 @@ def _filter_join(
             return _join_by_operation(
                 tf, right, on, "anti" if anti else "semi", params
             )
-        r = _right_frame(right, tf._backend)
-        keys = _join_keys(tf._pdf if tf._backend == "pandas" else tf._lf, r, on)
+        r = _right_frame(right)
+        keys = _join_keys(tf._lf, r, on)
         if na_matches == "na":
-            if tf._backend == "pandas":
-                key_list = [keys] if isinstance(keys, str) else list(keys)
-                left, r = _align_pandas_factor_keys(
-                    tf._pdf, r, [(key, key) for key in key_list]
-                )
-                pdf = _pe().do_filter_join(left, r, keys, anti=anti)
-                pdf = _restore_pandas_keys(pdf, tf._pdf, key_list)
-                return tf._with_pdf(pdf, groups=tf._groups)
             key_list = [keys] if isinstance(keys, str) else list(keys)
             aligned, r, finish = _align_factor_keys(
                 tf, r, [(key, key) for key in key_list], filtering=True
@@ -4267,14 +3737,11 @@ def cross_join(right: Any, **kwargs: Any) -> Verb:
         raise TypeError(f"unsupported cross_join arguments: {sorted(params)}")
 
     def _apply(tf):
-        r = _right_frame(right, tf._backend)
-        if tf._backend == "pandas":
-            pdf = _pe().do_join(tf._pdf, r, None, "cross", suffix=suffix)
-            return tf._with_pdf(pdf, groups=tf._groups)
-        tag = _pe().RIGHT_TAG
+        r = _right_frame(right)
+        tag = RIGHT_TAG
         left_columns = tf._lf.collect_schema().names()
         right_columns = r.collect_schema().names()
-        left_out, right_out = _pe().join_names(
+        left_out, right_out = join_names(
             left_columns, right_columns, [], [], False, suffix
         )
         lf = tf._lf.join(r, how="cross", suffix=tag, maintain_order="left")
@@ -4324,37 +3791,6 @@ def _bind_polars_factors(
     return aligned, levels
 
 
-def _bind_pandas_factors(frames: list[Any]) -> list[Any]:
-    """:func:`_bind_polars_factors` for pandas, whose concat drops differing factors."""
-    import pandas as pd
-
-    names = _union_levels(*(list(frame.columns) for frame in frames))
-    out = list(frames)
-    for name in names:
-        present = [frame[name] for frame in frames if name in frame.columns]
-        factors = [series for series in present if isinstance(series.dtype, pd.CategoricalDtype)]
-        if not factors:
-            continue
-        others = [
-            series for series in present
-            if not isinstance(series.dtype, pd.CategoricalDtype) and series.notna().any()
-        ]
-        if others:
-            continue  # a factor bound to text is text, which concat already gives
-        union = _union_levels(*(series.cat.categories.tolist() for series in factors))
-        same = all(series.cat.categories.tolist() == union for series in factors)
-        ordered = same and all(series.cat.ordered for series in factors)
-        dtype = pd.CategoricalDtype(union, ordered=ordered)
-        out = [
-            frame.assign(**{name: (
-                frame[name].astype(dtype) if name in frame.columns
-                else pd.Series(pd.Categorical([None] * len(frame), dtype=dtype), index=frame.index)
-            )})
-            for frame in out
-        ]
-    return out
-
-
 def bind_rows(*others: Any, id: str | None = None) -> Verb:  # noqa: A002
     """Append frames, taking the union of their columns."""
     if not others:
@@ -4363,27 +3799,8 @@ def bind_rows(*others: Any, id: str | None = None) -> Verb:  # noqa: A002
         raise TypeError("bind_rows() id must be a non-empty string or None")
 
     def _apply(tf):
-        frames = [tf._pdf if tf._backend == "pandas" else tf._lf]
-        frames.extend(_right_frame(other, tf._backend) for other in others)
-        if tf._backend == "pandas":
-            import pandas as pd
-
-            if id is not None:
-                frames = [
-                    frame.assign(**{id: str(index)})[
-                        [id, *(column for column in frame.columns if column != id)]
-                    ]
-                    for index, frame in enumerate(frames, start=1)
-                ]
-            order = _union_levels(*(list(frame.columns) for frame in frames))
-            frames = _bind_pandas_factors(frames)
-            pdf = pd.concat(frames, ignore_index=True, sort=False).loc[:, order]
-            levels = {
-                str(name): _levels_from_series(pdf[name])
-                for name in pdf.columns
-                if isinstance(pdf[name].dtype, pd.CategoricalDtype)
-            }
-            return tf._with_pdf(pdf, groups=tf._groups, category_levels=levels)
+        frames = [tf._lf]
+        frames.extend(_right_frame(other) for other in others)
         if id is not None:
             frames = [
                 frame.with_columns(pl.lit(str(index)).alias(id)).select(
@@ -4442,12 +3859,10 @@ def bind_cols(*others: Any) -> Verb:
         raise TypeError("bind_cols() requires at least one frame")
 
     def _apply(tf):
-        frames = [tf._pdf if tf._backend == "pandas" else tf._lf]
-        frames.extend(_right_frame(other, tf._backend) for other in others)
+        frames = [tf._lf]
+        frames.extend(_right_frame(other) for other in others)
         column_sets = [
-            list(frame.columns)
-            if tf._backend == "pandas"
-            else frame.collect_schema().names()
+            frame.collect_schema().names()
             for frame in frames
         ]
         all_columns = [column for columns in column_sets for column in columns]
@@ -4461,26 +3876,6 @@ def bind_cols(*others: Any) -> Verb:
         if tf._groups:
             left_mapping = dict(zip(column_sets[0], repaired_sets[0]))
             groups = [left_mapping[name] for name in tf._groups]
-        if tf._backend == "pandas":
-            import pandas as pd
-            import numpy as np
-
-            sizes = [len(frame) for frame in frames]
-            target = _common_recycled_size(sizes)
-            recycled = []
-            for frame, size, names in zip(frames, sizes, repaired_sets):
-                work = frame.copy(deep=False)
-                work.columns = names
-                if size == 1 and target != 1:
-                    if target == 0:
-                        work = work.iloc[:0]
-                    else:
-                        work = work.take(np.zeros(target, dtype=np.intp))
-                recycled.append(work.reset_index(drop=True))
-            pdf = pd.concat(
-                recycled, axis=1
-            )
-            return tf._with_pdf(pdf, groups=groups)
         sizes = [
             int(frame.select(pl.len()).collect().item()) for frame in frames
         ]
@@ -4521,46 +3916,24 @@ def bind_cols(*others: Any) -> Verb:
 
 
 def _set_frames(tf: Any, right: Any) -> tuple[Any, Any, list[str]]:
-    left = tf._pdf if tf._backend == "pandas" else tf._lf
-    other = _right_frame(right, tf._backend)
+    left = tf._lf
+    other = _right_frame(right)
     left_columns = (
-        list(left.columns)
-        if tf._backend == "pandas"
-        else left.collect_schema().names()
+        left.collect_schema().names()
     )
     right_columns = (
-        list(other.columns)
-        if tf._backend == "pandas"
-        else other.collect_schema().names()
+        other.collect_schema().names()
     )
     if set(left_columns) != set(right_columns):
         raise ValueError("set operations require frames with the same columns")
     if right_columns != left_columns:
-        other = other[left_columns] if tf._backend == "pandas" else other.select(left_columns)
+        other = other.select(left_columns)
     return left, other, left_columns
 
 
 def _set_operation(right: Any, operation: str) -> Verb:
     def _apply(tf):
         left, other, columns = _set_frames(tf, right)
-        if tf._backend == "pandas":
-            import pandas as pd
-
-            left_unique = left.drop_duplicates()
-            right_unique = other.drop_duplicates()
-            if operation == "union":
-                out = pd.concat([left, other], ignore_index=True).drop_duplicates()
-            elif operation == "union_all":
-                out = pd.concat([left, other], ignore_index=True)
-            elif operation == "intersect":
-                out = _pe().do_filter_join(left_unique, right_unique, columns, anti=False)
-            elif operation == "setdiff":
-                out = _pe().do_filter_join(left_unique, right_unique, columns, anti=True)
-            else:
-                left_only = _pe().do_filter_join(left_unique, right_unique, columns, anti=True)
-                right_only = _pe().do_filter_join(right_unique, left_unique, columns, anti=True)
-                out = pd.concat([left_only, right_only], ignore_index=True)
-            return tf._with_pdf(out.reset_index(drop=True), groups=tf._groups)
         if operation == "union_all":
             lf = pl.concat([left, other], how="vertical_relaxed")
         elif operation == "union":
@@ -4619,25 +3992,13 @@ def setequal(right: Any) -> Verb:
 
     def _apply(tf):
         left, other, columns = _set_frames(tf, right)
-        if tf._backend != "pandas":
-            # Same distinct rows: equal counts and nothing on the left
-            # missing from the right (missing values match each other).
-            mine = left.select(columns).unique()
-            theirs = other.select(columns).unique()
-            sizes = pl.collect_all([mine.select(pl.len()), theirs.select(pl.len())])
-            if sizes[0].item() != sizes[1].item():
-                return False
-            unmatched = mine.join(theirs, on=columns, how="anti", nulls_equal=True)
-            return unmatched.select(pl.len()).collect().item() == 0
-        left = left[columns].drop_duplicates(ignore_index=True)
-        other = other[columns].drop_duplicates(ignore_index=True)
-        if len(left) != len(other):
+        mine = left.select(columns).unique()
+        theirs = other.select(columns).unique()
+        sizes = pl.collect_all([mine.select(pl.len()), theirs.select(pl.len())])
+        if sizes[0].item() != sizes[1].item():
             return False
-        import pandas as pd
-
-        left_hash = pd.util.hash_pandas_object(left, index=False).sort_values().to_numpy()
-        right_hash = pd.util.hash_pandas_object(other, index=False).sort_values().to_numpy()
-        return bool((left_hash == right_hash).all())
+        unmatched = mine.join(theirs, on=columns, how="anti", nulls_equal=True)
+        return unmatched.select(pl.len()).collect().item() == 0
 
     return Verb(_apply, "setequal")
 
@@ -4706,7 +4067,7 @@ def _pl_guard_no_rows(
 
 
 def _pl_row_inputs(tf: Any, right: Any, operation: str):
-    y = _right_frame(right, "polars")
+    y = _right_frame(right)
     x_columns = _frame_columns(tf)
     y_columns = y.collect_schema().names()
     extra = [column for column in y_columns if column not in x_columns]
@@ -4747,18 +4108,8 @@ def _rows_operation(
     unmatched = _validate_policy(unmatched, "unmatched")
 
     def _apply(tf):
-        y = _right_frame(right, tf._backend)
+        y = _right_frame(right)
         keys = _row_keys(y, by)
-        if tf._backend == "pandas":
-            pdf = _pe().do_rows(
-                tf._pdf,
-                y,
-                keys,
-                operation,
-                conflict=conflict,
-                unmatched=unmatched,
-            )
-            return tf._with_pdf(pdf, groups=tf._groups)
 
         y, x_columns, y_columns = _pl_row_inputs(tf, right, operation)
         missing_keys = [

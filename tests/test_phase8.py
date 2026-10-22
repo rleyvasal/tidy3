@@ -29,17 +29,15 @@ from tidy3 import (
 )
 
 
-BACKENDS = ["polars", "pandas"]
 
 
 def as_pandas(frame):
     return frame.collect(as_="pandas").reset_index(drop=True)
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_mutate_assignments_can_reference_columns_created_earlier(backend):
+def test_mutate_assignments_can_reference_columns_created_earlier():
     out = as_pandas(
-        tidy({"x": [1, 2, 3]}, backend=backend)
+        tidy({"x": [1, 2, 3]})
         >> mutate(
             doubled=col("x") * 2,
             squared=col("doubled") ** 2,
@@ -52,12 +50,10 @@ def test_mutate_assignments_can_reference_columns_created_earlier(backend):
     assert out["total"].tolist() == [6, 20, 42]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_grouped_dependent_mutate_reuses_new_columns(backend):
+def test_grouped_dependent_mutate_reuses_new_columns():
     out = as_pandas(
         tidy(
             {"g": ["a", "a", "b"], "x": [1.0, 3.0, 10.0]},
-            backend=backend,
         )
         >> mutate(centered=col("x") - mean("x"), scaled=col("centered") * 2, by="g")
     )
@@ -66,11 +62,9 @@ def test_grouped_dependent_mutate_reuses_new_columns(backend):
     assert out["scaled"].tolist() == [-2.0, 2.0, 0.0]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_mutate_keep_and_placement_controls(backend):
+def test_mutate_keep_and_placement_controls():
     frame = tidy(
         {"id": [1, 2], "x": [3, 4], "unused": [8, 9]},
-        backend=backend,
     )
 
     used = as_pandas(
@@ -82,11 +76,9 @@ def test_mutate_keep_and_placement_controls(backend):
     assert list(none.columns) == ["doubled"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_distinct_projects_keys_unless_keep_all(backend):
+def test_distinct_projects_keys_unless_keep_all():
     frame = tidy(
         {"x": [1, 1, 2], "label": ["first", "second", "third"]},
-        backend=backend,
     )
 
     projected = as_pandas(frame >> distinct("x"))
@@ -99,11 +91,9 @@ def test_distinct_projects_keys_unless_keep_all(backend):
     }
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_distinct_includes_and_preserves_grouping_columns(backend):
+def test_distinct_includes_and_preserves_grouping_columns():
     frame = tidy(
         {"g": ["a", "a", "b"], "x": [1, 1, 1], "y": [2, 3, 4]},
-        backend=backend,
     ) >> group_by("g")
 
     result = frame >> distinct("x")
@@ -115,11 +105,9 @@ def test_distinct_includes_and_preserves_grouping_columns(backend):
     assert result._groups == ["g"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_summarise_grouping_policy_defaults_to_drop_last(backend):
+def test_summarise_grouping_policy_defaults_to_drop_last():
     frame = tidy(
         {"g": ["a", "a", "b"], "h": [1, 2, 1], "x": [1, 3, 5]},
-        backend=backend,
     ) >> group_by("g", "h")
 
     default = frame >> summarise(avg=mean("x"))
@@ -134,11 +122,9 @@ def test_summarise_grouping_policy_defaults_to_drop_last(backend):
     assert rowwise._rowwise
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_computed_additive_grouping_and_partial_ungroup(backend):
+def test_computed_additive_grouping_and_partial_ungroup():
     frame = tidy(
         {"region": ["a", "a", "b"], "x": [1, 11, 21]},
-        backend=backend,
     )
     grouped = (
         frame
@@ -159,11 +145,9 @@ def test_new_grouping_arguments_are_validated():
         group_by("x", add="yes")
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_value_predicates_and_consecutive_ids(backend):
+def test_value_predicates_and_consecutive_ids():
     frame = tidy(
         {"x": [1.0, 1.000000001, 3.0, 3.0], "flag": [True, True, False, True]},
-        backend=backend,
     )
     out = as_pandas(
         frame
@@ -180,8 +164,7 @@ def test_value_predicates_and_consecutive_ids(backend):
     assert out["run"].tolist() == [1, 2]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_nth_boolean_and_variance_aggregates(backend):
+def test_nth_boolean_and_variance_aggregates():
     frame = tidy(
         {
             "g": ["a", "a", "b", "b"],
@@ -189,7 +172,6 @@ def test_nth_boolean_and_variance_aggregates(backend):
             "order": [2, 1, 2, 1],
             "flag": [True, False, True, True],
         },
-        backend=backend,
     )
     out = as_pandas(
         frame
@@ -210,15 +192,13 @@ def test_nth_boolean_and_variance_aggregates(backend):
     assert out["deviation"].tolist() == pytest.approx([2**0.5, 8**0.5])
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_aggregates_offer_explicit_missing_value_control(backend):
+def test_aggregates_offer_explicit_missing_value_control():
     frame = tidy(
         {
             "g": ["a", "a", "b", "b"],
             "x": [1.0, None, 2.0, 4.0],
             "flag": [True, None, False, None],
         },
-        backend=backend,
     )
     out = as_pandas(
         frame
@@ -239,11 +219,9 @@ def test_aggregates_offer_explicit_missing_value_control(backend):
     assert out["all_value"].tolist()[1] is False
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_nest_join_preserves_left_rows_and_collects_matches(backend):
+def test_nest_join_preserves_left_rows_and_collects_matches():
     left = tidy(
         {"id": [1, 2, 3], "label": ["a", "b", "c"]},
-        backend=backend,
     )
     right = {"id": [1, 1, 2], "value": [10, 11, 20]}
 
@@ -263,15 +241,13 @@ def test_nest_join_preserves_left_rows_and_collects_matches(backend):
     ]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_ordered_lead_lag_first_and_last(backend):
+def test_ordered_lead_lag_first_and_last():
     frame = tidy(
         {
             "g": ["a", "a", "a", "b", "b"],
             "x": [30, 10, 20, 5, 4],
             "order": [3, 1, 2, 2, 1],
         },
-        backend=backend,
     )
     mutated = as_pandas(
         frame

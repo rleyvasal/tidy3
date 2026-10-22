@@ -86,10 +86,6 @@ def _renamed(mapping: dict[str, str], names: list[str] | None) -> list[str] | No
     return [mapping[name] for name in names]
 
 
-def _finish_pandas(tf: Any, pdf: Any, names: list[str]) -> Any:
-    return tf._with_pdf(pdf, _groups(tf, names), category_levels=_levels(tf, names))
-
-
 def _finish_polars(tf: Any, lf: pl.LazyFrame, names: list[str]) -> Any:
     # Dropping every column also drops the rows: Polars cannot store a row
     # count without a column. Pandas keeps that row count.
@@ -157,10 +153,6 @@ def _empty_columns(lf: pl.LazyFrame, cutoff: float) -> list[str]:
     return kept
 
 
-def _pandas_missing(pdf: Any) -> Any:
-    return pdf.isna()
-
-
 def remove_empty(which: Any = "both", *, cutoff: float = 1) -> Verb:
     """Drop empty rows and columns (R **janitor::remove_empty**).
 
@@ -186,15 +178,6 @@ def remove_empty(which: Any = "both", *, cutoff: float = 1) -> Verb:
         )
 
     def _apply(tf: Any) -> Any:
-        if tf._backend == "pandas":
-            pdf = tf._pdf.copy()
-            if "rows" in targets:
-                pdf = _drop_empty_pandas_rows(pdf, limit)
-            names = list(pdf.columns)
-            if "cols" in targets:
-                names = _empty_pandas_columns(pdf, limit)
-                pdf = pdf.loc[:, names] if names else pdf.iloc[:, 0:0]
-            return _finish_pandas(tf, pdf.reset_index(drop=True), [str(name) for name in names])
         lf = tf._lf
         if "rows" in targets:
             lf = _row_mask_polars(lf, limit)
@@ -204,44 +187,6 @@ def remove_empty(which: Any = "both", *, cutoff: float = 1) -> Verb:
     return Verb(_apply, "remove_empty")
 
 
-def _drop_empty_pandas_rows(pdf: Any, cutoff: float) -> Any:
-    width = pdf.shape[1]
-    if width == 0:
-        if cutoff != 1:
-            raise ValueError(
-                "remove_empty() cutoff needs at least one column when removing rows"
-            )
-        return pdf.iloc[0:0]
-    present = (~_pandas_missing(pdf)).sum(axis=1)
-    if cutoff == 1:
-        mask = present.to_numpy() != 0
-    else:
-        mask = (present / width).to_numpy() > cutoff
-    return pdf.loc[mask]
-
-
-def _empty_pandas_columns(pdf: Any, cutoff: float) -> list[str]:
-    names = [str(name) for name in pdf.columns]
-    height = len(pdf)
-    if cutoff != 1 and height == 0:
-        raise ValueError(
-            "remove_empty() cutoff needs at least one row when removing columns"
-        )
-    if height == 0:
-        return []
-    missing = _pandas_missing(pdf).sum(axis=0)
-    kept: list[str] = []
-    for name in names:
-        count = int(missing[name])
-        if cutoff == 1:
-            keep = count != height
-        else:
-            keep = ((height - count) / height) > cutoff
-        if keep:
-            kept.append(name)
-    return kept
-
-
 def _frozen(value: Any) -> Any:
     """A hashable stand-in for a list, array or dict cell, compared by content."""
     if isinstance(value, (list, tuple, np.ndarray)):
@@ -249,14 +194,6 @@ def _frozen(value: Any) -> Any:
     if isinstance(value, dict):
         return ("__dict", tuple((key, _frozen(item)) for key, item in value.items()))
     return value.item() if isinstance(value, np.generic) else value
-
-
-def _constant_pandas(series: Any, na_rm: bool) -> bool:
-    if series.dtype == object and series.map(lambda v: isinstance(v, (list, tuple, np.ndarray, dict))).any():
-        series = series.map(_frozen)
-    if na_rm:
-        return int(series.dropna().nunique(dropna=True)) <= 1
-    return int(series.nunique(dropna=False)) <= 1
 
 
 def _constant_columns(lf: pl.LazyFrame, na_rm: bool) -> list[str]:
@@ -293,15 +230,6 @@ def remove_constant(*, na_rm: bool = False) -> Verb:
     _bool("remove_constant() na_rm", na_rm)
 
     def _apply(tf: Any) -> Any:
-        if tf._backend == "pandas":
-            pdf = tf._pdf.copy()
-            names = [
-                str(name)
-                for name in pdf.columns
-                if not _constant_pandas(pdf[name], na_rm)
-            ]
-            kept = pdf.loc[:, names] if names else pdf.iloc[:, 0:0]
-            return _finish_pandas(tf, kept.reset_index(drop=True), names)
         names = _constant_columns(tf._lf, na_rm)
         return _finish_polars(tf, tf._lf, names)
 
@@ -348,53 +276,10 @@ def _plain_polars(dtype: Any) -> str:
     return str(dtype)
 
 
-def _pandas_class(series: Any, *, levels: Any, ordered: bool, strict: bool) -> str:
-    import pandas as pd
-
-    dtype = series.dtype
-    if isinstance(dtype, pd.CategoricalDtype) or (
-        isinstance(dtype, pd.ArrowDtype) and "dictionary" in str(dtype)
-    ):
-        if levels is None:
-            levels = list(series.cat.categories) if hasattr(series.dtype, "categories") else []
-            ordered = bool(getattr(series.dtype, "ordered", False))
-        return _factor_class(levels, ordered, strict)
-    if pd.api.types.is_bool_dtype(dtype):
-        return "logical"
-    if pd.api.types.is_integer_dtype(dtype):
-        return "integer"
-    if pd.api.types.is_float_dtype(dtype):
-        return "numeric"
-    if pd.api.types.is_datetime64_any_dtype(dtype):
-        return "POSIXct, POSIXt"
-    if pd.api.types.is_string_dtype(dtype) and not pd.api.types.is_object_dtype(dtype):
-        return "character"
-    if pd.api.types.is_object_dtype(dtype):
-        return _object_class(series)
-    return str(dtype)
-
-
-def _object_class(series: Any) -> str:
-    seen: list[Any] = []
-    for value in series.tolist():
-        if _missing(value):
-            continue
-        seen.append(value)
-        if len(seen) == 8:
-            break
-    if seen and all(type(value) is date for value in seen):
-        return "Date"
-    if seen and all(isinstance(value, datetime) for value in seen):
-        return "POSIXct, POSIXt"
-    return "character"
-
-
 def _column_class(tf: Any, name: str, strict: bool) -> str:
     recorded = tf._category_levels.get(name)
     levels = list(recorded) if recorded is not None else None
     ordered = bool(getattr(recorded, "ordered", False)) if recorded is not None else False
-    if tf._backend == "pandas":
-        return _pandas_class(tf._pdf[name], levels=levels, ordered=ordered, strict=strict)
     dtype = tf._lf.collect_schema()[name]
     if isinstance(dtype, (pl.Enum, pl.Categorical)):
         if levels is None and isinstance(dtype, pl.Enum):
@@ -518,23 +403,16 @@ def _bind_match(classes: list[str | None], method: str) -> bool:
     return all(value is None or value == anchor for value in classes[1:])
 
 
-def _class_frame(backend: str, labels: list[str], rows: list[tuple[str, list[str | None]]]) -> Any:
+def _class_frame(labels: list[str], rows: list[tuple[str, list[str | None]]]) -> Any:
     from tidy3.frame import tidy
 
     columns: dict[str, list[Any]] = {"column_name": [name for name, _classes in rows]}
     for index, label in enumerate(labels):
         columns[label] = [classes[index] for _name, classes in rows]
-    if backend == "pandas":
-        import pandas as pd
-
-        pdf = pd.DataFrame(
-            {name: pd.Series(values, dtype="string") for name, values in columns.items()}
-        )
-        return tidy(pdf, backend="pandas")
     frame = pl.DataFrame(
         {name: pl.Series(name, values, dtype=pl.String) for name, values in columns.items()}
     )
-    return tidy(frame, backend="polars")
+    return tidy(frame)
 
 
 def compare_df_cols(
@@ -580,9 +458,8 @@ def compare_df_cols(
             )
             continue
         present.append((label, frame))
-    backend = inputs[0][1].backend
     if not present:
-        return _class_frame(backend, [], [])
+        return _class_frame([], [])
     labels = [label for label, _frame in present]
     order: list[str] = []
     seen: set[str] = set()
@@ -613,7 +490,7 @@ def compare_df_cols(
     elif return_ != "all":
         want = return_ == "match"
         rows = [row for row in rows if _bind_match(row[1], bind_method) is want]
-    return _class_frame(backend, labels, rows)
+    return _class_frame(labels, rows)
 
 
 def compare_df_cols_same(
@@ -652,8 +529,6 @@ def _column_position(columns: list[str], column: Any) -> int:
 
 
 def _materialized(tf: Any) -> Any:
-    if tf._backend == "pandas":
-        return tf._pdf
     return tf._lf.collect()
 
 
@@ -811,12 +686,8 @@ def row_to_names(
             for name, levels in tf._category_levels.items()
             if name in mapping
         }
-        if isinstance(data, pl.DataFrame):
-            sliced = data[keep]
-            sliced.columns = names
-            return tf._with_lf(sliced.lazy(), groups, category_levels=levels)
-        pdf = data.iloc[keep].copy()
-        pdf.columns = names
-        return tf._with_pdf(pdf.reset_index(drop=True), groups, category_levels=levels)
+        sliced = data[keep]
+        sliced.columns = names
+        return tf._with_lf(sliced.lazy(), groups, category_levels=levels)
 
     return Verb(_apply, "row_to_names")

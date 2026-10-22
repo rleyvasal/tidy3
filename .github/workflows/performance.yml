@@ -36,7 +36,6 @@ jobs:
           --output native
           --polars-engine auto
           --budget-min-ms 5
-          --max-tidy-pandas-geo 1.35
           --max-tidy-polars-geo 1.35
       - name: Upload raw Polars report
         if: always()

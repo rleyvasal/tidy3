@@ -495,7 +495,6 @@ REASONS = {
 }
 
 METHOD_REASONS = {
-    "backend": "storage-engine label, not a query",
     "explain": "prints a query plan",
     "preview": "prints a preview",
     "show": "prints a preview",

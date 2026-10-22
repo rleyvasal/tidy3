@@ -12,21 +12,18 @@ import pytest
 from tidy3 import col, group_by, mean, mutate, recode_values, replace_values, summarise, tidy
 from tidy3.masking import COL_NAME, apply_masking
 
-BACKENDS = ["polars", "pandas"]
 STATES = {"state": ["NC", "NYC", "CA", None, "Unknown"]}
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_unmatched_error_raises_when_a_value_has_no_case(backend):
-    frame = tidy(STATES, backend=backend)
+def test_unmatched_error_raises_when_a_value_has_no_case():
+    frame = tidy(STATES)
     strict = recode_values("state", ("NC", 1), ("NYC", 2), ("CA", 3), unmatched="error")
     with pytest.raises(Exception, match="2 value\\(s\\) had no match"):
         (frame >> mutate(code=strict)).collect()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_unmatched_error_passes_when_every_value_matches(backend):
-    frame = tidy(STATES, backend=backend)
+def test_unmatched_error_passes_when_every_value_matches():
+    frame = tidy(STATES)
     strict = recode_values(
         "state", ("NC", 1), (["NYC", "CA"], 2), (["Unknown", None], 0), unmatched="error"
     )
@@ -34,9 +31,8 @@ def test_unmatched_error_passes_when_every_value_matches(backend):
     assert out["code"].tolist() == [1, 2, 2, 0, 0]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_lookup_table_recycles_a_single_target(backend):
-    frame = tidy(STATES, backend=backend)
+def test_lookup_table_recycles_a_single_target():
+    frame = tidy(STATES)
     out = (
         frame >> mutate(east=replace_values("state", from_=["NC", "NYC"], to="east"))
     ).collect(as_="pandas")
@@ -77,22 +73,20 @@ def test_case_values_and_none_match_missing():
     assert out["flag"].tolist() == ["ok", "ok", "ok", "missing", "ok"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_case_match_none_matches_missing_values(backend):
+def test_case_match_none_matches_missing_values():
     from tidy3 import case_match
 
     out = (
-        tidy(STATES, backend=backend)
+        tidy(STATES)
         >> mutate(flag=case_match("state", (None, "missing"), default="ok"))
     ).collect(as_="pandas")
     assert out["flag"].tolist() == ["ok", "ok", "ok", "missing", "ok"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_case_when_unmatched_error_counts_missing_as_unmatched(backend):
+def test_case_when_unmatched_error_counts_missing_as_unmatched():
     from tidy3 import case_when
 
-    frame = tidy({"x": [5.0, None, 15.0, 25.0]}, backend=backend)
+    frame = tidy({"x": [5.0, None, 15.0, 25.0]})
     strict = case_when(
         (col("x") < 10, "ten"), (col("x") < 20, "twenty"), unmatched="error"
     )
@@ -102,7 +96,6 @@ def test_case_when_unmatched_error_counts_missing_as_unmatched(backend):
         case_when((col("x") < 10, "ten"), default="other", unmatched="error")
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize(
     ("label", "pipeline", "size"),
     [
@@ -112,7 +105,7 @@ def test_case_when_unmatched_error_counts_missing_as_unmatched(backend):
         ("ungrouped", lambda t: t >> summarise(r=col("x")), 3),
     ],
 )
-def test_summarise_must_give_one_value_per_group(backend, label, pipeline, size):
-    frame = tidy({"g": ["a", "a", "b"], "x": [1.0, 2.0, 3.0]}, backend=backend)
+def test_summarise_must_give_one_value_per_group(label, pipeline, size):
+    frame = tidy({"g": ["a", "a", "b"], "x": [1.0, 2.0, 3.0]})
     with pytest.raises(Exception, match=f"`r` must be size 1, not {size}.*reframe"):
         pipeline(frame).collect()

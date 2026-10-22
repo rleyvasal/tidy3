@@ -265,7 +265,7 @@ def test_pandas_date_list_and_dict_columns_are_not_text():
     })
     for predicate, wanted in ((t.is_character, ["s"]), (t.is_datetime, ["day"]), (t.is_temporal, ["day"])):
         found = {
-            backend: (t.tidy(source, backend=backend) >> t.select(t.where(predicate))).collect().columns
+            backend: (t.tidy(source) >> t.select(t.where(predicate))).collect().columns
             for backend in ("polars", "pandas")
         }
         assert found == {"polars": wanted, "pandas": wanted}

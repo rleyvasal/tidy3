@@ -9,12 +9,10 @@ import pytest
 
 import tidy3 as t
 
-BACKENDS = ["polars", "pandas"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_calendar_components_and_iso_year_boundaries(backend):
-    frame = t.tidy({"d": [date(2020, 12, 31), date(2021, 1, 1), date(2021, 1, 4), date(2024, 2, 29), None]}, backend=backend)
+def test_calendar_components_and_iso_year_boundaries():
+    frame = t.tidy({"d": [date(2020, 12, 31), date(2021, 1, 1), date(2021, 1, 4), date(2024, 2, 29), None]})
     out = (frame >> t.mutate(
         day=t.yday("d"), week=t.week("d"), iso=t.isoweek("d"),
         sunday=t.wday("d"), monday=t.wday("d", week_start=1), q=t.quarter("d"),
@@ -27,10 +25,9 @@ def test_calendar_components_and_iso_year_boundaries(backend):
     assert out["q"].to_list() == [4, 1, 1, 1, None]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("start", range(1, 8))
-def test_weekday_labels_order_and_unused_levels(backend, start):
-    frame = t.tidy({"d": [date(2024, 1, 1), None]}, backend=backend)
+def test_weekday_labels_order_and_unused_levels(start):
+    frame = t.tidy({"d": [date(2024, 1, 1), None]})
     frame = frame >> t.mutate(day=t.wday("d", label=True, abbr=False, week_start=start))
     day = frame.collect(as_="pandas")["day"]
     names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -41,12 +38,11 @@ def test_weekday_labels_order_and_unused_levels(backend, start):
     assert (frame >> t.count("day", drop=False)).collect().height == 8
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_weekday_labels_replace_previous_factor_metadata(backend):
+def test_weekday_labels_replace_previous_factor_metadata():
     frame = t.tidy(pd.DataFrame({
         "day": pd.Categorical(["old"], categories=["old", "unused"]),
         "date": [date(2024, 1, 1)],
-    }), backend=backend)
+    }))
     frame = frame >> t.mutate(day=t.wday("date", label=True))
     labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
     assert frame._category_levels["day"] == labels
@@ -55,9 +51,8 @@ def test_weekday_labels_replace_previous_factor_metadata(backend):
     assert counted["n"].to_list() == [0, 1, 0, 0, 0, 0, 0]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_quarter_types_and_fiscal_ending_year(backend):
-    frame = t.tidy({"d": [date(2024, 1, 1), date(2024, 11, 1), date(2024, 12, 31), None]}, backend=backend)
+def test_quarter_types_and_fiscal_ending_year():
+    frame = t.tidy({"d": [date(2024, 1, 1), date(2024, 11, 1), date(2024, 12, 31), None]})
     out = (frame >> t.mutate(
         q=t.quarter("d", fiscal_start=11),
         year=t.quarter("d", type="year.quarter", fiscal_start=11),
@@ -72,13 +67,12 @@ def test_quarter_types_and_fiscal_ending_year(backend):
     assert out["description"].to_list() == ["2023/24 Q1", "2024/25 Q1", "2024/25 Q1", "NA/NA QNA"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_clock_fields_preserve_local_time_and_fractional_seconds(backend):
+def test_clock_fields_preserve_local_time_and_fractional_seconds():
     zone = ZoneInfo("America/Los_Angeles")
     frame = t.tidy({"d": [
         datetime(2024, 3, 10, 3, 4, 56, 123456, tzinfo=zone),
         datetime(2024, 1, 1, 23, 59, 59, 500000, tzinfo=zone), None,
-    ]}, backend=backend)
+    ]})
     out = (frame >> t.mutate(h=t.hour("d"), m=t.minute("d"), s=t.second("d"), weekday=t.wday("d"))).collect()
     assert out["h"].to_list() == [3, 23, None]
     assert out["m"].to_list() == [4, 59, None]
@@ -86,18 +80,16 @@ def test_clock_fields_preserve_local_time_and_fractional_seconds(backend):
     assert out["weekday"].to_list() == [1, 2, None]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_date_clock_fields_are_zero_and_missing_stays_missing(backend):
-    frame = t.tidy({"d": [date(2024, 1, 1), None]}, backend=backend)
+def test_date_clock_fields_are_zero_and_missing_stays_missing():
+    frame = t.tidy({"d": [date(2024, 1, 1), None]})
     out = (frame >> t.mutate(h=t.hour("d"), m=t.minute("d"), s=t.second("d"))).collect()
     assert out["h"].to_list() == [0, None]
     assert out["m"].to_list() == [0, None]
     assert out["s"].to_list() == [0., None]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_components_in_grouped_summaries_across_and_filter(backend):
-    frame = t.tidy({"g": ["a", "a", "b"], "d": [date(2024, 1, 1), date(2024, 2, 29), date(2024, 7, 1)]}, backend=backend)
+def test_components_in_grouped_summaries_across_and_filter():
+    frame = t.tidy({"g": ["a", "a", "b"], "d": [date(2024, 1, 1), date(2024, 2, 29), date(2024, 7, 1)]})
     grouped = frame >> t.group_by("g") >> t.summarise(day=t.yday(t.first("d")), weekday=t.wday(t.first("d"), label=True))
     assert grouped.collect()["day"].to_list() == [1, 183]
     assert grouped.collect()["weekday"].to_list() == ["Mon", "Mon"]
@@ -106,28 +98,25 @@ def test_components_in_grouped_summaries_across_and_filter(backend):
     assert (frame >> t.filter(t.yday("d") > 100)).collect()["g"].to_list() == ["b"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_empty_temporal_columns(backend):
-    frame = t.tidy(pl.DataFrame({"d": pl.Series([], dtype=pl.Datetime("ns"))}), backend=backend)
+def test_empty_temporal_columns():
+    frame = t.tidy(pl.DataFrame({"d": pl.Series([], dtype=pl.Datetime("ns"))}))
     out = frame >> t.mutate(w=t.wday("d", label=True), s=t.second("d"), q=t.quarter("d"))
     assert out.collect(as_="pandas").empty
     assert len(out.collect(as_="pandas")["w"].cat.categories) == 7
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("values", [[], [None, None]])
-def test_empty_and_missing_quarter_boundaries_stay_dates(backend, values):
-    frame = t.tidy(pl.DataFrame({"d": pl.Series(values, dtype=pl.Date)}), backend=backend)
+def test_empty_and_missing_quarter_boundaries_stay_dates(values):
+    frame = t.tidy(pl.DataFrame({"d": pl.Series(values, dtype=pl.Date)}))
     out = (frame >> t.mutate(first=t.quarter("d", type="date_first"), last=t.quarter("d", type="date_last"))).collect()
     assert out.schema["first"] == pl.Date
     assert out.schema["last"] == pl.Date
     assert out["first"].to_list() == values
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_fractional_seconds_include_nanoseconds(backend):
+def test_fractional_seconds_include_nanoseconds():
     source = pd.DataFrame({"d": pd.to_datetime(["2024-01-01 12:34:56.123456789", None])})
-    out = (t.tidy(source, backend=backend) >> t.mutate(s=t.second("d"))).collect()
+    out = (t.tidy(source) >> t.mutate(s=t.second("d"))).collect()
     assert out["s"][0] == pytest.approx(56.123456789, abs=1e-12)
     assert out["s"][1] is None
 

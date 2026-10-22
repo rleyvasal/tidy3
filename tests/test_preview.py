@@ -48,7 +48,7 @@ def test_preview_shape_is_the_whole_frame_like_a_tibble():
     # A filtered lazy frame shows 10 rows, but its shape is all 30 matches.
     data = {"name": [f"chevrolet {i}" for i in range(30)] + ["ford"] * 5}
     for backend in ("polars", "pandas"):
-        tf = tidy(data, backend=backend) >> filter(col("name") != "ford")
+        tf = tidy(data) >> filter(col("name") != "ford")
         text = repr(tf)
         assert "shape: (30, 1)" in text
         assert text.endswith("… 20 more rows")
@@ -88,7 +88,7 @@ def test_show_and_preview_rows_print_every_requested_row(capsys):
     # 50 state codes: Polars' own printer stops at 10, the HTML table used to stop at 25.
     states = {"abb": [f"S{i:02d}" for i in range(50)], "x": list(range(50))}
     for backend in ("polars", "pandas"):
-        tf = tidy(states, backend=backend)
+        tf = tidy(states)
         tf.show(50)
         assert _shown_rows(capsys.readouterr().out) == 50
         options(preview_rows=50)

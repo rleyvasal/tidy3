@@ -1,8 +1,7 @@
 """Polars-relative speed guards for column functions, groups, and joins.
 
 Two kinds of check. The structural ones are exact and never flaky: common
-text shapes convert natively, without the per-value Python rules, on both
-backends. The timing ones compare each function with
+text shapes convert natively, without the per-value Python rules. The timing ones compare each function with
 the native operation that does the same job, timed on the same machine in
 the same run, so a function that falls back to a Python loop (100 times
 slower or more) fails while ordinary machine noise does not.
@@ -25,7 +24,6 @@ import pytest
 import tidy3 as t3
 from tidy3 import mutate, tidy
 
-BACKENDS = ("polars", "pandas")
 
 # Common shapes per function. Number and logical cases include a failure,
 # which the grammar settles natively; date cases hold only valid dates,
@@ -53,9 +51,8 @@ CANONICAL: list[tuple[str, Callable[[], Any], list[Any]]] = [
 ]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("name, build, values", CANONICAL, ids=[case[0] for case in CANONICAL])
-def test_common_shapes_skip_the_per_value_rules(monkeypatch, backend, name, build, values):
+def test_common_shapes_skip_the_per_value_rules(monkeypatch, name, build, values):
     from tidy3 import convert
 
     def per_value(*args: Any, **kwargs: Any) -> Any:
@@ -63,10 +60,9 @@ def test_common_shapes_skip_the_per_value_rules(monkeypatch, backend, name, buil
 
     monkeypatch.setattr(convert, "_per_value", per_value)
     monkeypatch.setattr(convert, "convert_batch", per_value)
-    frame = tidy({"x": values}, backend=backend) >> mutate(y=build())
+    frame = tidy({"x": values}) >> mutate(y=build())
     frame.collect()
-    if backend == "polars":
-        t3.problems(frame).collect()
+    t3.problems(frame).collect()
 
 
 def test_uniform_dates_and_numbers_skip_the_general_text_parser(monkeypatch):
@@ -100,12 +96,11 @@ def test_uniform_dates_and_numbers_skip_the_general_text_parser(monkeypatch):
     assert t3.problems(frame).collect().height == 0
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_text_of_numbers_skips_the_per_value_rules(monkeypatch, backend):
+def test_text_of_numbers_skips_the_per_value_rules(monkeypatch):
     from tidy3 import convert
 
     monkeypatch.setattr(convert, "_character", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
-    frame = tidy({"x": [1.5, None, 3.0], "b": [True, False, None]}, backend=backend)
+    frame = tidy({"x": [1.5, None, 3.0], "b": [True, False, None]})
     (frame >> mutate(x=t3.as_string("x"), b=t3.as_string("b"))).collect()
 
 
@@ -174,11 +169,10 @@ TIMED: list[tuple[str, Callable[[], Any], Callable[[pl.DataFrame], Any]]] = [
 
 
 @timing
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("name, build, native", TIMED, ids=[case[0] for case in TIMED])
-def test_function_speed_is_close_to_native(data, backend, name, build, native, record_property):
-    frame = tidy(data if backend == "polars" else data.to_pandas(), backend=backend)
-    # Match native(data): materialize only the converted column on either backend.
+def test_function_speed_is_close_to_native(data, name, build, native, record_property):
+    frame = tidy(data)
+    # Match native(data): materialize only the converted column.
     run = lambda: (frame >> mutate(out=build())).collect(columns="out")
     expected = native(data)
     expected = expected.rename({expected.columns[0]: "out"})
@@ -189,7 +183,7 @@ def test_function_speed_is_close_to_native(data, backend, name, build, native, r
     budget = max(RATIO * baseline, FLOOR)
     record_property("ci_budget_ms", budget * 1000)
     assert elapsed <= budget, (
-        f"{name}() on {backend} took {elapsed * 1000:.0f} ms for {ROWS:,} rows; "
+        f"{name}() took {elapsed * 1000:.0f} ms for {ROWS:,} rows; "
         f"native takes {baseline * 1000:.1f} ms, budget {budget * 1000:.0f} ms"
     )
 
@@ -238,8 +232,8 @@ def grouped_data() -> pl.DataFrame:
     )
 
 
-def _grouped_frame(data: pl.DataFrame, backend: str):
-    return tidy(data if backend == "polars" else data.to_pandas(), backend=backend)
+def _grouped_frame(data: pl.DataFrame):
+    return tidy(data)
 
 
 VECTORIZED_SLICES: list[tuple[str, Callable[[], Any]]] = [
@@ -251,47 +245,6 @@ VECTORIZED_SLICES: list[tuple[str, Callable[[], Any]]] = [
     ("slice_sample", lambda: t3.slice_sample(n=1, seed=1)),
     ("sample_n", lambda: t3.sample_n(1, seed=1)),
 ]
-
-
-@pytest.mark.parametrize("name, verb", VECTORIZED_SLICES, ids=[case[0] for case in VECTORIZED_SLICES])
-def test_pandas_grouped_slices_skip_the_per_group_loop(monkeypatch, name, verb):
-    from tidy3 import pandas_engine
-
-    def per_group(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError(f"{name}() split the frame group by group")
-
-    monkeypatch.setattr(pandas_engine, "_group_pieces", per_group)
-    frame = tidy({"g": [1, 1, 2, 2, 2], "mass": [3.0, 5.0, 4.0, 4.0, 1.0]}, backend="pandas")
-    (frame >> t3.group_by("g") >> verb()).collect()
-
-
-def test_pandas_one_value_reframe_skips_the_per_group_loop(monkeypatch):
-    from tidy3 import pandas_engine
-
-    monkeypatch.setattr(pandas_engine, "_group_pieces", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
-    frame = tidy({"g": [1, 1, 2], "mass": [3.0, 5.0, 4.0]}, backend="pandas")
-    (frame >> t3.reframe(m=t3.median("mass"), k=t3.n(), by="g")).collect()
-
-
-@pytest.mark.parametrize(
-    "build",
-    [
-        lambda f: f >> t3.group_by("g") >> t3.summarise(m=t3.mean("mass"), s=t3.sum("mass", na_rm=True, min_count=2)),
-        lambda f: f >> t3.group_by("g") >> t3.summarise(a=t3.first("mass"), z=t3.last("mass")),
-        lambda f: f >> t3.group_by("g") >> mutate(m=t3.mean("mass"), s=t3.sum("mass", na_rm=True, min_count=2)),
-        lambda f: f >> t3.group_by("g") >> t3.filter(t3.col("mass") > t3.mean("mass")),
-    ],
-    ids=["summarise", "first_last", "window", "filter"],
-)
-def test_pandas_grouped_aggregates_skip_python_apply(monkeypatch, build):
-    from pandas.core.groupby import SeriesGroupBy
-
-    def per_group(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("a grouped aggregate called a Python function per group")
-
-    monkeypatch.setattr(SeriesGroupBy, "apply", per_group)
-    frame = tidy({"g": [1, 1, 2, 2], "mass": [3.0, None, 4.0, 6.0]}, backend="pandas")
-    build(frame).collect()
 
 
 GROUPED_TIMED: list[tuple[str, Callable[[Any], Any], float]] = [
@@ -318,7 +271,7 @@ def _record_comparison(record_property, elapsed, baseline):
     record_property("tidy3_over_polars", elapsed / baseline)
 
 
-def _native_grouped(data, name, backend):
+def _native_grouped(data, name):
     """Independent Polars recipes for these fixed benchmark parameters."""
     if name.startswith("fct_"):
         if name == "fct_reorder":
@@ -339,8 +292,6 @@ def _native_grouped(data, name, backend):
         out = data.filter(pl.col("mass") == pl.col("mass").max().over("g")).sort("g", maintain_order=True)
     elif name == "slice_head":
         out = data.filter(pl.int_range(pl.len()).over("g") < 2)
-        if backend == "pandas":
-            out = out.sort("g", maintain_order=True)
     elif name == "slice_sample":
         out = data.group_by("g", maintain_order=True).agg(
             pl.struct(pl.exclude("g")).sample(n=1, seed=1).alias("sample"),
@@ -355,18 +306,6 @@ def _native_grouped(data, name, backend):
         out = data.filter(pl.col("mass") > pl.col("mass").mean().over("g"))
     else:
         out = data.group_by("g", maintain_order=True).agg(pl.struct(pl.exclude("g")).alias("data"))
-        if backend == "pandas":
-            # Common output contract: a pandas DataFrame in every nested cell.
-            sizes = out["data"].list.len().to_numpy()
-            body = out.select("data").explode("data", empty_as_null=True).unnest("data").to_pandas()
-            stops = np.cumsum(sizes)
-            frames = [body.iloc[int(start):int(stop)].reset_index(drop=True)
-                      for start, stop in zip(np.r_[0, stops[:-1]], stops)]
-            return pd.DataFrame({"g": out["g"].to_numpy(), "data": frames})
-    if backend == "pandas":
-        out = out.to_pandas()
-        if name.startswith("fct_"):
-            out["s"] = out["s"].cat.as_unordered()
     return out
 
 
@@ -396,25 +335,22 @@ def _assert_grouped_equivalent(actual, expected, name, data):
 
 
 @timing
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("name, build, floor", GROUPED_TIMED, ids=[case[0] for case in GROUPED_TIMED])
-def test_many_groups_speed(grouped_data, backend, name, build, floor, record_property):
-    frame = _grouped_frame(grouped_data, backend)
+def test_many_groups_speed(grouped_data, name, build, floor, record_property):
+    frame = _grouped_frame(grouped_data)
 
     def run() -> Any:
         result = build(frame)
-        return result.collect(as_="pandas") if backend == "pandas" else result.collect()
+        return result.collect()
 
-    native = lambda: _native_grouped(grouped_data, name, backend)
+    native = lambda: _native_grouped(grouped_data, name)
     _assert_grouped_equivalent(run(), native(), name, grouped_data)
     elapsed, baseline = _best(run), _best(native)
     _record_comparison(record_property, elapsed, baseline)
-    ratio = 2 if backend == "pandas" and name in {"group_nest", "nest_by"} else RATIO
-    budget = max(ratio * baseline, floor)
+    budget = max(RATIO * baseline, floor)
     record_property("ci_budget_ms", budget * 1000)
-    record_property("materialization", backend)
     assert elapsed <= budget, (
-        f"{name} on {backend} with {GROUPS:,} groups took {elapsed * 1000:.0f} ms; "
+        f"{name} with {GROUPS:,} groups took {elapsed * 1000:.0f} ms; "
         f"raw Polars {baseline * 1000:.1f} ms ({elapsed / baseline:.2f}x); budget {budget * 1000:.0f} ms"
     )
 

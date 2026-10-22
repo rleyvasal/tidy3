@@ -37,10 +37,9 @@ def test_guessed_csv_types_honor_strict(tmp_path):
         t.read_csv(path, strict=True)
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
 @pytest.mark.parametrize("grouped", [False, True])
-def test_string_helpers_preserve_summary_size(backend, grouped):
-    cars = t.tidy({"cyl": [4, 4, 6], "model": ["Datsun", "Toyota", "Mazda"]}, backend=backend)
+def test_string_helpers_preserve_summary_size(grouped):
+    cars = t.tidy({"cyl": [4, 4, 6], "model": ["Datsun", "Toyota", "Mazda"]})
     if grouped:
         cars = cars >> t.group_by("cyl")
     out = cars >> t.summarise(
@@ -63,33 +62,18 @@ def test_round_preserves_float32_and_missing_values():
     assert out["r"].to_list() == pytest.approx([1.2, 2.8, None], nan_ok=True)
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
 @pytest.mark.parametrize("digits", [309, -309, 324, -1000])
-def test_round_extreme_digits(backend, digits):
-    frame = t.tidy({"x": [1.25, -1.25, 0.0, float("inf"), None]}, backend=backend)
+def test_round_extreme_digits(digits):
+    frame = t.tidy({"x": [1.25, -1.25, 0.0, float("inf"), None]})
     out = (frame >> t.mutate(r=t.round("x", digits))).collect(as_="pandas")
     assert out["r"].tolist()[:4] == ([1.25, -1.25, 0.0, float("inf")] if digits > 0 else [0.0, 0.0, 0.0, float("inf")])
     assert pd.isna(out["r"].iloc[-1])
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
-def test_round_subnormal_numbers(backend):
-    frame = t.tidy({"x": [1.25e-310, -1.25e-310, 1.75e-310]}, backend=backend)
+def test_round_subnormal_numbers():
+    frame = t.tidy({"x": [1.25e-310, -1.25e-310, 1.75e-310]})
     out = (frame >> t.mutate(r=t.round("x", 310))).collect(as_="pandas")
     np.testing.assert_array_equal(out["r"].to_numpy(), [1e-310, -1e-310, 2e-310])
-
-
-def test_pandas_pair_and_row_helpers_support_pandas_20(monkeypatch):
-    monkeypatch.delattr(pd.DataFrame, "map", raising=False)
-    frame = t.tidy({"x": [1.0, None], "y": [2.0, 3.0]}, backend="pandas")
-    out = (frame >> t.mutate(
-        lo=t.pmin("x", "y", na_rm=True), hi=t.pmax("x", "y", na_rm=True),
-        total=t.row_sums("x", "y", na_rm=True), avg=t.row_means("x", "y", na_rm=True),
-    )).collect(as_="pandas")
-    assert out["lo"].tolist() == [1.0, 3.0]
-    assert out["hi"].tolist() == [2.0, 3.0]
-    assert out["total"].tolist() == [3.0, 3.0]
-    assert out["avg"].tolist() == [1.5, 3.0]
 
 
 def test_import_from_repository_root_has_one_package_identity():

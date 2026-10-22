@@ -16,7 +16,6 @@ import tidy3 as t
 from tidy3.expr import Expr
 
 
-BACKENDS = ["polars", "pandas"]
 UTC = ZoneInfo("UTC")
 
 
@@ -28,8 +27,7 @@ def _clock(value):
     return value
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_remove_empty_keeps_blanks_and_drops_missing(backend, capsys):
+def test_remove_empty_keeps_blanks_and_drops_missing(capsys):
     frame = t.tidy(
         {
             "a": [1.0, None, 2.0, None],
@@ -37,7 +35,6 @@ def test_remove_empty_keeps_blanks_and_drops_missing(backend, capsys):
             "c": ["x", None, "", "y"],
             "d": [None, None, 1.0, None],
         },
-        backend=backend,
     )
     out = (frame >> t.remove_empty()).collect()
     assert capsys.readouterr().out == ""
@@ -53,35 +50,26 @@ def test_remove_empty_keeps_blanks_and_drops_missing(backend, capsys):
     assert frame.remove_empty("cols").columns == ["a", "c", "d"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_remove_empty_cutoff_rules_and_zero_frames(backend):
+def test_remove_empty_cutoff_rules_and_zero_frames():
     with pytest.raises(ValueError, match="only one"):
         t.remove_empty(cutoff=0.5)
     with pytest.raises(ValueError, match="cutoff"):
         t.remove_empty(cutoff=0)
-    empty = t.tidy(pd.DataFrame(), backend=backend)
+    empty = t.tidy(pd.DataFrame())
     with pytest.raises(ValueError, match="at least one column"):
         empty >> t.remove_empty("rows", cutoff=0.5)
     no_rows = t.tidy(
-        pd.DataFrame({"a": pd.Series([], dtype="float64")}), backend=backend
+        pd.DataFrame({"a": pd.Series([], dtype="float64")})
     )
     with pytest.raises(ValueError, match="at least one row"):
         no_rows >> t.remove_empty("cols", cutoff=0.5)
     dropped = no_rows >> t.remove_empty("cols")
     assert dropped.shape == (0, 0)
-    blank = t.tidy({"a": ["", ""], "b": [None, None]}, backend=backend)
+    blank = t.tidy({"a": ["", ""], "b": [None, None]})
     assert (blank >> t.remove_empty()).collect()["a"].to_list() == ["", ""]
 
 
-def test_remove_empty_zero_column_pandas_rows():
-    frame = t.tidy(pd.DataFrame(index=range(3)), backend="pandas")
-    assert frame.shape == (3, 0)
-    assert (frame >> t.remove_empty("rows")).shape == (0, 0)
-    assert t.find_header(frame) == 1
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_remove_constant_na_and_factors(backend):
+def test_remove_constant_na_and_factors():
     frame = t.tidy(
         pd.DataFrame(
             {
@@ -91,7 +79,6 @@ def test_remove_constant_na_and_factors(backend):
                 "allna": pd.Series([None, None, None], dtype="float64"),
             }
         ),
-        backend=backend,
     )
     assert (frame >> t.remove_constant()).columns == ["mix", "vary"]
     assert frame.remove_constant(na_rm=True).columns == ["vary"]
@@ -103,44 +90,30 @@ def test_remove_constant_na_and_factors(backend):
             ),
         }
     )
-    kept = t.tidy(source, backend=backend) >> t.remove_constant()
+    kept = t.tidy(source) >> t.remove_constant()
     assert kept.columns == ["both"]
     assert kept._category_levels["both"] == ["a", "b", "c"]
     assert kept._category_levels["both"].ordered is True
     assert "only" not in kept._category_levels
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_remove_constant_all_missing_nan_follows_the_backend(backend):
-    if backend == "polars":
-        frame = t.tidy(pl.DataFrame({"a": [float("nan"), None], "b": [1.0, 2.0]}))
-        assert (frame >> t.remove_constant()).columns == ["a", "b"]
-    else:
-        frame = t.tidy(
-            pd.DataFrame({"a": [float("nan"), None], "b": [1.0, 2.0]}),
-            backend="pandas",
-        )
-        assert (frame >> t.remove_constant()).columns == ["b"]
+def test_remove_constant_all_missing_nan_follows_the_backend():
+    frame = t.tidy(pl.DataFrame({"a": [float("nan"), None], "b": [1.0, 2.0]}))
+    assert (frame >> t.remove_constant()).columns == ["a", "b"]
     assert (frame >> t.remove_constant(na_rm=True)).columns == ["b"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_dropping_every_column_keeps_pandas_rows_only(backend):
-    emptied = t.tidy({"a": [1, 1], "b": ["x", "x"]}, backend=backend) >> t.remove_constant()
+def test_dropping_every_column_keeps_pandas_rows_only():
+    emptied = t.tidy({"a": [1, 1], "b": ["x", "x"]}) >> t.remove_constant()
     removed = (
-        t.tidy({"a": [None, None], "b": [None, None]}, backend=backend)
+        t.tidy({"a": [None, None], "b": [None, None]})
         >> t.remove_empty("cols")
     )
-    if backend == "pandas":
-        assert emptied.shape == (2, 0)
-        assert removed.shape == (2, 0)
-    else:
-        assert emptied.shape == (0, 0)
-        assert removed.shape == (0, 0)
+    assert emptied.shape == (0, 0)
+    assert removed.shape == (0, 0)
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_cleaning_preserves_groups_levels_and_problems(backend):
+def test_cleaning_preserves_groups_levels_and_problems():
     source = pd.DataFrame(
         {
             "g": pd.Categorical(
@@ -152,7 +125,7 @@ def test_cleaning_preserves_groups_levels_and_problems(backend):
         }
     )
     frame = (
-        t.tidy(source, backend=backend)
+        t.tidy(source)
         >> t.group_by("g", drop=False)
         >> t.mutate(parsed=t.parse_integer("raw"))
     )
@@ -164,14 +137,14 @@ def test_cleaning_preserves_groups_levels_and_problems(backend):
     assert out._category_levels["g"] == ["a", "b", "unused"]
     assert out._category_levels["g"].ordered is True
     assert t.problems(out).collect()["original"].to_list() == ["bad"]
-    grouped = t.tidy({"g": ["a", "a"], "x": [1, 2]}, backend=backend) >> t.group_by(
+    grouped = t.tidy({"g": ["a", "a"], "x": [1, 2]}) >> t.group_by(
         "g", "x", drop=False
     )
     dropped = grouped >> t.remove_constant()
     assert dropped.columns == ["x"]
     assert dropped._groups == ["x"]
     assert dropped._group_drop is False
-    rowwise = t.tidy({"a": [1.0, None], "b": ["x", "y"]}, backend=backend) >> t.rowwise()
+    rowwise = t.tidy({"a": [1.0, None], "b": ["x", "y"]}) >> t.rowwise()
     assert (rowwise >> t.remove_empty("rows"))._rowwise is True
 
 
@@ -186,8 +159,7 @@ def test_remove_empty_rows_stays_lazy(monkeypatch):
     assert out.columns == ["a", "b"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_compare_df_cols_match_rules_and_order(backend, capsys):
+def test_compare_df_cols_match_rules_and_order(capsys):
     old = t.tidy(
         pd.DataFrame(
             {
@@ -196,7 +168,6 @@ def test_compare_df_cols_match_rules_and_order(backend, capsys):
                 "B": pd.Series([1], dtype="int64"),
             }
         ),
-        backend=backend,
     )
     new = t.tidy(
         pd.DataFrame(
@@ -207,7 +178,6 @@ def test_compare_df_cols_match_rules_and_order(backend, capsys):
                 "C": pd.Series(["x"], dtype="string"),
             }
         ),
-        backend=backend,
     )
     compared = t.compare_df_cols(old=old, new=new).collect()
     assert capsys.readouterr().out == ""
@@ -229,18 +199,18 @@ def test_compare_df_cols_match_rules_and_order(backend, capsys):
     with pytest.raises(ValueError, match="column_name"):
         t.compare_df_cols(column_name=old)
     with pytest.warns(UserWarning, match="zero columns"):
-        empty = t.compare_df_cols(old=t.tidy(pd.DataFrame(), backend=backend), new=new)
+        empty = t.compare_df_cols(old=t.tidy(pd.DataFrame()), new=new)
     assert empty.columns == ["column_name", "new"]
     assert t.compare_df_cols_same(
-        t.tidy({"A": [1.0]}, backend=backend),
-        t.tidy({"B": [2.0]}, backend=backend),
+        t.tidy({"A": [1.0]}),
+        t.tidy({"B": [2.0]}),
         verbose=True,
     ) is True
     assert capsys.readouterr().out == ""
     assert (
         t.compare_df_cols_same(
-            t.tidy({"A": [1.0]}, backend=backend),
-            t.tidy({"B": [2.0]}, backend=backend),
+            t.tidy({"A": [1.0]}),
+            t.tidy({"B": [2.0]}),
             bind_method="rbind",
             verbose=False,
         )
@@ -251,16 +221,15 @@ def test_compare_df_cols_match_rules_and_order(backend, capsys):
     with pytest.warns(UserWarning, match="zero columns"):
         assert (
             t.compare_df_cols_same(
-                t.tidy(pd.DataFrame(), backend=backend),
-                t.tidy(pd.DataFrame(), backend=backend),
+                t.tidy(pd.DataFrame()),
+                t.tidy(pd.DataFrame()),
                 verbose=False,
             )
             is True
         )
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_compare_df_cols_strict_factors_and_describe_class(backend):
+def test_compare_df_cols_strict_factors_and_describe_class():
     fac = t.tidy(
         pd.DataFrame(
             {
@@ -269,13 +238,12 @@ def test_compare_df_cols_strict_factors_and_describe_class(backend):
                 )
             }
         ),
-        backend=backend,
     )
     strict = t.compare_df_cols(fac=fac, strict_description=True).collect()
     loose = t.compare_df_cols(fac=fac).collect()
     assert strict["fac"].to_list() == ['ordered, factor(levels=c("y", "x"))']
     assert loose["fac"].to_list() == ["factor"]
-    dates = t.tidy({"d": [date(2020, 1, 2), None]}, backend=backend)
+    dates = t.tidy({"d": [date(2020, 1, 2), None]})
     assert t.compare_df_cols(dates=dates).collect()["dates"].to_list() == ["Date"]
     assert t.describe_class(1) == "integer"
     assert t.describe_class(1.0) == "numeric"
@@ -305,8 +273,7 @@ def test_compare_df_cols_does_not_collect(monkeypatch):
     assert out.columns == ["column_name", "old", "new"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_row_to_names_and_find_header(backend):
+def test_row_to_names_and_find_header():
     headers = t.tidy(
         pd.DataFrame(
             {
@@ -314,25 +281,24 @@ def test_row_to_names_and_find_header(backend):
                 "b": pd.Series([None, "x"], dtype="string"),
             }
         ),
-        backend=backend,
     )
     named = headers >> t.row_to_names(1)
     assert named.columns == ["id", "NA"]
     assert named.collect()["id"].to_list() == ["1"]
     assert named.collect()["NA"].to_list() == ["x"]
     numbers = t.tidy(
-        pd.DataFrame({"n": pd.Series([1.0, 9.0], dtype="float64")}), backend=backend
+        pd.DataFrame({"n": pd.Series([1.0, 9.0], dtype="float64")})
     )
     assert (numbers >> t.row_to_names(1)).columns == ["1"]
-    flags = t.tidy(pd.DataFrame({"flag": [True, False]}), backend=backend)
+    flags = t.tidy(pd.DataFrame({"flag": [True, False]}))
     assert (flags >> t.row_to_names(1)).columns == ["TRUE"]
     assert (flags >> t.row_to_names(1)).collect()["TRUE"].to_list() == [False]
-    duplicated = t.tidy({"a": ["id", "v"], "b": ["id", "w"]}, backend=backend)
+    duplicated = t.tidy({"a": ["id", "v"], "b": ["id", "w"]})
     with pytest.warns(UserWarning, match="unique"):
         repaired = duplicated.row_to_names(1)
     assert repaired.columns == ["id", "id_2"]
     sheet = t.tidy(
-        {"a": [None, "h1", "1"], "b": ["a", "h2", "2"]}, backend=backend
+        {"a": [None, "h1", "1"], "b": ["a", "h2", "2"]}
     )
     assert sheet.find_header() == 2
     assert t.find_header(sheet, value="h2", column="b") == 2
@@ -340,7 +306,7 @@ def test_row_to_names_and_find_header(backend):
     found = sheet >> t.row_to_names("find_header")
     assert found.columns == ["h1", "h2"]
     assert found.collect()["h1"].to_list() == ["1"]
-    kept = t.tidy({"a": ["skip", "id", "v"]}, backend=backend) >> t.row_to_names(
+    kept = t.tidy({"a": ["skip", "id", "v"]}) >> t.row_to_names(
         2, remove_rows_above=False
     )
     assert kept.collect()["id"].to_list() == ["skip", "v"]
@@ -349,9 +315,9 @@ def test_row_to_names_and_find_header(backend):
     with pytest.raises(TypeError, match="find_header"):
         t.row_to_names(1, value="id")
     with pytest.raises(ValueError, match="No complete rows"):
-        t.find_header(t.tidy({"a": [None, None]}, backend=backend))
+        t.find_header(t.tidy({"a": [None, None]}))
     with pytest.warns(UserWarning, match="found 2 times"):
-        assert t.find_header(t.tidy({"a": ["q", "q", "z"]}, backend=backend), value="q") == 1
+        assert t.find_header(t.tidy({"a": ["q", "q", "z"]}), value="q") == 1
 
 
 def test_excel_numeric_to_date_serials_and_mutate():
@@ -391,21 +357,20 @@ def test_excel_numeric_to_date_serials_and_mutate():
         t.excel_numeric_to_date(1, date_system="windows")
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_excel_numeric_to_date_in_mutate(backend):
+def test_excel_numeric_to_date_in_mutate():
     frame = t.tidy(
-        {"g": ["a", "a"], "serial": [42370.0, 60.0]}, backend=backend
+        {"g": ["a", "a"], "serial": [42370.0, 60.0]}
     ) >> t.group_by("g")
     out = frame >> t.mutate(d=t.excel_numeric_to_date("serial"))
     assert out._groups == ["g"]
     assert out.collect()["d"].to_list() == [date(2016, 1, 1), None]
     timed = (
-        t.tidy({"serial": [40000.5]}, backend=backend)
+        t.tidy({"serial": [40000.5]})
         >> t.mutate(d=t.excel_numeric_to_date("serial", include_time=True))
     ).collect()
     assert _clock(timed["d"].to_list()[0]) == datetime(2009, 7, 6, 12, 0)
     mac = (
-        t.tidy({"serial": [1.0]}, backend=backend)
+        t.tidy({"serial": [1.0]})
         >> t.mutate(
             d=t.excel_numeric_to_date("serial", date_system="mac pre-2011")
         )
@@ -414,7 +379,7 @@ def test_excel_numeric_to_date_in_mutate(backend):
 
     def convert():
         return (
-            t.tidy({"label": ["1"]}, backend=backend)
+            t.tidy({"label": ["1"]})
             >> t.mutate(d=t.excel_numeric_to_date("label"))
         ).collect()
 
@@ -422,8 +387,7 @@ def test_excel_numeric_to_date_in_mutate(backend):
         convert()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_excel_numeric_column_skips_the_per_value_loop(backend, monkeypatch):
+def test_excel_numeric_column_skips_the_per_value_loop(monkeypatch):
     """In-range numeric columns use the Polars date offset, not one Python date each."""
 
     def explode(*_args, **_kwargs):
@@ -431,17 +395,17 @@ def test_excel_numeric_column_skips_the_per_value_loop(backend, monkeypatch):
 
     monkeypatch.setattr("tidy3.dates._excel_convert", explode)
     out = (
-        t.tidy({"serial": [42370, 60, None]}, backend=backend)
+        t.tidy({"serial": [42370, 60, None]})
         >> t.mutate(d=t.excel_numeric_to_date("serial"))
     ).collect()
     assert out["d"].to_list() == [date(2016, 1, 1), None, None]
     fractional = (
-        t.tidy({"serial": [40000.5, 1.999999999]}, backend=backend)
+        t.tidy({"serial": [40000.5, 1.999999999]})
         >> t.mutate(d=t.excel_numeric_to_date("serial"))
     ).collect()
     assert fractional["d"].to_list() == [date(2009, 7, 6), date(1900, 1, 2)]
     mac = (
-        t.tidy({"serial": [1, 0, 60]}, backend=backend)
+        t.tidy({"serial": [1, 0, 60]})
         >> t.mutate(d=t.excel_numeric_to_date("serial", date_system="mac pre-2011"))
     ).collect()
     assert mac["d"].to_list() == [date(1904, 1, 3), date(1904, 1, 2), None]
@@ -470,14 +434,13 @@ def test_excel_numeric_to_date_notebook_bare_name():
     assert namespace["cleaned"].columns == ["min", "label"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_excel_vector_path_divides_exactly_at_day_boundaries(backend):
+def test_excel_vector_path_divides_exactly_at_day_boundaries():
     # janitor: excel_numeric_to_date(-194.0000000115741) is 1899-06-19. The
     # serial is just under a whole day; dividing by 86400 through its
     # reciprocal rounded it up to -194 and gave the next day.
     serials = [-194.0000000115741, -193.0000000115741, 100.0000000115741 - 2e-8]
     out = (
-        t.tidy({"serial": serials * 4000}, backend=backend)
+        t.tidy({"serial": serials * 4000})
         >> t.mutate(d=t.excel_numeric_to_date("serial"))
     ).collect()["d"].to_list()
     assert out[:3] == [date(1899, 6, 19), date(1899, 6, 20), date(1900, 4, 9)]

@@ -45,12 +45,12 @@ def make_data(rows: int, groups: int = 100, seed: int = 0):
 # ── engine implementations (each: data → pandas DataFrame result) ───────
 
 
-def _tidy3(backend: str):
+def _tidy3():
     from tidy3 import arrange, col, filter, group_by, mean, mutate, n, std, summarise, tidy
 
     def go(data):
         return (
-            tidy(data, backend=backend)
+            tidy(data)
             >> filter(col("x") > 0)
             >> mutate(z=col("x") * 2 + col("y"))
             >> group_by("g")
@@ -153,8 +153,7 @@ def run(rows: int = 1_000_000, repeat: int = 3, groups: int = 100, seed: int = 0
     pdf, pldf = make_data(rows, groups, seed)
 
     engines: list[tuple[str, Callable[[], Any]]] = [
-        ("tidy3[polars]", lambda: _tidy3("polars")(pldf)),
-        ("tidy3[pandas]", lambda: _tidy3("pandas")(pdf)),
+        ("tidy3[polars]", lambda: _tidy3()(pldf)),
         ("polars (raw lazy)", lambda: _raw_polars(pldf)),
         ("pandas (raw)", lambda: _raw_pandas(pdf)),
     ]
@@ -221,9 +220,6 @@ def run_ops(
         print(f"  (datar not available: {e})")
         have_datar = False
 
-    def t3p(pipe):  # tidy3[pandas]
-        return lambda: pipe(tidy(pdf, backend="pandas")).collect(as_="pandas")
-
     def t3l(pipe, *, output, arrow_backed=False):
         return lambda: pipe(tidy(pldf)).collect(
             as_=output, arrow_backed=arrow_backed
@@ -248,7 +244,6 @@ def run_ops(
             {
                 "pandas": lambda: pdf[pdf["x"] > 0],
                 "polars native": lambda: pldf.filter(pl.col("x") > 0),
-                "tidy3[pandas]": t3p(lambda tf: tf >> filter(col("x") > 0)),
                 "datar": (lambda: pdf >> filt(f.x > 0)) if have_datar else None,
                 **polars_modes(lambda tf: tf >> filter(col("x") > 0)),
             },
@@ -260,7 +255,6 @@ def run_ops(
                 "polars native": lambda: pldf.with_columns(
                     z=pl.col("x") * 2 + pl.col("y")
                 ),
-                "tidy3[pandas]": t3p(lambda tf: tf >> mutate(z=col("x") * 2 + col("y"))),
                 "datar": (lambda: pdf >> d.mutate(z=f.x * 2 + f.y)) if have_datar else None,
                 **polars_modes(
                     lambda tf: tf >> mutate(z=col("x") * 2 + col("y"))
@@ -278,9 +272,6 @@ def run_ops(
                     avg_x=pl.col("x").mean(),
                     sd_y=pl.col("y").std(),
                 ),
-                "tidy3[pandas]": t3p(
-                    lambda tf: tf >> group_by("g") >> summarise(n=n(), avg_x=mean("x"), sd_y=std("y"))
-                ),
                 "datar": (
                     lambda: pdf >> d.group_by(f.g) >> d.summarise(n=d.n(), avg_x=d.mean(f.x), sd_y=sd(f.y))
                 )
@@ -296,7 +287,6 @@ def run_ops(
             {
                 "pandas": lambda: pdf.sort_values("y").reset_index(drop=True),
                 "polars native": lambda: pldf.sort("y"),
-                "tidy3[pandas]": t3p(lambda tf: tf >> arrange("y")),
                 "datar": (lambda: pdf >> d.arrange(f.y)) if have_datar else None,
                 **polars_modes(lambda tf: tf >> arrange("y")),
             },
@@ -311,7 +301,6 @@ def run_ops(
     engines = [
         "pandas",
         "polars native",
-        "tidy3[pandas]",
         "datar",
         "t3[pl native]",
         "t3[pl→NumPy]",

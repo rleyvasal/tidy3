@@ -180,3 +180,53 @@ __all__ = [
     "overlaps",
     "within",
 ]
+
+
+JOIN_SUFFIX = ("_x", "_y")
+# Internal name for a right column that clashes, renamed by join_names().
+RIGHT_TAG = "__tidy3_y"
+
+
+def _add_suffixes(names: list[str], others: list[str], suffix: str) -> list[str]:
+    """dplyr's add_suffixes(): suffix *names* until none repeats *others*."""
+    if suffix == "":
+        return list(names)
+    combined = [*others, *names]
+    while True:
+        seen: set[str] = set()
+        repeats = []
+        for index, name in enumerate(combined):
+            if name in seen:
+                repeats.append(index)
+            seen.add(name)
+        if not repeats:
+            break
+        for index in repeats:
+            combined[index] = combined[index] + suffix
+    return combined[len(others):]
+
+
+def join_names(
+    left: list[str],
+    right: list[str],
+    left_keys: list[str],
+    right_keys: list[str],
+    keep: bool,
+    suffix: tuple[str, str] = JOIN_SUFFIX,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Output names of a join's left and right columns, by dplyr's rule.
+
+    Columns in both tables get ``suffix`` ("_x"/"_y" here, dplyr's ".x"/".y"
+    in Python spelling). Join keys are left alone unless ``keep=True``.
+    """
+    left_suffix, right_suffix = suffix
+    if keep:
+        left_out = _add_suffixes(left, right, left_suffix)
+    else:
+        ignore = [name for name in left if name in left_keys]
+        check = [name for name in left if name not in left_keys]
+        aux = [name for name in right if name not in right_keys]
+        renamed = dict(zip(check, _add_suffixes(check, [*ignore, *aux], left_suffix)))
+        left_out = [renamed.get(name, name) for name in left]
+    right_out = _add_suffixes(right, left, right_suffix)
+    return dict(zip(left, left_out)), dict(zip(right, right_out))

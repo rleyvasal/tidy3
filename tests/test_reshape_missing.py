@@ -25,22 +25,17 @@ from tidy3 import (
 )
 
 
-BACKENDS = ["polars", "pandas"]
-
-
 def as_pandas(frame):
     return frame.collect(as_="pandas").reset_index(drop=True)
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_drop_na_selected_columns_and_replace_na(backend):
+def test_drop_na_selected_columns_and_replace_na():
     frame = tidy(
         {
             "id": [1, 2, 3, 4],
             "x": [1.0, None, float("nan"), 4.0],
             "y": [None, 2.0, 3.0, 4.0],
         },
-        backend=backend,
     )
 
     dropped = as_pandas(frame >> drop_na("x"))
@@ -51,7 +46,6 @@ def test_drop_na_selected_columns_and_replace_na(backend):
     assert replaced["y"].tolist() == [-1.0, 2.0, 3.0, 4.0]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize(
     ("direction", "expected"),
     [
@@ -61,13 +55,12 @@ def test_drop_na_selected_columns_and_replace_na(backend):
         ("updown", [2.0, 2.0, 2.0, 4.0, 4.0, 4.0]),
     ],
 )
-def test_fill_directions_respect_transient_groups(backend, direction, expected):
+def test_fill_directions_respect_transient_groups(direction, expected):
     frame = tidy(
         {
             "group": ["a", "a", "a", "b", "b", "b"],
             "x": [None, 2.0, None, None, 4.0, None],
         },
-        backend=backend,
     )
     out = as_pandas(frame >> fill("x", direction=direction, by="group"))
 
@@ -79,11 +72,9 @@ def test_fill_directions_respect_transient_groups(backend, direction, expected):
             assert value == wanted
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_fill_uses_persistent_groups_and_preserves_grouping(backend):
+def test_fill_uses_persistent_groups_and_preserves_grouping():
     frame = tidy(
         {"group": ["a", "a", "b", "b"], "x": [1.0, None, None, 2.0]},
-        backend=backend,
     ) >> group_by("group")
     result = frame.fill("x", direction="downup")
 
@@ -91,25 +82,22 @@ def test_fill_uses_persistent_groups_and_preserves_grouping(backend):
     assert result._groups == ["group"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("direction", ["down", "up", "downup", "updown"])
-def test_fill_leaves_the_input_frame_unchanged(backend, direction):
-    frame = tidy(pd.DataFrame({"x": [None, 2.0, None]}), backend=backend)
+def test_fill_leaves_the_input_frame_unchanged(direction):
+    frame = tidy(pd.DataFrame({"x": [None, 2.0, None]}))
 
     frame >> fill("x", direction=direction)
 
     assert pd.isna(as_pandas(frame)["x"]).tolist() == [True, False, True]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_pivot_longer_default_order_prefix_and_drop_na(backend):
+def test_pivot_longer_default_order_prefix_and_drop_na():
     frame = tidy(
         {
             "id": [1, 2],
             "wk1": [10.0, 20.0],
             "wk2": [None, 40.0],
         },
-        backend=backend,
     )
     result = frame >> pivot_longer(
         starts_with("wk"),
@@ -125,15 +113,12 @@ def test_pivot_longer_default_order_prefix_and_drop_na(backend):
         "week": ["1", "1", "2"],
         "rank": [10.0, 20.0, 40.0],
     }
-    if backend == "polars":
-        assert isinstance(result.lazy(), pl.LazyFrame)
+    assert isinstance(result.lazy(), pl.LazyFrame)
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_pivot_longer_splits_names_into_multiple_columns(backend):
+def test_pivot_longer_splits_names_into_multiple_columns():
     frame = tidy(
         {"id": [1], "temp_day": [20], "rain_day": [3]},
-        backend=backend,
     )
     out = as_pandas(
         frame
@@ -153,10 +138,9 @@ def test_pivot_longer_splits_names_into_multiple_columns(backend):
     }
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_pivot_longer_cols_vary_slowest(backend):
+def test_pivot_longer_cols_vary_slowest():
     out = as_pandas(
-        tidy({"id": [1, 2], "a": [10, 20], "b": [30, 40]}, backend=backend)
+        tidy({"id": [1, 2], "a": [10, 20], "b": [30, 40]})
         >> pivot_longer(["a", "b"], cols_vary="slowest")
     )
     assert list(out.itertuples(index=False, name=None)) == [
@@ -167,15 +151,13 @@ def test_pivot_longer_cols_vary_slowest(backend):
     ]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_pivot_wider_roundtrip_prefix_fill_and_method_form(backend):
+def test_pivot_wider_roundtrip_prefix_fill_and_method_form():
     frame = tidy(
         {
             "id": [1, 1, 2],
             "metric": ["x", "y", "x"],
             "reading": [10, 30, 20],
         },
-        backend=backend,
     )
     result = frame.pivot_wider(
         names_from="metric",
@@ -192,21 +174,17 @@ def test_pivot_wider_roundtrip_prefix_fill_and_method_form(backend):
     }
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_pivot_wider_aggregates_duplicate_cells(backend):
+def test_pivot_wider_aggregates_duplicate_cells():
     frame = tidy(
         {"id": [1, 1, 1], "name": ["x", "x", "y"], "value": [2, 3, 4]},
-        backend=backend,
     )
     out = as_pandas(frame >> pivot_wider(values_fn="sum"))
     assert out.to_dict(orient="list") == {"id": [1], "x": [5], "y": [4]}
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_separate_and_unite_roundtrip(backend):
+def test_separate_and_unite_roundtrip():
     frame = tidy(
         {"id": [1, 2], "code": ["north-10", "south-20"]},
-        backend=backend,
     )
     separated = frame >> separate("code", ["region", "number"], sep="-")
     united = separated >> unite("code", "region", "number", sep="-")
@@ -222,9 +200,8 @@ def test_separate_and_unite_roundtrip(backend):
     }
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_separate_merge_and_left_fill(backend):
-    frame = tidy({"x": ["a", "a:b:c"]}, backend=backend)
+def test_separate_merge_and_left_fill():
+    frame = tidy({"x": ["a", "a:b:c"]})
     merged = as_pandas(
         frame >> separate("x", ["key", "value"], sep=":", extra="merge")
     )
@@ -240,9 +217,8 @@ def test_separate_merge_and_left_fill(backend):
     assert left.loc[1, "value"] == "b"
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_unite_missing_value_controls(backend):
-    frame = tidy({"a": ["x", None], "b": [None, "y"]}, backend=backend)
+def test_unite_missing_value_controls():
+    frame = tidy({"a": ["x", None], "b": [None, "y"]})
     kept = as_pandas(frame >> unite("z", "a", "b", na_rm=False))
     removed = as_pandas(frame >> unite("z", "a", "b", na_rm=True))
 
@@ -250,11 +226,9 @@ def test_unite_missing_value_controls(backend):
     assert removed["z"].tolist() == ["x", "y"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_expand_crosses_columns_and_nesting_preserves_observed_pairs(backend):
+def test_expand_crosses_columns_and_nesting_preserves_observed_pairs():
     frame = tidy(
         {"a": [1, 1, 2], "b": ["x", "y", "y"]},
-        backend=backend,
     )
 
     crossed = as_pandas(frame >> expand("a", "b"))
@@ -273,15 +247,13 @@ def test_expand_crosses_columns_and_nesting_preserves_observed_pairs(backend):
     ]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_grouped_expand_operates_within_each_group(backend):
+def test_grouped_expand_operates_within_each_group():
     frame = tidy(
         {
             "g": ["a", "a", "b", "b"],
             "x": [1, 2, 1, 1],
             "y": ["u", "v", "u", "v"],
         },
-        backend=backend,
     ) >> group_by("g")
 
     result = frame >> expand("x", "y")
@@ -292,11 +264,9 @@ def test_grouped_expand_operates_within_each_group(backend):
     assert result._groups == ["g"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_complete_fills_only_implicit_values_when_requested(backend):
+def test_complete_fills_only_implicit_values_when_requested():
     frame = tidy(
         {"id": [1, 2], "key": ["a", "b"], "value": [None, 5.0]},
-        backend=backend,
     )
 
     result = frame >> complete(
@@ -311,15 +281,13 @@ def test_complete_fills_only_implicit_values_when_requested(backend):
     assert implicit["value"].tolist() == [0.0]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_nest_and_unnest_nested_records_roundtrip(backend):
+def test_nest_and_unnest_nested_records_roundtrip():
     frame = tidy(
         {
             "g": ["a", "a", "b"],
             "x": [1, 2, 3],
             "y": ["u", "v", "w"],
         },
-        backend=backend,
     )
 
     nested = frame >> nest("data", cols=["x", "y"])
@@ -328,11 +296,8 @@ def test_nest_and_unnest_nested_records_roundtrip(backend):
 
     assert len(nested_out) == 2
     # pandas nests DataFrames; polars handoff is list/array of row records
-    if backend == "pandas":
-        assert list(nested_out["data"].iloc[0]["x"]) == [1, 2]
-    else:
-        first = list(nested_out["data"].iloc[0])
-        assert [row["x"] for row in first] == [1, 2]
+    first = list(nested_out["data"].iloc[0])
+    assert [row["x"] for row in first] == [1, 2]
     assert restored.to_dict(orient="list") == {
         "g": ["a", "a", "b"],
         "x": [1, 2, 3],
@@ -340,11 +305,9 @@ def test_nest_and_unnest_nested_records_roundtrip(backend):
     }
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_unnest_longer_values_indices_and_empty_rows(backend):
+def test_unnest_longer_values_indices_and_empty_rows():
     frame = tidy(
         {"id": [1, 2, 3], "items": [[10, 11], [], [30]]},
-        backend=backend,
     )
     dropped = as_pandas(
         frame
@@ -363,15 +326,12 @@ def test_unnest_longer_values_indices_and_empty_rows(backend):
     assert pd.isna(kept.loc[2, "items"])
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_unnest_wider_dict_and_list_columns(backend):
+def test_unnest_wider_dict_and_list_columns():
     structs = tidy(
         {"id": [1, 2], "info": [{"x": 10, "y": 11}, {"x": 20, "y": 21}]},
-        backend=backend,
     )
     lists = tidy(
         {"id": [1, 2], "point": [[10, 11], [20, 21]]},
-        backend=backend,
     )
 
     struct_out = as_pandas(structs >> unnest_wider("info"))
@@ -397,12 +357,10 @@ def test_separate_convert_infers_polars_types():
     assert pd.api.types.is_integer_dtype(out["number"])
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_pivot_longer_value_sentinel_and_multi_value_wider(backend):
+def test_pivot_longer_value_sentinel_and_multi_value_wider():
     long = as_pandas(
         tidy(
             {"id": [1, 2], "x_a": [1, 2], "y_a": [3, 4]},
-            backend=backend,
         )
         >> pivot_longer(
             ["x_a", "y_a"],
@@ -425,7 +383,6 @@ def test_pivot_longer_value_sentinel_and_multi_value_wider(backend):
                 "v1": [10, 20],
                 "v2": [30, 40],
             },
-            backend=backend,
         )
         >> pivot_wider(
             names_from="name", values_from=["v1", "v2"]
@@ -451,14 +408,13 @@ def test_reshape_argument_validation():
         fill("x", direction="sideways")
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_pivot_wider_duplicates_become_list_columns_with_tidyr_warning(backend):
+def test_pivot_wider_duplicates_become_list_columns_with_tidyr_warning():
     import warnings
 
     data = {"id": [1, 1, 2], "key": ["a", "a", "b"], "val": [1.0, 2.0, 3.0]}
     with pytest.warns(UserWarning, match='values_fn="list"') as caught:
         out = as_pandas(
-            tidy(data, backend=backend)
+            tidy(data)
             >> pivot_wider(names_from="key", values_from="val")
         )
     assert "summarise(n=n(), by=['id', 'key'])" in str(caught[0].message)
@@ -468,11 +424,11 @@ def test_pivot_wider_duplicates_become_list_columns_with_tidyr_warning(backend):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         listed = as_pandas(
-            tidy(data, backend=backend)
+            tidy(data)
             >> pivot_wider(names_from="key", values_from="val", values_fn="list")
         )
         unique = as_pandas(
-            tidy({"id": [1, 2], "key": ["a", "b"], "val": [1.0, 3.0]}, backend=backend)
+            tidy({"id": [1, 2], "key": ["a", "b"], "val": [1.0, 3.0]})
             >> pivot_wider(names_from="key", values_from="val")
         )
     assert list(listed["a"][0]) == [1.0, 2.0]
@@ -545,35 +501,7 @@ def test_pivot_options_and_specs_never_convert_polars_frames_to_pandas(monkeypat
     assert as_pandas(results[3]).columns.tolist() == ["id", "visit", "mean", "sd"]
 
 
-def test_pandas_list_cells_from_polars_are_list_columns():
-    # A Polars list column reaches pandas as NumPy arrays, not Python lists.
-    import tidy3 as t
-
-    source = pl.DataFrame({
-        "id": [1, 2, 3],
-        "items": [[0], [0, 1], []],
-        "same": [[1, 2]] * 3,
-        "rec": [{"a": 1}, {"a": 2}, None],
-        "s": ["x", "y", None],
-    })
-    results = {}
-    for backend in BACKENDS:
-        frame = tidy(source, backend=backend)
-        longer = frame >> t.select("id", "items") >> unnest_longer("items", indices_include=True)
-        results[backend] = (
-            longer.collect().rows(),
-            (frame >> t.select(t.where(t.is_character))).collect().columns,
-            (frame >> t.remove_constant()).collect().columns,
-            (frame >> t.select("id", "items") >> t.hoist("items", second=1)).collect()["second"].to_list(),
-        )
-    assert results["pandas"] == results["polars"]
-    assert results["pandas"][0] == [(1, 1, 0), (2, 1, 0), (2, 2, 1)]
-    assert results["pandas"][1] == ["s"]
-    assert results["pandas"][2] == ["id", "items", "rec", "s"]
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_wider_spec_with_no_rows_is_typed_and_pivots_to_ids(backend):
+def test_wider_spec_with_no_rows_is_typed_and_pivots_to_ids():
     import tidy3 as t
 
     empty = pl.DataFrame({
@@ -581,7 +509,7 @@ def test_wider_spec_with_no_rows_is_typed_and_pivots_to_ids(backend):
         "k": pl.Series([], dtype=pl.String),
         "v": pl.Series([], dtype=pl.Float64),
     })
-    spec = t.build_wider_spec(tidy(empty, backend=backend), names_from="k", values_from="v")
+    spec = t.build_wider_spec(tidy(empty), names_from="k", values_from="v")
     assert spec.collect().schema == pl.Schema({".name": pl.String, ".value": pl.String, "k": pl.String})
-    out = (tidy(empty, backend=backend) >> t.pivot_wider_spec(spec, id_cols="id")).collect()
+    out = (tidy(empty) >> t.pivot_wider_spec(spec, id_cols="id")).collect()
     assert out.schema == pl.Schema({"id": pl.Int64}) and out.height == 0

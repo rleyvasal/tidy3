@@ -6,6 +6,10 @@ under **Changed**.
 
 ## Unreleased
 
+### Removed
+
+- The pandas backend. tidy3 runs on Polars only. `tidy(df, backend="pandas")` and `options(backend="pandas")` raise a `TypeError` that names the replacement, and `TidyFrame.backend` is gone. pandas stays supported at both ends: a pandas DataFrame passed to `tidy()` (or to a join or bind) becomes a lazy Polars frame that keeps its factor levels and ordered flags, and `collect(as_="pandas")` returns a pandas result. Every verb was implemented twice, and the pandas versions were 2–25 times slower than Polars on 1,000,000 rows, so about 3,400 lines of pandas-only code are removed. Factor calls that Polars cannot yet compute natively (nested calls, callables, NaN values) still evaluate their arguments with pandas internally. `python -m tidy3.bench_suite` drops its `tidy3[pandas]` engine and the `--max-tidy-pandas-geo` budget; it still compares tidy3 with raw pandas.
+
 ### Changed
 
 - `python -m tidy3.bench_api` times every public function against a raw Polars recipe on one shared table. It checks values, names, dtypes, and order before timing, and lists functions that are not operations with a reason instead of a timing. On 100,000 rows the excess over those recipes dropped from 383 ms to 168 ms. The largest closes, best of 3 after one warmup, against the previous one-sample times on the same machine: `excel_numeric_to_date` 42.8 ms → 1.5 ms (raw 0.4 ms), `str_which` 24.0 ms → 3.9 ms and `str_subset` 24.1 ms → 3.8 ms (raw about 1.6 ms), `word` 22.0 ms → 3.4 ms (raw 3.1 ms), `str_sort` 20.5 ms → 4.8 ms and `str_order` 21.5 ms → 4.7 ms (raw about 1.9 ms), `str_conv` 13.2 ms → 0.17 ms, `str_unique` 12.6 ms → 3.2 ms, `str_split_fixed` 58 ms → 18.3 ms (raw 18.1 ms), and `complete()` over `full_seq` 9.6 ms → 0.8 ms (raw 0.5 ms). In-range numeric serials use a Polars date offset; serial 60 stays missing, and out-of-range serials still raise. Text `str_conv` is left as text. Results are unchanged.

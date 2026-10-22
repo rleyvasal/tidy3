@@ -7,7 +7,6 @@ import pytest
 
 from tidy3 import across, all_of, mutate, rescale, scale, tidy
 
-BACKENDS = ["polars", "pandas"]
 
 
 def collect(frame):
@@ -23,15 +22,14 @@ def _close(values, expected):
             assert math.isclose(value, want, rel_tol=1e-9, abs_tol=1e-12)
 
 
-@pytest.fixture(params=BACKENDS)
-def frame(request):
+@pytest.fixture
+def frame():
     return tidy(
         {
             "g": ["a", "a", "a", "b", "b", "b"],
             "x": [1.0, 2.0, 3.0, 10.0, None, 30.0],
             "k": [4.0, 4.0, 4.0, 4.0, None, 4.0],
-        },
-        backend=request.param,
+        }
     )
 
 

@@ -50,9 +50,11 @@ def test_compute_method_and_verb_agree():
     assert isinstance(frame.compute()._data, pl.LazyFrame)
 
 
-def test_compute_on_the_pandas_backend_is_a_no_op():
-    frame = tidy({"x": [1, 2]}, backend="pandas")
-    assert frame.compute() is frame
-    with pytest.raises(ValueError):
-        frame.compute(engine="streaming")
+def test_the_removed_pandas_backend_is_a_clear_error():
+    from tidy3 import options
+
+    with pytest.raises(TypeError, match="pandas backend was removed"):
+        tidy({"x": [1, 2]}, backend="pandas")
+    with pytest.raises(TypeError, match="collect"):
+        options(backend="pandas")
 

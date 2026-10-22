@@ -36,16 +36,14 @@ from tidy3 import (
 )
 
 
-BACKENDS = ["polars", "pandas"]
 
 
 def values(frame, column: str):
     return frame.collect(as_="pandas")[column].tolist()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_filter_out_keeps_null_predicates(backend):
-    frame = tidy({"x": [1.0, None, 2.0]}, backend=backend)
+def test_filter_out_keeps_null_predicates():
+    frame = tidy({"x": [1.0, None, 2.0]})
     result = frame >> filter_out(col("x") == 1)
     out = result.collect(as_="pandas")
     assert len(out) == 2
@@ -53,24 +51,21 @@ def test_filter_out_keeps_null_predicates(backend):
     assert out.iloc[1]["x"] == 2
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_slice_is_one_based_grouped_and_preserves_duplicates(backend):
+def test_slice_is_one_based_grouped_and_preserves_duplicates():
     frame = tidy(
-        {"g": ["a", "a", "b", "b"], "x": [1, 2, 3, 4]}, backend=backend
+        {"g": ["a", "a", "b", "b"], "x": [1, 2, 3, 4]}
     ).group_by("g")
     assert values(frame >> slice(2, 1, 2), "x") == [2, 1, 2, 4, 3, 4]
     assert values(frame >> slice(-2), "x") == [1, 3]
     assert len((frame >> slice()).collect(as_="pandas")) == 0
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_slice_head_tail_and_extremes_are_grouped(backend):
+def test_slice_head_tail_and_extremes_are_grouped():
     frame = tidy(
         {
             "g": ["a", "a", "a", "b", "b", "b"],
             "x": [3, 1, 1, 4, 5, 5],
         },
-        backend=backend,
     ).group_by("g")
     assert values(frame >> slice_head(prop=0.5), "x") == [3, 4]
     assert values(frame >> slice_tail(n=1), "x") == [1, 5]
@@ -78,42 +73,37 @@ def test_slice_head_tail_and_extremes_are_grouped(backend):
     assert values(frame >> slice_max("x", n=1, with_ties=False), "x") == [3, 5]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_slice_extremes_preserve_first_seen_group_order(backend):
+def test_slice_extremes_preserve_first_seen_group_order():
     frame = tidy(
-        {"g": ["b", "b", "a", "a"], "x": [2, 1, 4, 3]}, backend=backend
+        {"g": ["b", "b", "a", "a"], "x": [2, 1, 4, 3]}
     ).group_by("g")
     out = (frame >> slice_min("x", n=1)).collect(as_="pandas")
     assert list(out.itertuples(index=False, name=None)) == [("b", 1), ("a", 3)]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_slice_sample_is_grouped_and_keeps_backend_contract(backend):
+def test_slice_sample_is_grouped_and_keeps_backend_contract():
     frame = tidy(
-        {"g": ["a"] * 4 + ["b"] * 4, "x": list(range(8))}, backend=backend
+        {"g": ["a"] * 4 + ["b"] * 4, "x": list(range(8))}
     ).group_by("g")
     result = frame >> slice_sample(n=2, seed=7)
     assert result._groups == ["g"]
     assert result.collect(as_="pandas").groupby("g").size().tolist() == [2, 2]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_slice_sample_supports_replacement(backend):
-    frame = tidy({"g": ["a", "b"], "x": [1, 2]}, backend=backend).group_by("g")
+def test_slice_sample_supports_replacement():
+    frame = tidy({"g": ["a", "b"], "x": [1, 2]}).group_by("g")
     out = (frame >> slice_sample(n=2, replace=True, seed=3)).collect(as_="pandas")
     assert out.groupby("g").size().tolist() == [2, 2]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_slice_sample_supports_weights(backend):
-    frame = tidy({"x": [1, 2], "w": [0.0, 1.0]}, backend=backend)
+def test_slice_sample_supports_weights():
+    frame = tidy({"x": [1, 2], "w": [0.0, 1.0]})
     out = frame >> slice_sample(n=3, weight_by="w", replace=True, seed=2)
     assert values(out, "x") == [2, 2, 2]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_slice_sample_rejects_all_zero_weights(backend):
-    frame = tidy({"x": [1, 2], "w": [0.0, 0.0]}, backend=backend)
+def test_slice_sample_rejects_all_zero_weights():
+    frame = tidy({"x": [1, 2], "w": [0.0, 0.0]})
     with pytest.raises(ValueError, match="weights|positive"):
         (
             frame
@@ -121,9 +111,8 @@ def test_slice_sample_rejects_all_zero_weights(backend):
         ).collect()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_column_verbs_and_group_metadata(backend):
-    frame = tidy({"g": [1, 2], "x": [3, 4], "y": [5, 6]}, backend=backend).group_by("g")
+def test_column_verbs_and_group_metadata():
+    frame = tidy({"g": [1, 2], "x": [3, 4], "y": [5, 6]}).group_by("g")
     moved = frame >> relocate("y", before="x")
     assert list(moved.collect(as_="pandas").columns) == ["g", "y", "x"]
     renamed = moved >> rename_with(str.upper, "g", "x")
@@ -134,9 +123,8 @@ def test_column_verbs_and_group_metadata(backend):
     assert named.to_dict() == {1: 3, 2: 4}
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_glimpse_prints_and_passes_frame_through(backend, capsys):
-    frame = tidy({"x": [1, 2]}, backend=backend)
+def test_glimpse_prints_and_passes_frame_through(capsys):
+    frame = tidy({"x": [1, 2]})
     result = frame >> glimpse(1)
     printed = capsys.readouterr().out
     assert result is frame
@@ -144,11 +132,9 @@ def test_glimpse_prints_and_passes_frame_through(backend, capsys):
     assert "$ x" in printed
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_add_count_and_add_tally_preserve_rows_and_groups(backend):
+def test_add_count_and_add_tally_preserve_rows_and_groups():
     frame = tidy(
         {"g": ["a", "a", "b"], "x": [1, 1, 1], "w": [2, 3, 5]},
-        backend=backend,
     ).group_by("g")
     counted = frame >> add_count("x")
     assert values(counted, "n") == [2, 2, 1]
@@ -158,10 +144,9 @@ def test_add_count_and_add_tally_preserve_rows_and_groups(backend):
     assert tallied._groups == ["g"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_join_family_matches_nulls_and_preserves_left_groups(backend):
+def test_join_family_matches_nulls_and_preserves_left_groups():
     left = tidy(
-        {"key": [1, 2, None], "left": ["a", "b", "null"]}, backend=backend
+        {"key": [1, 2, None], "left": ["a", "b", "null"]}
     ).group_by("key")
     right = {"key": [2, 3, None], "right": ["B", "C", "NULL"]}
 
@@ -176,9 +161,8 @@ def test_join_family_matches_nulls_and_preserves_left_groups(backend):
     assert len(full_result) == 4
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_cross_join_and_bind_verbs(backend):
-    left = tidy({"x": [1, 2]}, backend=backend)
+def test_cross_join_and_bind_verbs():
+    left = tidy({"x": [1, 2]})
     crossed = left >> cross_join({"y": ["a", "b"]})
     assert list(crossed.collect(as_="pandas").itertuples(index=False, name=None)) == [
         (1, "a"),
@@ -196,9 +180,8 @@ def test_cross_join_and_bind_verbs(backend):
     assert list(cols.collect(as_="pandas").columns) == ["x", "y"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_set_operations_have_relational_set_semantics(backend):
-    left = tidy({"x": [1, 1, 2]}, backend=backend)
+def test_set_operations_have_relational_set_semantics():
+    left = tidy({"x": [1, 1, 2]})
     right = {"x": [2, 3, 3]}
     assert values(left >> union(right), "x") == [1, 2, 3]
     assert values(left >> union_all(right), "x") == [1, 1, 2, 2, 3, 3]

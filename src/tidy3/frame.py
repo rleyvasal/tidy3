@@ -98,15 +98,10 @@ def _restore_factors(pdf: Any, levels: dict[str, Any]) -> Any:
     return pdf
 
 
-def _validate_execution_engine(engine: Any, *, backend: str) -> None:
+def _validate_execution_engine(engine: Any) -> None:
     if isinstance(engine, str) and engine not in _POLARS_EXECUTION_ENGINES:
         choices = ", ".join(sorted(_POLARS_EXECUTION_ENGINES))
         raise ValueError(f"engine must be one of: {choices}")
-    if backend == "pandas" and engine != "auto":
-        raise ValueError(
-            "engine is a Polars execution option; use engine='auto' with "
-            "the pandas backend"
-        )
 
 
 def _uses_gpu_engine(engine: Any) -> bool:
@@ -132,6 +127,17 @@ def _from_pandas(pdf: Any) -> pl.DataFrame:
     return df.with_columns(casts) if casts else df
 
 
+def _pandas_levels(pdf: Any) -> dict[str, FactorLevels]:
+    """Factor levels and ordered flags of a pandas frame's categorical columns."""
+    import pandas as pd
+
+    return {
+        str(name): FactorLevels(series.cat.categories.tolist(), ordered=bool(series.cat.ordered))
+        for name, series in pdf.items()
+        if isinstance(series.dtype, pd.CategoricalDtype)
+    }
+
+
 def _excel_frame(frame: Any, engine: Any) -> pl.DataFrame:
     if isinstance(frame, TidyFrame):
         return frame.collect(as_="polars", engine=engine)
@@ -150,10 +156,10 @@ def _excel_frame(frame: Any, engine: Any) -> pl.DataFrame:
 
 
 class TidyFrame:
-    """dplyr-style frame with ``>>`` pipes: lazy Polars (default) or eager pandas.
+    """dplyr-style frame with ``>>`` pipes over a lazy Polars query.
 
-    The pandas backend exists for 1:1 engine comparisons (same pipeline,
-    different engine) — see ``tidy(df, backend="pandas")`` and ``tidy3.bench``.
+    pandas DataFrames are accepted and converted; ``collect(as_="pandas")``
+    hands a result back to pandas.
     """
 
     __slots__ = (
@@ -166,8 +172,8 @@ class TidyFrame:
         # later filter/filter_out reference columns dropped by select —
         # equivalent to rewriting ``select >> filter`` as ``filter >> select``.
         "_select_base",
-        # Parse failures captured at mutate time. Polars: a lazy plan that
-        # still reads the pre-mutate source. Pandas: a small DataFrame.
+        # Parse failures captured at mutate time: a lazy plan that still
+        # reads the pre-mutate source.
         "_problems",
     )
 
@@ -186,48 +192,21 @@ class TidyFrame:
             import pandas as pd
 
             if not isinstance(data, pd.DataFrame):
-                raise TypeError(
-                    "TidyFrame requires a polars LazyFrame or pandas DataFrame"
-                )
+                raise TypeError("TidyFrame requires a polars LazyFrame or pandas DataFrame")
+            if category_levels is None:
+                category_levels = _pandas_levels(data)
+            data = _from_pandas(data).lazy()
         self._data = data
         self._groups = list(groups) if groups else None
         self._rowwise = bool(rowwise)
         self._group_drop = bool(group_drop) if self._groups else True
-        if category_levels is None and self.backend == "pandas":
-            import pandas as pd
-
-            category_levels = {
-                str(name): FactorLevels(
-                    series.cat.categories.tolist(),
-                    ordered=bool(series.cat.ordered),
-                )
-                for name, series in data.items()
-                if isinstance(series.dtype, pd.CategoricalDtype)
-            }
         self._category_levels = _recorded_levels(category_levels)
         self._select_base = select_base
         self._problems = problems
 
     @property
-    def backend(self) -> str:
-        return "polars" if isinstance(self._data, pl.LazyFrame) else "pandas"
-
-    @property
-    def _backend(self) -> str:
-        return self.backend
-
-    @property
     def _lf(self) -> pl.LazyFrame:
-        if not isinstance(self._data, pl.LazyFrame):
-            raise TypeError(
-                "this TidyFrame runs on the pandas backend (no LazyFrame); "
-                "polars-only APIs need tidy(..., backend='polars')"
-            )
         return self._data
-
-    @property
-    def _pdf(self):
-        return self._data  # pandas DataFrame when backend == "pandas"
 
     # ── EDA / inspection (schema-first; row counts materialize lazily) ──
 
@@ -237,8 +216,6 @@ class TidyFrame:
 
         Schema-only — does not scan row data.
         """
-        if self.backend == "pandas":
-            return [str(c) for c in self._pdf.columns]
         return list(self._lf.collect_schema().names())
 
     @property
@@ -264,16 +241,12 @@ class TidyFrame:
     @property
     def dtypes(self) -> dict[str, Any]:
         """``{column: dtype}`` from the frame schema (no full collect)."""
-        if self.backend == "pandas":
-            return {str(k): v for k, v in self._pdf.dtypes.items()}
         schema = self._lf.collect_schema()
         return {name: dtype for name, dtype in schema.items()}
 
     @property
     def schema(self) -> Any:
-        """Backend schema object (Polars ``Schema`` or pandas dtypes map)."""
-        if self.backend == "pandas":
-            return self.dtypes
+        """The Polars ``Schema``, without collecting rows."""
         return self._lf.collect_schema()
 
     def summary(
@@ -324,38 +297,6 @@ class TidyFrame:
             problems = self._problems
         return TidyFrame(
             lf,
-            groups=groups,
-            rowwise=self._rowwise if rowwise is None else rowwise,
-            group_drop=(
-                self._group_drop if group_drop is None else group_drop
-            ),
-            category_levels=(
-                self._category_levels
-                if category_levels is None
-                else category_levels
-            ),
-            select_base=select_base,
-            problems=problems,
-        )
-
-    def _with_pdf(
-        self,
-        pdf: Any,
-        groups: list[str] | None = None,
-        *,
-        rowwise: bool | None = None,
-        group_drop: bool | None = None,
-        category_levels: dict[str, list[Any]] | None = None,
-        select_base: Any | None = None,
-        keep_select_base: bool = False,
-        problems: Any = _KEEP,
-    ) -> TidyFrame:
-        if keep_select_base and select_base is None:
-            select_base = self._select_base
-        if problems is _KEEP:
-            problems = self._problems
-        return TidyFrame(
-            pdf,
             groups=groups,
             rowwise=self._rowwise if rowwise is None else rowwise,
             group_drop=(
@@ -1092,15 +1033,12 @@ class TidyFrame:
         A lazy frame re-runs its whole plan each time it is materialized,
         so a pipe that starts with ``scan_csv(url)`` downloads the file again
         for every ``collect()``, plot, or ``to_numpy()``. Computing once keeps
-        the result in memory; later verbs build on it. Groups, rowwise
-        state, and the backend carry over. The pandas backend is already
-        eager, so it returns the frame unchanged. Parse failures are
+        the result in memory; later verbs build on it. Groups and rowwise
+        state carry over. Parse failures are
         computed in the same run, so ``problems()`` afterwards reads the
         stored failures and does not read the source again.
         """
-        _validate_execution_engine(engine, backend=self.backend)
-        if self.backend == "pandas":
-            return self
+        _validate_execution_engine(engine)
         if self._problems is None:
             return self._with_lf(self._lf.collect(engine=engine).lazy(), groups=self._groups)
         data, found = pl.collect_all([self._lf, self._problems], engine=engine)
@@ -1131,7 +1069,7 @@ class TidyFrame:
         object is also accepted. Non-default engines require the Polars
         backend.
         """
-        _validate_execution_engine(engine, backend=self.backend)
+        _validate_execution_engine(engine)
         if arrow_backed and as_ != "pandas":
             raise ValueError("arrow_backed=True requires as_='pandas'")
         numpy_options = (
@@ -1158,19 +1096,6 @@ class TidyFrame:
             from tidy3.tidyselect import resolve_selection
 
             selected = resolve_selection(self, [columns])
-        if self.backend == "pandas":
-            pdf = self._data if selected is None else self._data.loc[:, selected]
-            if as_ == "pandas":
-                if arrow_backed:
-                    return pdf.convert_dtypes(dtype_backend="pyarrow")
-                return pdf
-            if as_ == "polars":
-                return _from_pandas(pdf)
-            if as_ == "arrow":
-                return _from_pandas(pdf).to_arrow()
-            raise ValueError(
-                "as_ must be 'polars', 'pandas', 'arrow', or 'numpy'"
-            )
         lf = self._lf if selected is None else self._lf.select(selected)
         df = lf.collect(engine=engine)
         if as_ == "polars":
@@ -1228,7 +1153,7 @@ class TidyFrame:
         """
         import numpy as np
 
-        _validate_execution_engine(engine, backend=self.backend)
+        _validate_execution_engine(engine)
         if order not in {"c", "fortran"}:
             raise ValueError("order must be 'c' or 'fortran'")
 
@@ -1238,54 +1163,23 @@ class TidyFrame:
 
             selected = resolve_selection(self, [columns])
 
-        if self.backend == "polars":
-            lf = self._lf if selected is None else self._lf.select(selected)
-            frame = lf.collect(engine=engine)
-            array = frame.to_numpy(
-                order=order,
-                writable=writable,
-                allow_copy=allow_copy,
-            )
-            if dtype is not None and array.dtype != np.dtype(dtype):
-                if not allow_copy:
-                    raise RuntimeError(
-                        "requested NumPy dtype conversion requires a copy"
-                    )
-                array = array.astype(
-                    dtype,
-                    order="C" if order == "c" else "F",
-                    copy=False,
-                )
-            return array
-
-        frame = self._data if selected is None else self._data.loc[:, selected]
-        array = frame.to_numpy(dtype=dtype, copy=False)
-        if not allow_copy and array.size:
-            shares_data = any(
-                np.shares_memory(array, frame[name].to_numpy(copy=False))
-                for name in frame.columns
-            )
-            if not shares_data:
-                raise RuntimeError(
-                    "pandas cannot provide this NumPy matrix without copying"
-                )
-        contiguous = (
-            array.flags.c_contiguous
-            if order == "c"
-            else array.flags.f_contiguous
+        lf = self._lf if selected is None else self._lf.select(selected)
+        frame = lf.collect(engine=engine)
+        array = frame.to_numpy(
+            order=order,
+            writable=writable,
+            allow_copy=allow_copy,
         )
-        if not contiguous:
+        if dtype is not None and array.dtype != np.dtype(dtype):
             if not allow_copy:
                 raise RuntimeError(
-                    f"NumPy order={order!r} requires a copy for this frame"
+                    "requested NumPy dtype conversion requires a copy"
                 )
-            array = np.array(
-                array, dtype=dtype, order="C" if order == "c" else "F", copy=True
+            array = array.astype(
+                dtype,
+                order="C" if order == "c" else "F",
+                copy=False,
             )
-        if writable and not array.flags.writeable:
-            if not allow_copy:
-                raise RuntimeError("a writable NumPy matrix requires a copy")
-            array = array.copy(order="C" if order == "c" else "F")
         return array
 
     def __array__(self, dtype: Any = None, copy: bool | None = None):
@@ -1306,31 +1200,23 @@ class TidyFrame:
         **kwargs: Any,
     ) -> None:
         """Execute and write CSV; Polars plans stream directly to disk."""
-        _validate_execution_engine(engine, backend=self.backend)
-        if self.backend == "polars":
-            if _uses_gpu_engine(engine):
-                self.collect(as_="polars", engine=engine).write_csv(
-                    path,
-                    include_header=include_header,
-                    separator=separator,
-                    **kwargs,
-                )
-                return
-            self._lf.sink_csv(
+        _validate_execution_engine(engine)
+        if _uses_gpu_engine(engine):
+            self.collect(as_="polars", engine=engine).write_csv(
                 path,
                 include_header=include_header,
                 separator=separator,
-                engine=engine,
                 **kwargs,
             )
             return
-        self._data.to_csv(
+        self._lf.sink_csv(
             path,
-            index=False,
-            header=include_header,
-            sep=separator,
+            include_header=include_header,
+            separator=separator,
+            engine=engine,
             **kwargs,
         )
+        return
 
     def write_parquet(
         self,
@@ -1341,20 +1227,16 @@ class TidyFrame:
         **kwargs: Any,
     ) -> None:
         """Execute and write Parquet; Polars plans stream directly to disk."""
-        _validate_execution_engine(engine, backend=self.backend)
-        if self.backend == "polars":
-            if _uses_gpu_engine(engine):
-                self.collect(as_="polars", engine=engine).write_parquet(
-                    path, compression=compression, **kwargs
-                )
-                return
-            self._lf.sink_parquet(
-                path, compression=compression, engine=engine, **kwargs
+        _validate_execution_engine(engine)
+        if _uses_gpu_engine(engine):
+            self.collect(as_="polars", engine=engine).write_parquet(
+                path, compression=compression, **kwargs
             )
             return
-        self._data.to_parquet(
-            path, index=False, compression=compression, **kwargs
+        self._lf.sink_parquet(
+            path, compression=compression, engine=engine, **kwargs
         )
+        return
 
     def write_ipc(
         self,
@@ -1365,20 +1247,16 @@ class TidyFrame:
         **kwargs: Any,
     ) -> None:
         """Execute and write Arrow IPC/Feather output."""
-        _validate_execution_engine(engine, backend=self.backend)
-        if self.backend == "polars":
-            if _uses_gpu_engine(engine):
-                self.collect(as_="polars", engine=engine).write_ipc(
-                    path, compression=compression, **kwargs
-                )
-                return
-            self._lf.sink_ipc(
-                path, compression=compression, engine=engine, **kwargs
+        _validate_execution_engine(engine)
+        if _uses_gpu_engine(engine):
+            self.collect(as_="polars", engine=engine).write_ipc(
+                path, compression=compression, **kwargs
             )
             return
-        self._data.reset_index(drop=True).to_feather(
-            path, compression=compression, **kwargs
+        self._lf.sink_ipc(
+            path, compression=compression, engine=engine, **kwargs
         )
+        return
 
     def problems(self) -> TidyFrame:
         """Parse failures for this frame. See :func:`tidy3.convert.problems`."""
@@ -1417,7 +1295,7 @@ class TidyFrame:
             raise TypeError(
                 "write_excel() sheets= must be a non-empty dict of sheet name to frame"
             )
-        _validate_execution_engine(engine, backend=self.backend)
+        _validate_execution_engine(engine)
         try:
             import xlsxwriter
         except ImportError as error:
@@ -1441,15 +1319,11 @@ class TidyFrame:
         return self._lf
 
     def explain(self, **kwargs: Any) -> str:
-        if self.backend == "pandas":
-            return "<pandas backend: eager, no query plan>"
         return self._lf.explain(**kwargs)
 
     def preview(self, n: int | None = None) -> Any:
         """Materialize only the first *n* rows (for inspection)."""
         n = get_options().preview_rows if n is None else n
-        if self.backend == "pandas":
-            return self._data.head(n)
         return self._lf.head(n).collect()
 
     def show(self, n: int | None = None) -> None:
@@ -1481,8 +1355,6 @@ class TidyFrame:
         opts = get_options()
         if n is None:
             n = opts.preview_rows if opts.preview else 10
-        if self.backend == "pandas":
-            return self._data.head(n), len(self._data)
         if opts.preview_count:
             head, count = pl.collect_all([self._lf.head(n), self._lf.select(pl.len())])
             return head, int(count.item())
@@ -1493,16 +1365,10 @@ class TidyFrame:
     def _preview_text(self, n: int | None = None) -> str:
         pdf, total = self._preview_parts(n)
         shown = len(pdf)
-        # The preview is already cut to *n* rows; stop the engine's own
-        # printer (10 rows in Polars, 60 in pandas) from cutting it again.
-        if isinstance(pdf, pl.DataFrame):
-            with pl.Config(tbl_rows=max(shown, 1)):
-                text = repr(pdf)
-        else:
-            import pandas as pd
-
-            with pd.option_context("display.max_rows", shown + 1, "display.min_rows", shown):
-                text = repr(pdf)
+        # The preview is already cut to *n* rows; stop Polars' own printer
+        # (10 rows) from cutting it again.
+        with pl.Config(tbl_rows=max(shown, 1)):
+            text = repr(pdf)
         lines = text.splitlines()
         if lines and lines[0].startswith("shape:"):
             lines = lines[1:]
@@ -1516,7 +1382,7 @@ class TidyFrame:
         return "\n".join(out)
 
     def _caption(self) -> str:
-        be = ", pandas" if self.backend == "pandas" else ""
+        be = ""
         groups = f" groups={self._groups}" if self._groups else ""
         rowwise = " rowwise" if self._rowwise else ""
         return f"TidyFrame (preview{be}{groups}{rowwise})"
@@ -1537,11 +1403,10 @@ class TidyFrame:
             from tidy3.errors import preview_error_html
 
             plan = None
-            if self.backend != "pandas":
-                try:
-                    plan = self._lf.explain(optimized=False)
-                except Exception:
-                    plan = None
+            try:
+                plan = self._lf.explain(optimized=False)
+            except Exception:
+                plan = None
             return preview_error_html(e, plan)
         from tidy3.display import df_to_html
 
@@ -1558,40 +1423,19 @@ class TidyFrame:
     # itself) makes it pick the HTML table.
 
     def __len__(self) -> int:
-        if self.backend == "pandas":
-            return len(self._data)
         return int(self._lf.select(pl.len()).collect().item())
 
 
-def _pandas_dates(pdf: Any, schema: Any) -> Any:
-    """Polars Date columns as ``datetime.date`` objects, the pandas backend's dates.
-
-    ``to_pandas()`` makes them ``datetime64``, which tidy3 reads as datetimes:
-    ``ceiling_date`` would then keep a date on a boundary instead of moving it.
-    """
-    import pandas as pd
-
-    for name, dtype in schema.items():
-        if dtype == pl.Date and name in pdf.columns:
-            column = pdf[name]
-            pdf[name] = pd.Series(
-                [None if pd.isna(value) else value.date() for value in column.tolist()],
-                index=pdf.index,
-                dtype="object",
-            )
-    return pdf
-
-
-def tidy(data: Any = None, backend: str | None = None, **kwargs: Any) -> TidyFrame:
+def tidy(data: Any = None, **kwargs: Any) -> TidyFrame:
     """Wrap data as a TidyFrame.
 
-    Accepts pandas DataFrame, polars DataFrame/LazyFrame, dict of columns,
-    or keyword columns like ``tidy(x=[1,2], y=[3,4])``.
-
-    ``backend`` selects the engine: ``"polars"`` (lazy, default) or
-    ``"pandas"`` (eager — for 1:1 engine comparisons). The default comes
-    from ``options(backend=...)``.
+    Accepts a pandas DataFrame, a Polars DataFrame or LazyFrame, a dict of
+    columns, or keyword columns like ``tidy(x=[1,2], y=[3,4])``. pandas input
+    becomes a lazy Polars frame that keeps its factor levels; use
+    ``collect(as_="pandas")`` to hand a result back to pandas.
     """
+    if "backend" in kwargs:
+        raise TypeError(_NO_PANDAS_BACKEND)
     # Best-effort: multi-line >> rewrite in IPython/SolveIt/CRAFT.
     try:
         from tidy3.jupyter import ensure_ipython_integration
@@ -1605,66 +1449,24 @@ def tidy(data: Any = None, backend: str | None = None, **kwargs: Any) -> TidyFra
         kwargs = {}
     if data is None:
         raise TypeError("tidy() requires data or column kwargs")
-
-    backend = backend or getattr(get_options(), "backend", "polars")
-    if backend not in ("polars", "pandas"):
-        raise ValueError(f"backend must be 'polars' or 'pandas', got {backend!r}")
-
-    if backend == "pandas":
-        import pandas as pd
-
-        if isinstance(data, TidyFrame):
-            if data.backend == "pandas":
-                return data
-            return TidyFrame(
-                _pandas_dates(data.collect(as_="pandas"), data._lf.collect_schema()),
-                groups=data._groups,
-                rowwise=data._rowwise,
-                group_drop=data._group_drop,
-                category_levels=data._category_levels,
-            )
-        if isinstance(data, pd.DataFrame):
-            return TidyFrame(data)
-        if isinstance(data, pl.LazyFrame):
-            data = data.collect()
-        if isinstance(data, pl.DataFrame):
-            return TidyFrame(_pandas_dates(data.to_pandas(), data.schema))
-        return TidyFrame(pd.DataFrame(data))
-
     if isinstance(data, TidyFrame):
-        if data.backend == "polars":
-            return data
-        return TidyFrame(
-            _from_pandas(data._pdf).lazy(),
-            groups=data._groups,
-            rowwise=data._rowwise,
-            group_drop=data._group_drop,
-            category_levels=data._category_levels,
-        )
+        return data
     if isinstance(data, pl.LazyFrame):
         return TidyFrame(data)
     if isinstance(data, pl.DataFrame):
         return TidyFrame(data.lazy())
-    # pandas
     try:
         import pandas as pd
 
         if isinstance(data, pd.DataFrame):
-            category_levels = {
-                str(name): FactorLevels(
-                    series.cat.categories.tolist(),
-                    ordered=bool(series.cat.ordered),
-                )
-                for name, series in data.items()
-                if isinstance(series.dtype, pd.CategoricalDtype)
-            }
-            return TidyFrame(
-                _from_pandas(data).lazy(),
-                category_levels=category_levels,
-            )
+            return TidyFrame(data)
     except ImportError:
         pass
-    if isinstance(data, dict):
-        return TidyFrame(pl.DataFrame(data).lazy())
-    # fallback: try polars constructor
     return TidyFrame(pl.DataFrame(data).lazy())
+
+
+_NO_PANDAS_BACKEND = (
+    "tidy3 runs on Polars only; the pandas backend was removed in 0.8. "
+    "pandas DataFrames are still accepted as input, and collect(as_=\"pandas\") "
+    "returns a pandas result."
+)

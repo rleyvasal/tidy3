@@ -6,8 +6,7 @@ import pytest
 from tidy3 import col, collect, filter, starts_with, tidy, to_numpy
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
-def test_to_numpy_projects_before_conversion(backend):
+def test_to_numpy_projects_before_conversion():
     frame = tidy(
         {
             "id": [1, 2, 3],
@@ -15,7 +14,6 @@ def test_to_numpy_projects_before_conversion(backend):
             "feature_b": [4, 5, 6],
             "label": ["a", "b", "c"],
         },
-        backend=backend,
     ) >> filter(col("id") > 1)
 
     matrix = frame.to_numpy(
@@ -32,11 +30,9 @@ def test_to_numpy_projects_before_conversion(backend):
     assert matrix.flags.writeable
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
-def test_collect_and_pipe_can_return_numpy(backend):
+def test_collect_and_pipe_can_return_numpy():
     frame = tidy(
         {"x": [1, 2], "y": [3, 4], "unused": ["a", "b"]},
-        backend=backend,
     )
 
     collected = frame.collect(
@@ -54,9 +50,8 @@ def test_collect_and_pipe_can_return_numpy(backend):
     assert piped_collect.dtype == np.float32
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
-def test_numpy_array_protocol_materializes_tidyframe(backend):
-    frame = tidy({"x": [1, 2], "y": [3, 4]}, backend=backend)
+def test_numpy_array_protocol_materializes_tidyframe():
+    frame = tidy({"x": [1, 2], "y": [3, 4]})
 
     array = np.asarray(frame, dtype=np.float32)
     copied = np.array(frame, dtype=np.float64, copy=True)

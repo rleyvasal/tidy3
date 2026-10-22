@@ -34,7 +34,7 @@ python -m tidy3.bench_suite --rows 1000000 --repeat 5 --output native --polars-e
 
 # Ratio-based CI budgets; workloads under 10ms are ignored as noise-prone
 python -m tidy3.bench_suite --rows 1000000 --repeat 5 --output native \
-  --max-tidy-pandas-geo 1.25 --max-tidy-polars-geo 1.25 \
+  --max-tidy-polars-geo 1.25 \
   --budget-min-ms 10
 ```
 
@@ -57,7 +57,6 @@ Apple-silicon laptop, 10M rows × 100 groups, filter→mutate→group_by→summa
 | **tidy3[polars]** | 40.6ms | 1.0x |
 | polars (raw lazy) | 41.5ms | 1.0x |
 | pandas (raw) | 60.1ms | 1.5x |
-| **tidy3[pandas]** | 60.8ms | 1.5x |
 | datar[pandas] | 166.3ms | 4.1x |
 
 An isolated one-expression mutate is a useful boundary stress test because
@@ -66,7 +65,6 @@ pandas Copy-on-Write makes the baseline unusually cheap. On the same laptop,
 
 | execution and output boundary | time | vs raw pandas |
 |---|---:|---:|
-| tidy3[pandas] → pandas | 5.0ms | 1.0x |
 | raw pandas → pandas | 5.1ms | 1.0x |
 | tidy3[polars] → native Polars | 10.4ms | 2.1x |
 | raw Polars → native Polars | 10.7ms | 2.1x |
@@ -77,8 +75,7 @@ pandas Copy-on-Write makes the baseline unusually cheap. On the same laptop,
 This replaces the old `41.9ms (8.7x)` cell, which combined Polars execution
 with a full NumPy conversion and presented the total as one engine number.
 The remaining 2.1x on this deliberately tiny operation is Polars engine cost:
-tidy3 tracks raw Polars within measurement noise. For a single cheap mutate
-followed immediately by NumPy pandas, use the pandas backend. For longer lazy
+tidy3 tracks raw Polars within measurement noise. For longer lazy
 pipelines, collect once at the end, project needed columns first, and prefer
 native or Arrow-backed output. Aggregations, joins, sorts, and full workflows
 are the adoption-relevant comparison in `bench_suite`.
@@ -106,7 +103,7 @@ TIDY3_R_ORACLE_MANIFEST=/path/to/pixi.toml \
   pytest -q tests/test_r_oracle_parity.py
 ```
 
-All supported verb contracts in the oracle are strict tests on both backends;
+All supported verb contracts in the oracle are strict tests;
 there are no expected-failure parity cases. Random sampling and explicit
 materialization boundaries use deterministic invariants where byte-for-byte
 comparison with R would be inappropriate.

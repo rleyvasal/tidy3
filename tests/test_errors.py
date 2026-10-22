@@ -21,13 +21,12 @@ from tidy3 import (
     tidy,
 )
 
-BACKENDS = ["polars", "pandas"]
 DATA = {"species": ["Adelie", "Gentoo"], "bill_length_mm": [39.1, 46.1], "body_mass_g": [3750, 4500]}
 
 
-@pytest.fixture(params=BACKENDS)
-def penguins(request):
-    return tidy(DATA, backend=request.param)
+@pytest.fixture
+def penguins():
+    return tidy(DATA)
 
 
 @pytest.mark.parametrize(

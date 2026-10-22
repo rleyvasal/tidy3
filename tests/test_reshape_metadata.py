@@ -18,22 +18,21 @@ OPERATIONS = [
 ]
 
 
-def grouped_frame(backend):
+def grouped_frame():
     source = pd.DataFrame({
         "g": pd.Categorical(["b", "a", "b"], categories=["a", "b", "unused"], ordered=True),
         "code": ["x-y", "p-q", "r-s"], "x": [2, 4, 8],
         "record": [{"nested_value": 10}, {"nested_value": 20}, {"nested_value": 30}],
         "raw": ["bad", "2", "3"],
     }, index=[4, 4, 0])
-    return (t.tidy(source, backend=backend) >> t.mutate(parsed=t.parse_integer("raw"))
+    return (t.tidy(source) >> t.mutate(parsed=t.parse_integer("raw"))
             >> t.group_by("g", drop=False))
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
 @pytest.mark.parametrize("empty", [False, True])
 @pytest.mark.parametrize("operation,multiplier", OPERATIONS)
-def test_reshape_preserves_groups_levels_and_original_problems(backend, empty, operation, multiplier):
-    frame = grouped_frame(backend)
+def test_reshape_preserves_groups_levels_and_original_problems(empty, operation, multiplier):
+    frame = grouped_frame()
     if empty:
         frame = frame >> t.head(0)
     expected_problems = t.problems(frame).collect().to_dicts()
@@ -53,18 +52,16 @@ def test_reshape_preserves_groups_levels_and_original_problems(backend, empty, o
     assert summary["rows"].to_list() == ([0, 0, 0] if empty else [multiplier, 2 * multiplier, 0])
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
-def test_packing_a_group_column_keeps_only_surviving_groups(backend):
-    frame = grouped_frame(backend) >> t.group_by("g", "code", drop=False)
+def test_packing_a_group_column_keeps_only_surviving_groups():
+    frame = grouped_frame() >> t.group_by("g", "code", drop=False)
     out = frame >> t.pack("packed", "code")
     assert out._groups == ["g"]
     assert out._group_drop is False
     assert t.problems(out).collect().height == 1
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
-def test_separating_a_group_column_keeps_only_surviving_groups(backend):
-    frame = grouped_frame(backend) >> t.group_by("g", "code", drop=False)
+def test_separating_a_group_column_keeps_only_surviving_groups():
+    frame = grouped_frame() >> t.group_by("g", "code", drop=False)
     out = frame >> t.separate_wider_delim("code", names=["left", "right"], delim="-")
     assert out._groups == ["g"]
     assert out._group_drop is False

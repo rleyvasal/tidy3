@@ -306,7 +306,7 @@ kernel under CRAFT or SolveIt: [docs/craft.md](docs/craft.md).
 ## More
 
 - **[Reference](docs/reference.md)**: every verb family, the API table,
-  backends (Polars or eager pandas), joins, `across`, row-wise work, and
+  pandas input and output, joins, `across`, row-wise work, and
   performance controls.
 - **[Benchmarks and R parity](docs/benchmarks.md)**: how tidy3 is timed,
   and the suite that checks its results against dplyr and tidyr.

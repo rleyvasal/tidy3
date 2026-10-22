@@ -12,31 +12,28 @@ import pytest
 import tidy3 as t3
 from tidy3 import col, mutate, partial_run, tidy, transform_source
 
-BACKENDS = ("polars", "pandas")
 
 
-def mtcars(backend: str):
-    return tidy({"model": ["Mazda RX4", "Datsun 710"], "hp": [110, 93]}, backend=backend)
+def mtcars():
+    return tidy({"model": ["Mazda RX4", "Datsun 710"], "hp": [110, 93]})
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_quoted_string_is_text(backend):
-    out = mtcars(backend) >> mutate(source="mtcars", hp_copy=col("hp"))
+def test_quoted_string_is_text():
+    out = mtcars() >> mutate(source="mtcars", hp_copy=col("hp"))
     data = out.collect()
     assert data["source"].to_list() == ["mtcars", "mtcars"]
     assert data["hp_copy"].to_list() == [110, 93]
     # Even when the text matches a column name, it is still text.
-    named = mtcars(backend) >> mutate(label="hp")
+    named = mtcars() >> mutate(label="hp")
     assert named.collect()["label"].to_list() == ["hp", "hp"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_quoted_string_is_text_in_transmute_and_by(backend):
-    kept = mtcars(backend) >> t3.transmute(source="mtcars", hp=col("hp"))
+def test_quoted_string_is_text_in_transmute_and_by():
+    kept = mtcars() >> t3.transmute(source="mtcars", hp=col("hp"))
     assert kept.collect().to_dicts()[0] == {"source": "mtcars", "hp": 110}
-    grouped = mtcars(backend) >> mutate(source="mtcars", by="model")
+    grouped = mtcars() >> mutate(source="mtcars", by="model")
     assert grouped.collect()["source"].to_list() == ["mtcars", "mtcars"]
-    summary = mtcars(backend) >> t3.summarise(source="mtcars", n=t3.n())
+    summary = mtcars() >> t3.summarise(source="mtcars", n=t3.n())
     assert summary.collect().to_dicts() == [{"source": "mtcars", "n": 2}]
 
 

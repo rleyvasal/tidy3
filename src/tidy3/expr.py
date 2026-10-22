@@ -1,11 +1,8 @@
-"""Backend-neutral column expressions.
+"""Column expressions.
 
-``col("x") > 10`` builds a small AST. On the polars backend it compiles 1:1
-to a ``pl.Expr`` (``to_polars``); on the pandas backend it is evaluated
-directly against the DataFrame (``tidy3.pandas_engine``). Unknown methods
-are recorded symbolically, so the full Polars expression API keeps working
-under ``backend="polars"``, while the pandas backend supports a documented
-subset and fails with a clear message otherwise.
+``col("x") > 10`` builds a small AST that compiles 1:1 to a ``pl.Expr``
+(``to_polars``). Unknown methods are recorded symbolically, so the full
+Polars expression API keeps working.
 
 Node forms (tuples): ("col", name) | ("lit", v) | ("pl", pl.Expr) |
 ("bin", op, l, r) | ("neg", x) | ("not", x) | ("n",) | ("desc", x) |

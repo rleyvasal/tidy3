@@ -60,22 +60,15 @@ def test_collect_streaming_engine_and_pipe_verb():
     assert piped.to_dict(as_series=False) == {"id": [2, 3]}
 
 
-def test_polars_execution_modes_are_rejected_for_pandas_backend():
-    frame = tidy({"id": [1, 2]}, backend="pandas")
-    with pytest.raises(ValueError, match="Polars execution option"):
-        frame.collect(engine="streaming")
-
-
 def test_unknown_execution_engine_is_rejected():
     with pytest.raises(ValueError, match="engine must be one of"):
         tidy({"id": [1, 2]}).collect(engine="turbo")
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
-def test_write_csv_and_scan_roundtrip(tmp_path: Path, backend: str):
-    path = tmp_path / f"result-{backend}.csv"
+def test_write_csv_and_scan_roundtrip(tmp_path: Path):
+    path = tmp_path / "result.csv"
     frame = tidy(
-        {"id": [1, 2, 3], "value": [1.5, 2.5, 3.5]}, backend=backend
+        {"id": [1, 2, 3], "value": [1.5, 2.5, 3.5]}
     ) >> filter(col("id") > 1)
     frame.write_csv(path)
     out = pl.read_csv(path)
@@ -85,11 +78,10 @@ def test_write_csv_and_scan_roundtrip(tmp_path: Path, backend: str):
     }
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
-def test_write_parquet_and_scan_roundtrip(tmp_path: Path, backend: str):
-    path = tmp_path / f"result-{backend}.parquet"
+def test_write_parquet_and_scan_roundtrip(tmp_path: Path):
+    path = tmp_path / "result.parquet"
     frame = tidy(
-        {"id": [1, 2, 3], "value": [1.5, 2.5, 3.5]}, backend=backend
+        {"id": [1, 2, 3], "value": [1.5, 2.5, 3.5]}
     ) >> filter(col("id") > 1)
     frame.write_parquet(path)
     out = pl.read_parquet(path)
@@ -140,12 +132,11 @@ def test_gpu_writers_materialize_before_serialization(
     assert reader(path)["id"].to_list() == [1, 2, 3]
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
 def test_write_excel_or_actionable_optional_dependency_error(
-    tmp_path: Path, backend: str
+    tmp_path: Path
 ):
-    path = tmp_path / f"result-{backend}.xlsx"
-    frame = tidy({"id": [1, 2], "value": [3.5, 4.5]}, backend=backend)
+    path = tmp_path / "result.xlsx"
+    frame = tidy({"id": [1, 2], "value": [3.5, 4.5]})
     try:
         import xlsxwriter  # noqa: F401
     except ImportError:
@@ -193,40 +184,22 @@ def test_inner_join():
     assert out.height == 2
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
-def test_natural_join_uses_common_columns(backend):
+def test_natural_join_uses_common_columns():
     left = pd.DataFrame({"id": [1, 2, 3], "v": [10, 20, 30]})
     right = pd.DataFrame({"id": [1, 2], "w": ["a", "b"]})
 
-    out = (tidy(left, backend=backend) >> left_join(right)).collect(as_="pandas")
+    out = (tidy(left) >> left_join(right)).collect(as_="pandas")
 
     assert out["id"].tolist() == [1, 2, 3]
     assert out["w"].iloc[:2].tolist() == ["a", "b"]
     assert pd.isna(out["w"].iloc[2])
 
 
-def test_join_converts_tidyframe_from_the_other_backend():
-    left_pd = pd.DataFrame({"id": [1, 2, 3], "v": [10, 20, 30]})
-    right_pd = pd.DataFrame({"id": [1, 2], "w": ["a", "b"]})
-
-    polars_out = (
-        tidy(left_pd, backend="polars")
-        >> left_join(tidy(right_pd, backend="pandas"), on="id")
-    ).collect(as_="pandas")
-    pandas_out = (
-        tidy(left_pd, backend="pandas")
-        >> left_join(tidy(right_pd, backend="polars"), on="id")
-    ).collect(as_="pandas")
-
-    pd.testing.assert_frame_equal(polars_out, pandas_out, check_dtype=False)
-
-
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
-def test_natural_join_requires_at_least_one_common_column(backend):
+def test_natural_join_requires_at_least_one_common_column():
     left = pd.DataFrame({"id": [1, 2]})
     right = pd.DataFrame({"other": [1, 2]})
     with pytest.raises(ValueError, match="no common columns"):
-        tidy(left, backend=backend) >> inner_join(right)
+        tidy(left) >> inner_join(right)
 
 
 def test_with_polars_escape():

@@ -10,15 +10,13 @@ import pytest
 import tidy3 as t
 
 
-BACKENDS = ["polars", "pandas"]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_with_tz_preserves_instant_while_force_tz_preserves_clock(backend):
+def test_with_tz_preserves_instant_while_force_tz_preserves_clock():
     zone = ZoneInfo("America/New_York")
     values = [datetime(2024, 1, 2, 12, 34, 56, 125000, tzinfo=zone),
               datetime(2024, 7, 2, 12, 34, 56, 125000, tzinfo=zone), None]
-    out = (t.tidy({"x": values}, backend=backend) >> t.mutate(
+    out = (t.tidy({"x": values}) >> t.mutate(
         displayed=t.with_tz("x", "Asia/Kathmandu"),
         forced=t.force_tz("x", "Asia/Kathmandu"),
     )).collect()
@@ -29,22 +27,20 @@ def test_with_tz_preserves_instant_while_force_tz_preserves_clock(backend):
     assert out["forced"].dtype.time_zone == out["displayed"].dtype.time_zone == "Asia/Kathmandu"
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_naive_and_date_inputs_have_explicit_utc_rules(backend):
+def test_naive_and_date_inputs_have_explicit_utc_rules():
     values = [datetime(2024, 1, 2, 12, 34, 56), None]
-    out = (t.tidy({"x": values}, backend=backend) >> t.mutate(
+    out = (t.tidy({"x": values}) >> t.mutate(
         displayed=t.with_tz("x", "America/New_York"), forced=t.force_tz("x", "America/New_York")
     )).collect()
     assert out["displayed"][0].hour == 7
     assert out["forced"][0].hour == 12
-    dates = (t.tidy({"x": [date(2024, 1, 2), None]}, backend=backend) >> t.mutate(
+    dates = (t.tidy({"x": [date(2024, 1, 2), None]}) >> t.mutate(
         displayed=t.with_tz("x", "America/New_York"), forced=t.force_tz("x", "America/New_York")
     )).collect()
     assert dates["displayed"][0].isoformat() == "2024-01-01T19:00:00-05:00"
     assert dates["forced"][0].isoformat() == "2024-01-02T00:00:00-05:00"
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("policy,expected", [
     ("NA", [None, None]),
     ("pre", ["2024-03-10T01:30:00-05:00", "2024-11-03T01:30:00-04:00"]),
@@ -53,29 +49,27 @@ def test_naive_and_date_inputs_have_explicit_utc_rules(backend):
     (("NA", "post"), [None, "2024-11-03T01:30:00-05:00"]),
     (("post", "pre"), ["2024-03-10T03:30:00-04:00", "2024-11-03T01:30:00-04:00"]),
 ])
-def test_force_tz_dst_policies(backend, policy, expected):
-    frame = t.tidy({"x": [datetime(2024, 3, 10, 2, 30), datetime(2024, 11, 3, 1, 30), None]}, backend=backend)
+def test_force_tz_dst_policies(policy, expected):
+    frame = t.tidy({"x": [datetime(2024, 3, 10, 2, 30), datetime(2024, 11, 3, 1, 30), None]})
     out = (frame >> t.mutate(at=t.force_tz("x", "America/New_York", roll_dst=policy))).collect()["at"]
     assert [v.isoformat() if v else None for v in out] == expected + [None]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_resolved_repeats_preserve_occurrence_even_with_a_roll_policy(backend):
+def test_resolved_repeats_preserve_occurrence_even_with_a_roll_policy():
     zone = ZoneInfo("America/Toronto")
     values = [datetime(2024, 11, 3, 1, 30, 0, 125000, tzinfo=zone, fold=fold) for fold in [0, 1]]
-    frame = t.tidy({"x": values}, backend=backend)
+    frame = t.tidy({"x": values})
     for policy in ["NA", "pre", "post", "boundary"]:
         for target in ["America/Toronto", "America/New_York"]:
             out = (frame >> t.mutate(at=t.force_tz("x", target, roll_dst=policy))).collect()
             assert out["at"].cast(pl.Int64).to_list() == out["x"].cast(pl.Int64).to_list()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("unit,scale,remainder", [("ms", 1000, 125), ("us", 1_000_000, 123456), ("ns", 1_000_000_000, 123456789)])
-def test_datetime_precision_survives_conversion_and_dst_rolls(backend, unit, scale, remainder):
+def test_datetime_precision_survives_conversion_and_dst_rolls(unit, scale, remainder):
     base = int(datetime(2024, 3, 10, 2, 30, tzinfo=timezone.utc).timestamp()) * scale
     source = pl.Series("x", [base + remainder, None], dtype=pl.Datetime(unit, "UTC")).to_frame()
-    out = (t.tidy(source, backend=backend) >> t.mutate(
+    out = (t.tidy(source) >> t.mutate(
         shown=t.with_tz("x", "America/New_York"),
         pre=t.force_tz("x", "America/New_York", roll_dst="pre"),
         post=t.force_tz("x", "America/New_York", roll_dst="post"),
@@ -90,20 +84,18 @@ def test_datetime_precision_survives_conversion_and_dst_rolls(backend, unit, sca
     assert out["mixed"].cast(pl.Int64).to_list() == out["boundary"].cast(pl.Int64).to_list()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("values", [[], [None, None]])
-def test_empty_and_null_columns_keep_the_target_zone(backend, values):
-    frame = t.tidy(pl.Series("x", values, dtype=pl.Datetime("us", "UTC")).to_frame(), backend=backend)
+def test_empty_and_null_columns_keep_the_target_zone(values):
+    frame = t.tidy(pl.Series("x", values, dtype=pl.Datetime("us", "UTC")).to_frame())
     out = (frame >> t.mutate(shown=t.with_tz("x", "Asia/Kathmandu"), forced=t.force_tz("x", "Asia/Kathmandu"))).collect()
     for name in ["shown", "forced"]:
         assert out[name].dtype == pl.Datetime("us", "Asia/Kathmandu")
         assert out[name].null_count() == len(values)
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_grouped_nested_across_and_duplicate_indexes(backend):
+def test_grouped_nested_across_and_duplicate_indexes():
     source = pd.DataFrame({"g": ["a", "a", "b"], "x": pd.to_datetime(["2024-01-02 12:34:56", None, "2024-07-02 12:34:56"], utc=True)}, index=[1, 1, 0])
-    frame = t.tidy(source, backend=backend)
+    frame = t.tidy(source)
     summary = frame >> t.group_by("g") >> t.summarise(at=t.with_tz(t.first("x"), "America/New_York"))
     assert [v.hour for v in summary.collect()["at"]] == [7, 8]
     across = frame >> t.mutate(t.across("x", lambda x: t.force_tz(x, "Asia/Kathmandu")))
@@ -139,8 +131,7 @@ def test_timezone_options_are_validated_at_construction():
         t.force_tz("x", roll_dst=None)
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_timezone_helpers_require_temporal_columns(backend):
+def test_timezone_helpers_require_temporal_columns():
     for helper in [t.with_tz, t.force_tz]:
         with pytest.raises((TypeError, pl.exceptions.InvalidOperationError)):
-            (t.tidy({"x": ["2024-01-02"]}, backend=backend) >> t.mutate(at=helper("x"))).collect()
+            (t.tidy({"x": ["2024-01-02"]}) >> t.mutate(at=helper("x"))).collect()

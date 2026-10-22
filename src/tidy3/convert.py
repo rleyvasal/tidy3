@@ -256,17 +256,6 @@ def output_column(name: str) -> Iterator[None]:
         _OUTPUT.reset(token)
 
 
-@contextmanager
-def problem_sink() -> Iterator[list[dict[str, Any]]]:
-    """Collect permissive failures while the pandas backend evaluates."""
-    rows: list[dict[str, Any]] = []
-    token = _SINK.set(rows)
-    try:
-        yield rows
-    finally:
-        _SINK.reset(token)
-
-
 def _column_name(raw_args: tuple, fallback: str | None) -> str:
     if raw_args and raw_args[0][0] in {"col", "name"}:
         return str(raw_args[0][1])
@@ -1600,17 +1589,6 @@ def empty_problems_lazy() -> pl.LazyFrame:
     return pl.DataFrame(schema=_PROBLEM_SCHEMA).lazy()
 
 
-def empty_problems_pandas() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "row": pd.Series(dtype="int64"),
-            "column": pd.Series(dtype="string"),
-            "original": pd.Series(dtype="string"),
-            "expected": pd.Series(dtype="string"),
-        }
-    )
-
-
 def _node_options(name: str, kwargs: dict[str, Any]) -> dict[str, Any] | None:
     """Options when this call records problems, else None."""
     kind, default_strict, expected, detail = _SPECS[name]
@@ -1738,23 +1716,6 @@ def merge_problem_plans(
     return pl.concat(frames, how="vertical")
 
 
-def pandas_problem_frame(rows: list[dict[str, Any]]) -> pd.DataFrame | None:
-    if not rows:
-        return None
-    return pd.DataFrame(rows, columns=["row", "column", "original", "expected"])
-
-
-def merge_pandas_problems(
-    existing: pd.DataFrame | None, rows: list[dict[str, Any]]
-) -> pd.DataFrame | None:
-    added = pandas_problem_frame(rows)
-    if existing is None:
-        return added
-    if added is None:
-        return existing
-    return pd.concat([existing, added], ignore_index=True)
-
-
 def problems_frame(data: Any) -> Any:
     """A frame of parse failures: row, column, original, expected.
 
@@ -1766,9 +1727,6 @@ def problems_frame(data: Any) -> Any:
     if not isinstance(data, TidyFrame):
         raise TypeError("problems() expects a TidyFrame")
     stored = getattr(data, "_problems", None)
-    if data.backend == "pandas":
-        frame = stored if stored is not None else empty_problems_pandas()
-        return TidyFrame(frame.copy())
     plan = stored if stored is not None else empty_problems_lazy()
     return TidyFrame(plan)
 

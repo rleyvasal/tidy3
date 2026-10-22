@@ -210,16 +210,68 @@ def test_select_keeps_groups(cars):
     assert "cyl" in out.columns
 
 
-@pytest.mark.parametrize("backend", ["polars", "pandas"])
-def test_mutate_list_is_one_value_per_row(backend):
+def test_mutate_list_is_one_value_per_row():
     # dplyr: mutate(c = c(0, 1, 0)) is a column. Polars used to repeat the
     # whole list in every row; NumPy arrays already worked.
     import numpy as np
 
     from tidy3 import mutate, tidy
 
-    df = tidy({"x": [1.0, 2.0, 3.0]}, backend=backend)
+    df = tidy({"x": [1.0, 2.0, 3.0]})
     out = (df >> mutate(c=[0, 1, 0], d=(5, 6, 7), e=np.array([1, 1, 2]))).collect(as_="pandas")
     assert out["c"].tolist() == [0, 1, 0]
     assert out["d"].tolist() == [5, 6, 7]
     assert out["e"].tolist() == [1, 1, 2]
+
+
+def test_count_weight_sort_name_collision_and_group_metadata():
+    import pandas as pd
+
+    from tidy3 import count, tally
+
+    data = pd.DataFrame(
+        {"g": ["a", "a", "b"], "h": [1, 2, 1], "w": [2, 3, 9], "n": [0, 0, 0], "nn": [0, 0, 0]}
+    )
+    counted = tidy(data) >> group_by("g") >> count(wt="w", sort=True)
+    assert counted._groups == ["g"]
+    out = counted.collect(as_="pandas")
+    assert list(out.columns) == ["g", "nnn"]
+    assert out["g"].tolist() == ["b", "a"]
+    assert out["nnn"].tolist() == [9, 5]
+    tallied = tidy(data) >> group_by("g", "h") >> tally()
+    assert tallied._groups == ["g"]
+    with pytest.raises(TypeError):
+        tally("g")
+
+
+@pytest.mark.parametrize("rows, expected", [(1, 0), (3, 1), (5, 2), (7, 3)])
+def test_sample_frac_rounds_towards_zero(rows, expected):
+    from tidy3 import sample_frac
+
+    out = (tidy({"x": list(range(rows))}) >> sample_frac(0.5, seed=3)).collect()
+    assert len(out) == expected
+
+
+def test_negative_sample_sizes_select_the_complement():
+    from tidy3 import sample_frac, sample_n
+
+    data = {"x": list(range(8))}
+    assert len((tidy(data) >> sample_n(-2, seed=3)).collect()) == 6
+    assert len((tidy(data) >> sample_frac(-0.25, seed=3)).collect()) == 6
+
+
+def test_grouped_sample_frac_truncates_within_each_group():
+    from tidy3 import sample_frac
+
+    data = {"g": ["a", "b", "b", "c", "c", "c", "c"]}
+    out = (tidy(data) >> group_by("g") >> sample_frac(0.5, seed=3)).collect()
+    assert dict(out["g"].value_counts().iter_rows()) == {"c": 2, "b": 1}
+
+
+def test_distinct_keeps_first_occurrence_order():
+    from tidy3 import distinct
+
+    data = {"x": [3, 1, 2, 1, 3], "y": list("abcde")}
+    out = (tidy(data) >> distinct("x", keep_all=True)).collect()
+    assert out["x"].to_list() == [3, 1, 2]
+    assert out["y"].to_list() == ["a", "b", "c"]
