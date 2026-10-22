@@ -4,7 +4,9 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.8.0 — 2026-10-22
+
+tidy3 runs on Polars only: pandas comes in and goes out, but the pandas backend is gone. Pipelines export as plain Polars code, and most operations run within a millisecond of raw Polars.
 
 ### Added
 
