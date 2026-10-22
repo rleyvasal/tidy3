@@ -414,7 +414,8 @@ row is row 2; skipped and comment lines do not count. On Polars that frame is a 
 when the parse was added. Calling `problems()` does not collect the data.
 `compute()`, and so `read_csv`, works out the failures in the same run as
 the data, so `problems()` afterwards does not read the source again. `stop_for_problems()`
-collects the problems plan and raises `ConversionError` when any row failed.
+computes the data and its failures in one run, raises `ConversionError` when
+any row failed, and otherwise returns the computed frame.
 `ymd`, `mdy`, `dmy`, and `ym` use the same recorder. They default to
 permissive. Orders accept `-`, `/`, `.`, spaces, compact digits
 (`20100131`), month names (`"Jan 31 2010"`, `"31 January 2010"`), and

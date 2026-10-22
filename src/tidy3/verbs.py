@@ -2130,9 +2130,13 @@ def with_groups(cols: Any, fn: Any) -> Verb:
     return Verb(_apply, "with_groups")
 
 
+# Up to this many groups, group callbacks get lazy filtered parts.
+_FILTER_PARTS_MAX = 32
+
+
 def _grouped_parts(
     tf: Any, cols: tuple[Any, ...]
-) -> list[tuple[dict[str, Any], Any, tuple[int, ...]]]:
+) -> list[tuple[dict[str, Any], Any, Any]]:
     """Materialize stable group partitions for Python group callbacks."""
     from tidy3.frame import note_data_read, tidy
 
@@ -2147,21 +2151,33 @@ def _grouped_parts(
     names, table = _group_table(tf, None if not cols else names)
     # One materialized copy of the frame, in its own backend.
     frame = tf._lf.collect()
-    if table:
-        import numpy as np
+    parts: list[tuple[dict[str, Any], Any, Any]] = []
+    if not table:
+        return parts
+    import numpy as np
 
-        # One gather in group order, then zero-copy slices: cheaper than a
-        # gather per group on wide frames.
+    if len(table) <= _FILTER_PARTS_MAX:
+        # Few groups: each part is a lazy filter on a group-id column.
+        # A sequential filter is cheaper than a gather on wide frames, and
+        # a callback that keeps a few rows lets Polars skip the rest.
+        group_id = np.full(frame.height, -1, dtype=np.int32)
+        for index, (_, positions) in enumerate(table):
+            group_id[positions] = index
+        ids = pl.Series(group_id)
+        base = frame.lazy()
+        subsets = [base.filter(pl.lit(ids) == index) for index in range(len(table))]
+    else:
+        # Many groups: one gather in group order, then zero-copy slices.
         ordered = frame.gather(pl.Series(np.concatenate([p for _, p in table]), dtype=pl.Int64))
         starts = np.concatenate([[0], np.cumsum([len(p) for _, p in table])])
-    parts: list[tuple[dict[str, Any], Any, tuple[int, ...]]] = []
-    for index, (key_tuple, positions) in enumerate(table):
-        subset = (
+        subsets = [
             ordered.slice(int(starts[index]), len(positions))
-        )
+            for index, (_, positions) in enumerate(table)
+        ]
+    for (key_tuple, positions), subset in zip(table, subsets):
         key_map = dict(zip(names, key_tuple))
-        row_positions = tuple(positions.tolist())
-        parts.append((key_map, tidy(subset), row_positions))
+        # cur_group_rows() turns the positions into a tuple on first use.
+        parts.append((key_map, tidy(subset), positions))
     return parts
 
 
@@ -2192,19 +2208,19 @@ def group_map(fn: Any, *cols: Any) -> Verb:
     return Verb(_apply, "group_map")
 
 
-def _as_polars_frame(value: Any) -> pl.DataFrame:
-    """A group_modify() callback result as a Polars DataFrame."""
+def _as_polars_lazy(value: Any) -> pl.LazyFrame:
+    """A group_modify() callback result as a Polars LazyFrame."""
     from tidy3.frame import TidyFrame
 
     if isinstance(value, TidyFrame):
-        return value._lf.collect()
+        return value._lf
     if isinstance(value, pl.LazyFrame):
-        return value.collect()
-    if isinstance(value, pl.DataFrame):
         return value
+    if isinstance(value, pl.DataFrame):
+        return value.lazy()
     if hasattr(value, "columns") and hasattr(value, "to_dict"):
-        return pl.from_pandas(value)
-    return pl.DataFrame(value, strict=False)
+        return pl.from_pandas(value).lazy()
+    return pl.DataFrame(value, strict=False).lazy()
 
 
 def group_modify(fn: Any, *cols: Any) -> Verb:
@@ -2225,9 +2241,9 @@ def group_modify(fn: Any, *cols: Any) -> Verb:
             outputs.append(result)
         if not outputs:
             return tidy({})
-        # Polars: bind the callback results without a pandas round trip.
-        frames = [_as_polars_frame(r) for r in outputs]
-        return tidy(pl.concat(frames, how="diagonal_relaxed").lazy())
+        # Bind the callback results in one plan, collected once.
+        frames = [_as_polars_lazy(r) for r in outputs]
+        return tidy(pl.concat(frames, how="diagonal_relaxed").collect().lazy())
 
     return Verb(_apply, "group_modify")
 
@@ -3059,6 +3075,12 @@ def _join_by_predicate(condition: Any, right_names: dict[str, str]) -> pl.Expr:
     }[condition.operator]
 
 
+def _distinct(values: pl.Series) -> bool:
+    """Whether the present values never repeat, read without a query."""
+    nulls = values.null_count()
+    return values.n_unique() - (1 if nulls else 0) == values.len() - nulls
+
+
 def _polars_closest_pairs(
     left: pl.LazyFrame,
     right: pl.LazyFrame,
@@ -3137,8 +3159,10 @@ def _polars_join_by(
     unmatched: str,
     relationship: str | None,
     right_rows: int | None = None,
+    right_table: pl.DataFrame | None = None,
 ):
     pairs_ordered = False
+    unique_right = False
     left_columns = _frame_columns(tf)
     right_columns = right.collect_schema().names()
     for condition in spec.conditions:
@@ -3202,10 +3226,37 @@ def _polars_join_by(
     else:
         match_left, match_right = left, y
     if fast_rolling:
-        candidates = _polars_closest_pairs(
-            match_left, match_right, spec, left_id=left_id, right_id=right_id,
-            right_names=right_names, na_matches=na_matches,
+        # An in-memory y whose keys do not repeat gives each x row at most
+        # one match, so its key alone identifies the matched y row.
+        unique_right = (
+            not equality
+            and how in {"left", "inner"}
+            and right_table is not None
+            and not left_schema[rolling.left].is_float()
+            and _distinct(right_table.get_column(rolling.right))
         )
+        if unique_right:
+            key, right_key = rolling.left, right_names[rolling.right]
+            nearest = (
+                left.select(left_id, key)
+                .sort(key, nulls_last=True)
+                .join_asof(
+                    y.select(right_key).filter(pl.col(right_key).is_not_null()).sort(right_key),
+                    left_on=key, right_on=right_key,
+                    strategy="backward" if rolling.operator in {">", ">="} else "forward",
+                    allow_exact_matches=rolling.operator in {">=", "<="},
+                    coalesce=False, check_sortedness=False,
+                )
+            )
+            # The id pairs, for the relationship and unmatched checks.
+            candidates = nearest.join(
+                y.select(right_id, right_key), on=right_key, how="inner"
+            ).select(left_id, right_id)
+        else:
+            candidates = _polars_closest_pairs(
+                match_left, match_right, spec, left_id=left_id, right_id=right_id,
+                right_names=right_names, na_matches=na_matches,
+            )
     elif equality:
         candidates = match_left.join(
             match_right,
@@ -3305,10 +3356,34 @@ def _polars_join_by(
             # The nested-loop candidates already hold both sides' columns in
             # dplyr's order: an inner join is done; a left join adds back x's
             # unmatched rows with one join on the row id.
-            matched = candidates.select(left_id, right_id, *right_names.values())
-            combined = candidates if how == "inner" else left.join(
-                matched, on=left_id, how="left", maintain_order="left_right"
+            if how == "inner":
+                combined = candidates
+            elif right_rows == 1:
+                # One y row: each x row keeps it where the conditions hold
+                # and gets missing values elsewhere. No join back needed.
+                predicate = pl.all_horizontal(inequalities)
+                combined = match_left.join(match_right, how="cross", maintain_order="left").with_columns(
+                    pl.when(predicate).then(pl.col(name)).alias(name)
+                    for name in [right_id, *right_names.values()]
+                )
+            else:
+                matched = candidates.select(left_id, right_id, *right_names.values())
+                combined = left.join(
+                    matched, on=left_id, how="left", maintain_order="left_right"
+                )
+            return _join_by_output(
+                tf, combined, guards, equality, left_columns, right_columns,
+                right_names, keep, suffix,
             )
+        if unique_right:
+            # The keys alone were searched; put the matches back in x's
+            # order and attach y's row by its key, with no sort of payloads.
+            matched = nearest.sort(left_id).select(right_key)
+            combined = pl.concat([left, matched], how="horizontal_extend").join(
+                y, on=right_key, how="left", maintain_order="left"
+            )
+            if how == "inner":
+                combined = combined.filter(pl.col(right_key).is_not_null())
             return _join_by_output(
                 tf, combined, guards, equality, left_columns, right_columns,
                 right_names, keep, suffix,
@@ -3507,6 +3582,7 @@ def _join_by_operation(
         unmatched=unmatched,
         relationship=relationship,
         right_rows=right_rows,
+        right_table=right if isinstance(right, pl.DataFrame) else None,
     ))
 
 

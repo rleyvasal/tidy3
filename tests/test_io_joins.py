@@ -222,3 +222,22 @@ def test_small_inequality_join_matches_the_ie_join_path(how):
     assert small.equals(lazy)
     big = pl.concat([right] * 20)
     assert (tidy(left) >> verb(big, by=spec)).collect().equals((tidy(left) >> verb(tidy(big.lazy()), by=spec)).collect())
+
+
+@pytest.mark.parametrize("has_header", [True, False])
+def test_read_csv_one_pass_parse_matches_the_scan(tmp_path, has_header):
+    # read_csv() parses in memory once; scan_csv() keeps a lazy plan. Both
+    # give the same values and the same problems(), numbered as readr does.
+    import tidy3 as t3
+
+    rows = "".join(f"{i}, {i}.5 ,true\n" for i in range(120)) + "oops,1.x,maybe\n 7 ,,T\n"
+    path = tmp_path / "penguins.csv"
+    path.write_text(("bill,mass,ok\n" if has_header else "") + rows)
+    options = {"has_header": has_header, "na": ["", "NA"]}
+    read = t3.read_csv(path, **options)
+    scan = t3.scan_csv(path, trim_ws=True, **options)
+    assert read.collect().equals(scan.collect())
+    found = t3.problems(read).collect()
+    assert found.equals(t3.problems(scan).collect())
+    assert found["original"].to_list() == ["oops", "1.x", "maybe"]
+    assert found["row"].to_list() == ([122, 122, 122] if has_header else [121, 121, 121])

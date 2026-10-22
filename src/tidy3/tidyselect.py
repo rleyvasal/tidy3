@@ -17,7 +17,7 @@ _CURRENT_COLUMN: ContextVar[str | None] = ContextVar("tidy3_current_column", def
 _CURRENT_GROUPS: ContextVar[tuple[str, ...] | None] = ContextVar(
     "tidy3_current_groups", default=None
 )
-_CURRENT_GROUP_ROWS: ContextVar[tuple[int, ...] | None] = ContextVar(
+_CURRENT_GROUP_ROWS: ContextVar[Any] = ContextVar(
     "tidy3_current_group_rows", default=None
 )
 
@@ -760,7 +760,8 @@ def n_groups(data: Any = _NO_DATA) -> Any:
     return _pipeable("n_groups", lambda tf: len(group_size(tf)))
 
 
-def _group_rows_token(rows: tuple[int, ...]):
+def _group_rows_token(rows: Any):
+    """Set the current group's rows: a tuple, or a NumPy array of them."""
     return _CURRENT_GROUP_ROWS.set(rows)
 
 
@@ -773,6 +774,9 @@ def cur_group_rows() -> tuple[int, ...]:
     rows = _CURRENT_GROUP_ROWS.get()
     if rows is None:
         raise RuntimeError("cur_group_rows() can only be used inside group callbacks")
+    if not isinstance(rows, tuple):
+        rows = tuple(rows.tolist())
+        _CURRENT_GROUP_ROWS.set(rows)
     return rows
 
 

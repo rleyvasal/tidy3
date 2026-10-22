@@ -411,3 +411,25 @@ def test_selector_methods_match_pipe_api():
     pd.testing.assert_frame_equal(
         expected.collect(as_="pandas"), actual.collect(as_="pandas")
     )
+
+
+@pytest.mark.parametrize("groups", [3, 40])
+def test_group_callbacks_match_across_part_strategies(groups):
+    # Few groups get lazy filtered parts, many get gathered slices; both
+    # must give the same rows, order and cur_group_rows().
+    import tidy3 as t3
+
+    keys = [(i * 7) % groups for i in range(200)]
+    df = t3.tidy(pl.DataFrame({"g": keys, "x": list(range(200))})) >> t3.group_by("g")
+    seen = df >> t3.group_map(lambda part, key: (key["g"], t3.cur_group_rows()))
+    assert [k for k, _ in seen] == list(range(groups))
+    for key, rows in seen:
+        assert isinstance(rows, tuple)
+        assert list(rows) == [i for i, k in enumerate(keys) if k == key]
+    out = (df >> t3.group_modify(lambda part, key: part >> t3.slice_tail(n=1))).collect()
+    expected = [max(i for i, k in enumerate(keys) if k == g) for g in range(groups)]
+    assert out["x"].to_list() == expected
+    parts = df >> t3.group_split()
+    assert [p.collect()["x"].to_list() for p in parts] == [
+        [i for i, k in enumerate(keys) if k == g] for g in range(groups)
+    ]

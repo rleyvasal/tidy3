@@ -132,10 +132,15 @@ def _empty_columns(lf: pl.LazyFrame, cutoff: float) -> list[str]:
     names = schema.names()
     if not names:
         return []
+    # null_count() reads the stored count of an in-memory column; floats
+    # add their NaN values.
     stats = lf.select(
         pl.len().alias("__n"),
         *[
-            _missing_expr(name, dtype).cast(pl.Int64).sum().alias(f"__c{index}")
+            (
+                pl.col(name).null_count().cast(pl.Int64)
+                + (pl.col(name).is_nan().sum().cast(pl.Int64) if _float_dtype(dtype) else 0)
+            ).alias(f"__c{index}")
             for index, (name, dtype) in enumerate(schema.items())
         ],
     ).collect()

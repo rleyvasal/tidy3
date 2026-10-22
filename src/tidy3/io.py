@@ -277,15 +277,15 @@ def _scan_table(
         if polars_encoding != "utf8":
             options["encoding"] = polars_encoding
         frame = pl.scan_csv(source, **options)
-        if materialize:
-            # read_* parse the file once; guessing then samples memory.
-            frame = frame.collect().lazy()
     reads: tuple[str, ...] = ()
     if materialize or polars_encoding is None:
         reads = ("read_csv() reads the file while building; scan_csv() keeps it a scan",)
     if trim_ws:
         frame = _trim_strings(frame, {id} if id else set())
         frame = _null_after_trim(frame, na, {id} if id else set())
+    if materialize:
+        # read_* parse and trim the file once; guessing then samples memory.
+        frame = frame.collect().lazy()
     inferred = {}
     if guess:
         skip_guess = {*(col_types or {}), *user_overrides, *([id] if id else [])}
@@ -294,6 +294,21 @@ def _scan_table(
             reads += ("the reader guesses column types from the first rows; pass col_types",)
     result = TidyFrame(frame, data_reads=reads)
     assignments = _cast_assignments({**inferred, **(col_types or {})}, strict=strict, marks=locale)
+    if assignments and materialize:
+        from tidy3.convert import parse_columns_eagerly
+
+        # In memory: convert each column once, recording its failures in
+        # the same pass. readr counts the header line as row 1.
+        parsed = parse_columns_eagerly(
+            frame.collect(), assignments,
+            row_offset=1 if options.get("has_header", True) else 0,
+        )
+        if parsed is not None:
+            data, found = parsed
+            return TidyFrame(
+                data.lazy(), data_reads=reads,
+                problems=None if found is None else found.lazy(),
+            )
     if assignments:
         from tidy3.verbs import mutate
 

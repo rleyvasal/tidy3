@@ -818,6 +818,27 @@ def compile_polars(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> 
         if known is not None and (known in {pl.Date, pl.Null} or isinstance(known, pl.Datetime)):
             stamp = value.cast(pl.Datetime("us")) if known in {pl.Date, pl.Null} else value
             return stamp.dt.convert_time_zone(kwargs["tzone"])
+    if name == "force_tz":
+        from tidy3.expr import input_dtype
+
+        # A naive or UTC source has no repeated clocks of its own, so the
+        # roll policies map onto replace_time_zone() when skipped clocks
+        # become missing.
+        known = input_dtype(value)
+        skipped, repeated = kwargs["roll_dst"]
+        ambiguous = {"pre": "earliest", "post": "latest", "NA": "null"}.get(repeated)
+        if (
+            known is not None
+            and skipped == "NA"
+            and ambiguous is not None
+            and (known in {pl.Date, pl.Null} or (isinstance(known, pl.Datetime) and known.time_zone in {None, "UTC"}))
+        ):
+            stamp = value.cast(pl.Datetime("us")) if known in {pl.Date, pl.Null} else value
+            if isinstance(known, pl.Datetime) and known.time_zone is not None:
+                stamp = stamp.dt.replace_time_zone(None)
+            return stamp.dt.replace_time_zone(
+                kwargs["tzone"], ambiguous=ambiguous, non_existent="null"
+            )
     if name in {"with_tz", "force_tz"}:
         from tidy3._timezones import transform
 

@@ -1716,6 +1716,55 @@ def merge_problem_plans(
     return pl.concat(frames, how="vertical")
 
 
+def parse_columns_eagerly(
+    frame: pl.DataFrame, assignments: dict[str, Any], *, row_offset: int = 0
+) -> tuple[pl.DataFrame, pl.DataFrame | None] | None:
+    """Parse in-memory text columns once, with their failures.
+
+    *assignments* maps each column to a parse of that same column, as the
+    readers build them. Each column is converted once natively, giving
+    both the values and the problems() rows (numbered from 1 plus
+    *row_offset*). Returns None when any parse needs the general path,
+    including strict parses, which raise from the plan.
+    """
+    plans = []
+    for output, value in assignments.items():
+        node = getattr(value, "node", None)
+        if not (
+            isinstance(node, tuple) and node[0] == "func" and node[1] in _SPECS
+            and node[2] == (("col", output),)
+            and all(isinstance(v, tuple) and v[0] == "lit" for v in node[3].values())
+        ):
+            return None
+        name, kwargs = node[1], {key: v[1] for key, v in node[3].items()}
+        options = _options(name, kwargs)
+        if options["strict"] or options["kind"] == "character" or frame.schema[output] != pl.String:
+            return None
+        plans.append((output, name, options, _node_options(name, node[3])))
+    converted, problems = {}, []
+    for output, name, options, recorded in plans:
+        series = frame.get_column(output)
+        fast = _fast_convert(series, options)
+        if fast is None:
+            return None
+        value, failed = fast
+        dtype = (
+            pl.Datetime("us", options["tz"]) if name in _DATETIME_ORDERS
+            else _DTYPES[options["kind"]]
+        )
+        converted[output] = value.cast(dtype).alias(output)
+        if recorded is not None and failed.any():
+            rows = failed.arg_true()
+            problems.append(pl.DataFrame({
+                "row": (rows.cast(pl.Int64) + 1 + row_offset),
+                "column": pl.repeat(output, rows.len(), dtype=pl.String, eager=True),
+                "original": series.gather(rows),
+                "expected": pl.repeat(recorded["expected"], rows.len(), dtype=pl.String, eager=True),
+            }, schema=_PROBLEM_SCHEMA))
+    data = frame.with_columns(converted.values())
+    return data, (pl.concat(problems) if problems else None)
+
+
 def problems_frame(data: Any) -> Any:
     """A frame of parse failures: row, column, original, expected.
 
@@ -1744,14 +1793,17 @@ def problems(data: Any) -> Any:
 def stop_for_problems(data: Any) -> Any:
     """Raise when *data* has parse failures.
 
-    Collects the problems plan only, not the data frame. Returns *data*
-    when nothing failed.
+    Computes the data and its parse failures in one run, so the parses
+    happen once. Returns the computed frame when nothing failed.
     """
-    found = problems(data).collect()
-    if isinstance(found, pl.DataFrame):
-        rows = found.to_dicts()
-    else:
-        rows = found.to_dict("records")
+    from tidy3.frame import TidyFrame
+
+    if not isinstance(data, TidyFrame):
+        raise TypeError("problems() expects a TidyFrame")
+    if data._problems is None:
+        return data
+    data = data._compute(reads=("stop_for_problems() checks the parsed values",))
+    rows = data._problems.collect().to_dicts()
     if not rows:
         return data
     lines = [f"stop_for_problems(): {len(rows)} value(s) failed to parse."]
