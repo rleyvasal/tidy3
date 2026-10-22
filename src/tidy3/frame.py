@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Callable, Literal, overload
 
 import polars as pl
@@ -15,6 +16,21 @@ __all__ = ["TidyFrame", "tidy", "options"]
 
 _POLARS_EXECUTION_ENGINES = frozenset({"auto", "streaming", "gpu"})
 _KEEP = object()
+# Reasons the current verb read row data to build its plan; see note_data_read().
+_DATA_READS: ContextVar[list[str] | None] = ContextVar("tidy3_data_reads", default=None)
+
+
+def note_data_read(reason: str) -> None:
+    """Record that the running verb built its plan from values in the data.
+
+    Such a plan holds those values as constants (factor levels, pivot
+    names, completed values), so it is right only for this data and
+    :meth:`TidyFrame.to_polars_code` refuses to export it. Checks that only
+    raise errors do not call this.
+    """
+    reads = _DATA_READS.get()
+    if reads is not None and reason not in reads:
+        reads.append(reason)
 
 
 class FactorLevels(list):
@@ -127,6 +143,10 @@ def _from_pandas(pdf: Any) -> pl.DataFrame:
     return df.with_columns(casts) if casts else df
 
 
+def _merge_reads(*groups: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(reason for group in groups for reason in group))
+
+
 def _pandas_levels(pdf: Any) -> dict[str, FactorLevels]:
     """Factor levels and ordered flags of a pandas frame's categorical columns."""
     import pandas as pd
@@ -175,6 +195,8 @@ class TidyFrame:
         # Parse failures captured at mutate time: a lazy plan that still
         # reads the pre-mutate source.
         "_problems",
+        # Steps whose plan holds values read from the data (note_data_read).
+        "_data_reads",
     )
 
     def __init__(
@@ -187,6 +209,7 @@ class TidyFrame:
         category_levels: dict[str, list[Any]] | None = None,
         select_base: Any | None = None,
         problems: Any | None = None,
+        data_reads: tuple[str, ...] = (),
     ):
         if not isinstance(data, pl.LazyFrame):
             import pandas as pd
@@ -203,6 +226,7 @@ class TidyFrame:
         self._category_levels = _recorded_levels(category_levels)
         self._select_base = select_base
         self._problems = problems
+        self._data_reads = tuple(data_reads)
 
     @property
     def _lf(self) -> pl.LazyFrame:
@@ -288,6 +312,7 @@ class TidyFrame:
         select_base: Any | None = None,
         keep_select_base: bool = False,
         problems: Any = _KEEP,
+        data_reads: tuple[str, ...] = (),
     ) -> TidyFrame:
         # Default: clear select_base (most verbs invalidate the rewrite window).
         # select/filter set select_base=...; pass keep_select_base to preserve.
@@ -309,6 +334,7 @@ class TidyFrame:
             ),
             select_base=select_base,
             problems=problems,
+            data_reads=_merge_reads(self._data_reads, data_reads),
         )
 
     # ── pipe ────────────────────────────────────────────────────────────
@@ -1038,11 +1064,19 @@ class TidyFrame:
         computed in the same run, so ``problems()`` afterwards reads the
         stored failures and does not read the source again.
         """
+        return self._compute(engine, ("compute() replaces the plan with its result",))
+
+    def _compute(self, engine: Any = "auto", reads: tuple[str, ...] = ()) -> TidyFrame:
+        """compute() for tidy3's own steps, which record why they read data."""
         _validate_execution_engine(engine)
         if self._problems is None:
-            return self._with_lf(self._lf.collect(engine=engine).lazy(), groups=self._groups)
+            return self._with_lf(
+                self._lf.collect(engine=engine).lazy(), groups=self._groups, data_reads=reads
+            )
         data, found = pl.collect_all([self._lf, self._problems], engine=engine)
-        return self._with_lf(data.lazy(), groups=self._groups, problems=found.lazy())
+        return self._with_lf(
+            data.lazy(), groups=self._groups, problems=found.lazy(), data_reads=reads
+        )
 
     def collect(
         self,
@@ -1320,6 +1354,18 @@ class TidyFrame:
 
     def explain(self, **kwargs: Any) -> str:
         return self._lf.explain(**kwargs)
+
+    def to_polars_code(self, *, name: str = "pipeline") -> str:
+        """Python source of a function that runs this pipeline with Polars only.
+
+        Each input frame becomes an argument (``df``, then ``df2``, ...). Raises
+        :class:`tidy3.ExportError` for a step with no plain-Polars form: a
+        column computed by a Python function, or a step that read values from
+        the data to build its query (factor levels, ``pivot_wider`` names).
+        """
+        from tidy3.polars_export import to_polars_code
+
+        return to_polars_code(self, name=name)
 
     def preview(self, n: int | None = None) -> Any:
         """Materialize only the first *n* rows (for inspection)."""

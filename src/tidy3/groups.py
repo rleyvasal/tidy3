@@ -272,7 +272,8 @@ def group_trim(data: Any = _MISSING):
             # The Enum's own categories are the levels Polars shows and sorts by.
             casts.append(pl.col(name).cast(pl.String).cast(pl.Enum(kept)))
     lf = tf._lf.with_columns(casts) if casts else tf._lf
-    return tf._with_lf(lf, groups=names, category_levels=levels)
+    trimmed = ("group_trim() reads which levels the data uses",)
+    return tf._with_lf(lf, groups=names, category_levels=levels, data_reads=trimmed)
 
 
 def group_walk(fn: Callable[[Any, dict[str, Any]], Any]):

@@ -159,6 +159,47 @@ df = pd.DataFrame({"x": [-1.5, 0.5, 2.0], "y": [10, 20, 30]})
 (tidy(df) >> filter(col("x") > 0)).collect(as_="pandas")
 ```
 
+## Export to Polars code
+
+`to_polars_code()` prints a pipeline as a Python function that needs only
+Polars. Each input frame becomes an argument (`df`, then `df2`, ...), and the
+docstring lists its columns:
+
+```python
+frame = (
+    tidy({"g": ["a", "b", "a"], "x": [1.0, 2.0, None]})
+    >> filter(col("x") > 0)
+    >> group_by("g")
+    >> summarise(m=mean("x"), n=n())
+)
+print(frame.to_polars_code(name="summarise_x"))
+```
+
+The function runs the query tidy3 compiled, so it returns the same result,
+dplyr's rules included: a `mean` with a missing value is missing, and
+`arrange` puts missing values last. Two kinds of step raise `ExportError`
+instead, naming the step:
+
+- a column computed by a Python function: the text conversions (`as_*`,
+  `parse_*`, `ymd` and the other date parsers) with their `problems()`
+  tracking, R-style `round`, `force_tz`, `excel_numeric_to_date`, and the
+  string functions that run per value (`str_wrap`, `str_width`,
+  `str_match_all`). The error names the column and the function;
+- a step that built its query from values in the data, such as factor
+  levels, `pivot_wider` names, `complete(full_seq(...))`, `remove_empty`, or
+  `compute()`. That query is right only for the data it saw. Joining a frame
+  with such a step blocks the export too.
+
+Helpers whose rule depends on the column type (`is_na` and the other `is_*`
+checks, `pmin`/`pmax`, `row_sums`/`row_means`, `hour`/`minute`/`second`,
+`ceiling_date`, `with_tz`) export as plain Polars: tidy3 reads the type from
+the lazy schema when it compiles them.
+
+The exported code skips tidy3's input checks (a `separate_wider_delim` with
+too many pieces, a weight column with negative values, a `rows_update` key
+missing from x), so it returns the same result on valid input but does not
+raise on invalid input.
+
 A quoted string assigned in `mutate`, `transmute`, `summarise`, or `reframe`
 is text, as in dplyr: `mtcars >> mutate(source="mtcars")`
 writes `"mtcars"` in every row. A column is `col("hp")` in plain Python and

@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 import polars as pl
 
-from tidy3.expr import Expr, to_polars
+from tidy3.expr import _COMPILE_FRAME, Expr, to_polars
 from tidy3.join_spec import JOIN_SUFFIX, RIGHT_TAG, JoinSpec, join_by, join_names
 from tidy3.tidyselect import (
     AcrossSpec,
@@ -151,6 +151,7 @@ class Verb:
                         ),
                         select_base=getattr(other, "_select_base", None),
                         problems=getattr(other, "_problems", None),
+                        data_reads=getattr(other, "_data_reads", ()),
                     )
                 except (AttributeError, TypeError) as e:
                     raise TypeError(
@@ -177,13 +178,22 @@ class Verb:
                 known.append(frozenset(_frame_columns(other)))
             return known[0]
 
+        from tidy3.frame import _DATA_READS, _merge_reads
+
         token = _FRAME_COLUMNS.set(columns)
+        frame_token = _COMPILE_FRAME.set(other._lf)
+        reads: list[str] = []
+        reads_token = _DATA_READS.set(reads)
         try:
             result = self._fn(other)
             if isinstance(result, TidyFrame):
                 # Resolve the lazy plan's schema (no rows are read) so a
                 # missing column fails here, naming this verb, not at display.
                 result._lf.collect_schema()
+                # Carry forward what this verb and its input read from data.
+                result._data_reads = _merge_reads(
+                    other._data_reads, result._data_reads, reads
+                )
             return result
         except Exception as error:
             translated = _column_error(self.name, error, other)
@@ -192,6 +202,8 @@ class Verb:
                 raise
             raise translated from None
         finally:
+            _DATA_READS.reset(reads_token)
+            _COMPILE_FRAME.reset(frame_token)
             _FRAME_COLUMNS.reset(token)
 
     # Also support ``verb(frame)`` call style for type checkers / tooling.
@@ -924,7 +936,7 @@ def mutate(
 
         has_factors = any(contains_factor(value) for value in assignments.values())
         if has_factors:
-            tf = tf.compute()
+            tf = tf._compute()
         deleted_so_far: set[str] = set()
         for name, value in assignments.items():
             if value is None:
@@ -969,6 +981,7 @@ def mutate(
                 lf, stage, stage_ordered = prepare_polars(
                     tf, lf, stage, [marker], sort_groups=False
                 )
+                _COMPILE_FRAME.set(lf)  # later stages see earlier columns
                 produced_ordered.update(stage_ordered)
                 for name, value in stage.items():
                     if isinstance(value, Expr):
@@ -990,6 +1003,7 @@ def mutate(
                 lf, stage, stage_ordered = prepare_polars(
                     tf, lf, stage, groups, sort_groups=not transient
                 )
+                _COMPILE_FRAME.set(lf)  # later stages see earlier columns
                 produced_ordered.update(stage_ordered)
                 cached, stage, cache_columns = (
                     _aggregate_cache_plan(stage, lf.collect_schema().names())
@@ -2104,7 +2118,9 @@ def _grouped_parts(
     tf: Any, cols: tuple[Any, ...]
 ) -> list[tuple[dict[str, Any], Any, tuple[int, ...]]]:
     """Materialize stable group partitions for Python group callbacks."""
-    from tidy3.frame import tidy
+    from tidy3.frame import note_data_read, tidy
+
+    note_data_read("group callbacks run Python on each group's rows")
 
     from tidy3.groups import _group_table
 
@@ -2269,6 +2285,9 @@ def _complete_polars_empty_groups(
 
     Groups with a missing key are kept: the join treats missing keys as equal.
     """
+    from tidy3.frame import note_data_read
+
+    note_data_read("group_by(drop=False) adds the empty groups the data lacks")
     observed = result.collect()
     schema = observed.schema
     grid = _dplyr_group_keys(tf, observed.select(groups).rows(), groups).with_columns(
@@ -2988,6 +3007,11 @@ def _right_frame(right: Any) -> pl.LazyFrame:
         cls.__module__ == "tidy3.frame" and cls.__name__ == "TidyFrame"
     )
     if is_tf:
+        from tidy3.frame import note_data_read
+
+        # A joined or bound frame passes on what its own steps read.
+        for reason in getattr(right, "_data_reads", ()):
+            note_data_read(reason)
         return right._lf
     return tidy(right)._lf
 
@@ -3901,6 +3925,9 @@ def bind_cols(*others: Any) -> Verb:
             if target == 0:
                 horizontal.append(frame.head(0))
                 continue
+            from tidy3.frame import note_data_read
+
+            note_data_read("bind_cols() repeats a one-row frame's values")
             row = frame.collect().row(0, named=True)
             horizontal.append(
                 horizontal[0].with_columns(

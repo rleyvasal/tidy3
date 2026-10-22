@@ -589,6 +589,9 @@ def prepare_polars(tf: Any, lf: pl.LazyFrame, stage: dict[str, Any], groups: lis
     factors = {name: value for name, value in stage.items() if contains_factor(value)}
     if not factors:
         return lf, stage, {}
+    from tidy3.frame import note_data_read
+
+    note_data_read("fct_*() reads factor levels from the data")
     lf, factors, native_ordered = _apply_native_factors(lf, factors, groups, sort_groups)
     if not factors:
         rest = {name: value for name, value in stage.items() if name not in native_ordered}

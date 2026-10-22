@@ -299,7 +299,27 @@ def _pandas_flags(series: pd.Series) -> dict[str, pd.Series]:
     return {"is_na": missing, "is_nan": false, "is_finite": false, "is_infinite": false}
 
 
+def _native_flag(name: str, value: pl.Expr, dtype: Any) -> pl.Expr:
+    """_polars_flag() as an expression, for a known input type."""
+    if dtype.is_float():
+        if name == "is_na":
+            return value.is_null() | value.is_nan().fill_null(False)
+        return getattr(value, name)().fill_null(False)
+    if name == "is_na":
+        return value.is_null()
+    if name == "is_finite" and dtype.is_numeric():
+        return value.is_not_null()
+    # One False per row (not a literal, which an aggregate would see once).
+    return value.is_null() & pl.lit(False)
+
+
 def _flag_expr(name: str, value: pl.Expr) -> pl.Expr:
+    from tidy3.expr import input_dtype
+
+    dtype = input_dtype(value)
+    if dtype is not None:
+        return _native_flag(name, value, dtype)
+
     def batch(series: pl.Series) -> pl.Series:
         return _polars_flag(name, series)
 
@@ -315,6 +335,12 @@ def _nullify_nan(expr: pl.Expr) -> pl.Expr:
     Only float columns hold NaN; text such as ``"nan"`` is left alone, so
     ``pmin(c("nan", "b"), c("c", "a"))`` is ``c("c", "a")`` as in R.
     """
+
+    from tidy3.expr import input_dtype
+
+    dtype = input_dtype(expr)
+    if dtype is not None:
+        return expr.fill_nan(None) if dtype.is_float() else expr
 
     def batch(series: pl.Series) -> pl.Series:
         return series.fill_nan(None) if series.dtype.is_float() else series

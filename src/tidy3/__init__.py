@@ -65,6 +65,7 @@ from tidy3.groups import (
     nest_by,
 )
 from tidy3.frame import TidyFrame, options, tidy
+from tidy3.polars_export import ExportError, to_polars_code
 from tidy3.forcats import fct_relevel, fct_reorder, fct_infreq, fct_rev
 from tidy3.io import (
     excel_sheets,
@@ -421,6 +422,8 @@ __all__ = [
     "col",
     "coalesce",
     "collect",
+    "ExportError",
+    "to_polars_code",
     "colnames",
     "complete",
     "col_range",

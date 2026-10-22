@@ -280,6 +280,9 @@ def _scan_table(
         if materialize:
             # read_* parse the file once; guessing then samples memory.
             frame = frame.collect().lazy()
+    reads: tuple[str, ...] = ()
+    if materialize or polars_encoding is None:
+        reads = ("read_csv() reads the file while building; scan_csv() keeps it a scan",)
     if trim_ws:
         frame = _trim_strings(frame, {id} if id else set())
         frame = _null_after_trim(frame, na, {id} if id else set())
@@ -287,7 +290,9 @@ def _scan_table(
     if guess:
         skip_guess = {*(col_types or {}), *user_overrides, *([id] if id else [])}
         inferred = _guess_types(frame, {str(name) for name in skip_guess}, sample_rows)
-    result = TidyFrame(frame)
+        if inferred:
+            reads += ("the reader guesses column types from the first rows; pass col_types",)
+    result = TidyFrame(frame, data_reads=reads)
     assignments = _cast_assignments({**inferred, **(col_types or {})}, strict=strict, marks=locale)
     if assignments:
         from tidy3.verbs import mutate
@@ -391,7 +396,7 @@ def read_csv(
         materialize=True,
         kwargs=kwargs,
     )
-    return frame.compute()
+    return frame._compute()
 
 
 def read_tsv(source: str | Path, **kwargs: Any) -> TidyFrame:

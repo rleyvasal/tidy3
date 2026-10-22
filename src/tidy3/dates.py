@@ -430,6 +430,16 @@ _SUB_DAY = frozenset({"second", "minute", "hour"})
 
 
 def _ceiling_polars(expr: pl.Expr, unit: str, week_start: int) -> pl.Expr:
+    from tidy3.expr import input_dtype
+
+    dtype = input_dtype(expr)
+    if dtype is not None:
+        floored = _floor_polars(expr, unit, week_start)
+        nudged = floored.dt.offset_by(_OFFSET[unit])
+        if dtype == pl.Date and unit not in _SUB_DAY:
+            return nudged
+        return pl.when(expr == floored).then(expr).otherwise(nudged)
+
     def batch(series: pl.Series) -> pl.Series:
         value = pl.col("v")
         floored = _floor_polars(value, unit, week_start)
@@ -471,7 +481,15 @@ def compile_period_bin(op: str, left: Any, right: Any, compile: Any) -> pl.Expr 
 
 
 def _clock_polars(value: pl.Expr, name: str) -> pl.Expr:
+    from tidy3.expr import input_dtype
+
     dtype = pl.Float64 if name == "second" else pl.Int64
+    known = input_dtype(value)
+    if known is not None:
+        if known == pl.Date:
+            return value.cast(pl.Int64).cast(dtype) * 0
+        result = getattr(value.dt, name)().cast(dtype)
+        return result + value.dt.nanosecond() / 1e9 if name == "second" else result
 
     def batch(series: pl.Series) -> pl.Series:
         if series.dtype == pl.Date:
@@ -792,6 +810,14 @@ def compile_polars(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> 
     value = args[0]
     if name == "excel_numeric_to_date":
         return _excel_polars(value, **kwargs)
+    if name == "with_tz":
+        from tidy3.expr import input_dtype
+
+        # with_tz() only changes the zone a datetime is shown in.
+        known = input_dtype(value)
+        if known is not None and (known in {pl.Date, pl.Null} or isinstance(known, pl.Datetime)):
+            stamp = value.cast(pl.Datetime("us")) if known in {pl.Date, pl.Null} else value
+            return stamp.dt.convert_time_zone(kwargs["tzone"])
     if name in {"with_tz", "force_tz"}:
         from tidy3._timezones import transform
 

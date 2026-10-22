@@ -125,6 +125,9 @@ def _row_mask_polars(lf: pl.LazyFrame, cutoff: float) -> pl.LazyFrame:
 
 def _empty_columns(lf: pl.LazyFrame, cutoff: float) -> list[str]:
     """Columns that are empty enough to drop. This collects one count row."""
+    from tidy3.frame import note_data_read
+
+    note_data_read("remove_empty() finds empty columns in the data")
     schema = lf.collect_schema()
     names = schema.names()
     if not names:
@@ -198,6 +201,9 @@ def _frozen(value: Any) -> Any:
 
 def _constant_columns(lf: pl.LazyFrame, na_rm: bool) -> list[str]:
     """Columns whose values are not constant. This collects one uniqueness row."""
+    from tidy3.frame import note_data_read
+
+    note_data_read("remove_constant() finds constant columns in the data")
     schema = lf.collect_schema()
     names = schema.names()
     if not names:
@@ -529,6 +535,9 @@ def _column_position(columns: list[str], column: Any) -> int:
 
 
 def _materialized(tf: Any) -> Any:
+    from tidy3.frame import note_data_read
+
+    note_data_read("row_to_names() takes column names from a row of the data")
     return tf._lf.collect()
 
 

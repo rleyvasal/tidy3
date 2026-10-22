@@ -121,6 +121,9 @@ def _column_full_seq(lf: pl.LazyFrame, column: str, period: float, tol: float) -
 def _value_list(tf: Any, name: str, spec: Any) -> list[Any]:
     """Unique sorted values for a named ``expand()``/``complete()`` input."""
     if isinstance(spec, FullSeq):
+        from tidy3.frame import note_data_read
+
+        note_data_read("full_seq() reads the column's range from the data")
         fast = _column_full_seq(tf._lf, spec.column, spec.period, spec.tol)
         if fast is not None:
             return fast
@@ -646,6 +649,9 @@ def _pivot_longer_core(
             lf = lf.with_columns(pieces)
         lf = lf.drop(variable)
         if value_sentinel:
+            from tidy3.frame import note_data_read
+
+            note_data_read("pivot_longer() takes .value column names from the data")
             value_names = (
                 lf.select(".value")
                 .unique(maintain_order=True)
@@ -784,6 +790,9 @@ def _level_values(tf: Any, name: str) -> list[Any]:
     dtype = tf._lf.collect_schema()[name]
     if isinstance(dtype, pl.Enum):
         return dtype.categories.to_list()
+    from tidy3.frame import note_data_read
+
+    note_data_read("expand()/complete() read the values present in the data")
     return (
         tf._lf.select(pl.col(name).drop_nulls().unique().sort())
         .collect()
@@ -911,6 +920,9 @@ def _pivot_combinations(tf, name_columns, names, names_expand, names_sort) -> li
     if names_expand:
         # Every combination of every possible value, sorted (as tidyr).
         return list(itertools.product(*[_level_values(tf, n) for n in name_columns]))
+    from tidy3.frame import note_data_read
+
+    note_data_read("pivot_wider() takes new column names from the data")
     seen = tf._lf.select(name_columns).unique(maintain_order=True).collect()
     if names_sort:
         seen = seen.sort(name_columns)
@@ -971,6 +983,9 @@ def _summary_expr(tf: Any, column: str, fn: Any, ids: list[str]) -> pl.Expr:
     if ids:
         first = tf._lf.select(ids).head(1)
         sample = tf._lf.join(first, on=ids, how="semi", nulls_equal=True)
+    from tidy3.frame import note_data_read
+
+    note_data_read("unused_fn infers its result type from the data")
     values = sample.select(pl.col(column)).collect().to_series()
     dtype = pl.Series([fn(values)]).dtype
     return (
@@ -1332,6 +1347,9 @@ def _pivot_wider_core(
                 .select((pl.col(count).max() > 1).fill_null(False))
             )
         if names is None:
+            from tidy3.frame import note_data_read
+
+            note_data_read("pivot_wider() takes new column names from the data")
             discovery = lf.select(name_columns).unique(
                 maintain_order=not names_sort
             )
@@ -1541,6 +1559,9 @@ def separate(
                         valid_bool.all().alias(f"b_{index}"),
                     ]
                 )
+            from tidy3.frame import note_data_read
+
+            note_data_read("separate(convert=True) infers column types from the data")
             inferred = lf.select(stats).collect().row(0, named=True)
             conversions = []
             for index, name in enumerate(kept_names):
@@ -1845,6 +1866,9 @@ def _unnest_wider_core(column: str, *, names_sep: str | None = None) -> Verb:
         elif dtype.base_type() == pl.List:
             if names_sep is None:
                 raise ValueError("names_sep is required for unnamed list values")
+            from tidy3.frame import note_data_read
+
+            note_data_read("unnest_wider() reads the longest list from the data")
             width = (
                 tf._lf.select(pl.col(column).list.len().max())
                 .collect()

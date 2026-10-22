@@ -492,10 +492,13 @@ REASONS = {
     "read_excel": "Excel workbook reader; not a Polars query",
     "excel_sheets": "Excel workbook metadata; not a Polars query",
     "group_walk": "runs a Python callback per group for side effects and returns the input",
+    "to_polars_code": "prints Polars source for a pipeline; not a query",
+    "ExportError": "exception class, not an operation",
 }
 
 METHOD_REASONS = {
     "explain": "prints a query plan",
+    "to_polars_code": "prints Polars source for the pipeline; not a query",
     "preview": "prints a preview",
     "show": "prints a preview",
     "ggplot": "builds a plot",

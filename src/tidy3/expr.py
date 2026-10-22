@@ -33,6 +33,24 @@ __all__ = [
 # Columns of the frame a verb is running on, read only when needed. A bare
 # notebook name is the column when the frame has one (dplyr's data mask).
 _FRAME_COLUMNS: ContextVar[Any] = ContextVar("tidy3_frame_columns", default=None)
+# The lazy frame expressions are being compiled against, for input_dtype().
+_COMPILE_FRAME: ContextVar[Any] = ContextVar("tidy3_compile_frame", default=None)
+
+
+def input_dtype(expr: Any) -> Any:
+    """The data type *expr* has in the frame being compiled, or None.
+
+    Read from the lazy schema: no rows are computed. A helper whose rule
+    depends on the type (``is_na`` on floats, ``hour`` on dates) compiles to
+    plain Polars when this is known, and to a per-batch check otherwise.
+    """
+    frame = _COMPILE_FRAME.get()
+    if frame is None:
+        return None
+    try:
+        return frame.select(expr.alias("__tidy3_dtype")).collect_schema()["__tidy3_dtype"]
+    except Exception:
+        return None
 
 
 class NameRef(str):
