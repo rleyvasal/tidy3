@@ -587,6 +587,7 @@ REASONS = {
     "slice_sample": "random draw; the engines do not share one RNG stream",
     "read_excel": "Excel workbook reader; not a Polars query",
     "excel_sheets": "Excel workbook metadata; not a Polars query",
+    "write_excel": "writes an xlsx workbook through XlsxWriter; not a Polars query",
     "group_walk": "runs a Python callback per group for side effects and returns the input",
     "to_polars_code": "prints Polars source for a pipeline; not a query",
     "ExportError": "exception class, not an operation",

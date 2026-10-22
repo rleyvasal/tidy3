@@ -29,13 +29,20 @@ result = (
 
 ## Save results
 
-Write a pipeline directly without first calling `collect()`:
+Write a pipeline directly without first calling `collect()`. Each writer
+works as a pipe step, as a function, and as a method:
 
 ```python
-result.write_parquet("summary.parquet")  # recommended for data pipelines
-result.write_csv("summary.csv")
-result.write_ipc("summary.arrow")        # Arrow IPC / Feather
+cars >> filter(col("cyl") == 4) >> write_csv("four_cyl.csv")   # in a pipe
+write_parquet(result, "summary.parquet")  # frame first, as in readr
+result.write_ipc("summary.arrow")         # Arrow IPC / Feather
 ```
+
+In a pipe the writer passes the frame on, so the pipeline can keep going:
+`cars >> write_csv("all.csv") >> filter(col("cyl") == 4)`. A step after
+the writer runs the plan again; call `compute()` before writing to run it
+once. `write_csv(df, path)` returns `df`, and it also takes Polars and
+pandas frames.
 
 With the default Polars backend, these execute the lazy plan and stream its
 result to disk, avoiding a second fully materialized DataFrame in memory.
@@ -81,6 +88,10 @@ result.write_excel(
 
 # several sheets; this frame is not added on top of `sheets`
 result.write_excel("report.xlsx", sheets={"Summary": result, "Cars": cars})
+
+# the same as pipe steps and functions
+result >> write_excel("summary.xlsx", worksheet="Summary")
+write_excel("report.xlsx", sheets={"Summary": result, "Cars": cars})
 ```
 
 A cell whose text starts with `=` is written as text. `read_excel` and
@@ -100,7 +111,7 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 |------|---------|
 | Export | `nb_export`, `transform_source`, `python -m tidy3 export` / `run` |
 | Frame | `tidy`, `scan_parquet`, `scan_csv`, `scan_ipc`, `read_csv`, `read_tsv`, `read_delim`, `read_excel`, `excel_sheets`, `TidyFrame` |
-| Output | `collect`, `to_numpy`, `TidyFrame.write_parquet`, `TidyFrame.write_csv`, `TidyFrame.write_ipc`, `TidyFrame.write_excel` |
+| Output | `collect`, `to_numpy`, `write_parquet`, `write_csv`, `write_ipc`, `write_excel` (pipe steps, functions, and `TidyFrame` methods) |
 | Helpers | `is_na`, `is_nan`, `is_finite`, `is_infinite`, `abs`, `floor`, `ceiling`, `round`, `pmin`, `pmax`, `row_sums`, `row_means` |
 | Convert | `as_numeric`/`as_double`, `as_integer`, `as_character`/`as_string`, `as_logical`, `as_date`, `as_datetime`, `ConversionError` |
 | Parse | `parse_double`, `parse_integer`, `parse_logical`, `parse_date`, `parse_datetime`, `parse_number`, `locale`, `problems`, `stop_for_problems` |

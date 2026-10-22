@@ -76,6 +76,10 @@ from tidy3.io import (
     scan_csv,
     scan_ipc,
     scan_parquet,
+    write_csv,
+    write_excel,
+    write_ipc,
+    write_parquet,
 )
 from tidy3.helpers import (
     abs,
@@ -586,6 +590,10 @@ __all__ = [
     "scan_ipc",
     "scan_parquet",
     "read_csv",
+    "write_csv",
+    "write_parquet",
+    "write_ipc",
+    "write_excel",
     "read_tsv",
     "read_delim",
     "read_excel",

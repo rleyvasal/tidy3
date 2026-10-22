@@ -1077,14 +1077,15 @@ def attach(add, Case) -> None:
 
     def _write_case(name, method, reader):
         def tidy(df, extra):
-            getattr(pipe(df.select("id", "species", "whole")), method)(extra[0])
+            # The pipe form; it calls the TidyFrame method of the same name.
+            pipe(df.select("id", "species", "whole")) >> getattr(t, method)(extra[0])
             return reader(extra[0])
 
         def raw(df, extra):
             getattr(df.select("id", "species", "whole"), method)(extra[1])
             return reader(extra[1])
 
-        verb(name, "io", [], tidy, raw, methods=[method], prepare=_write_paths(name.split("_", 1)[1] if False else {"write_csv": ".csv", "write_parquet": ".parquet", "write_ipc": ".ipc"}[method]))
+        verb(name, "io", [method], tidy, raw, methods=[method], prepare=_write_paths(name.split("_", 1)[1] if False else {"write_csv": ".csv", "write_parquet": ".parquet", "write_ipc": ".ipc"}[method]))
 
     _write_case("write_csv", "write_csv", pl.read_csv)
     _write_case("write_parquet", "write_parquet", pl.read_parquet)

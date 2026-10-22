@@ -28,6 +28,10 @@ __all__ = [
     "read_delim",
     "read_excel",
     "excel_sheets",
+    "write_csv",
+    "write_parquet",
+    "write_ipc",
+    "write_excel",
 ]
 
 _STRING_TYPES = frozenset({"character", "string", "str"})
@@ -466,3 +470,82 @@ def read_excel(
     from tidy3.frame import tidy
 
     return tidy(frame)
+
+
+# ── writers ─────────────────────────────────────────────────────────────
+
+
+def _is_frame(value: Any) -> bool:
+    if isinstance(value, (TidyFrame, pl.DataFrame, pl.LazyFrame)):
+        return True
+    try:
+        import pandas as pd
+    except ImportError:  # pragma: no cover - pandas is a dependency
+        return False
+    return isinstance(value, pd.DataFrame)
+
+
+def _writer(method: str, x: Any, path: Any, kwargs: dict[str, Any]) -> Any:
+    """Write now when *x* is a frame; otherwise *x* is the path and this is a verb.
+
+    ``write_csv(df, "out.csv")`` writes and returns ``df``, as readr does.
+    ``df >> write_csv("out.csv")`` writes and passes the frame on, so a
+    pipeline can keep going after it.
+    """
+    from tidy3.frame import tidy
+    from tidy3.verbs import Verb
+
+    if _is_frame(x):
+        if path is None:
+            raise TypeError(f"{method}() needs a path: {method}(df, 'out') or df >> {method}('out')")
+        frame = x if isinstance(x, TidyFrame) else tidy(x)
+        getattr(frame, method)(path, **kwargs)
+        return x
+    if path is not None:
+        raise TypeError(
+            f"{method}() takes a frame and a path, or just a path in a pipe; "
+            f"got {type(x).__name__!r} first"
+        )
+
+    def _apply(tf: TidyFrame) -> TidyFrame:
+        getattr(tf, method)(x, **kwargs)
+        return tf
+
+    return Verb(_apply, method)
+
+
+def write_csv(x: Any, path: Any = None, **kwargs: Any) -> Any:
+    """Write a CSV file, in a pipe or on its own.
+
+    ``df >> write_csv("out.csv")`` writes the frame and passes it on, so
+    the pipe can continue; ``write_csv(df, "out.csv")`` writes and returns
+    ``df``. Options are those of :meth:`TidyFrame.write_csv`
+    (``include_header``, ``separator``, ``engine``, ...). Lazy plans stream
+    to disk. A pipe that continues runs its plan again for the next step;
+    ``compute()`` first to run it once.
+    """
+    return _writer("write_csv", x, path, kwargs)
+
+
+def write_parquet(x: Any, path: Any = None, **kwargs: Any) -> Any:
+    """Write a Parquet file, in a pipe or on its own. See :func:`write_csv`."""
+    return _writer("write_parquet", x, path, kwargs)
+
+
+def write_ipc(x: Any, path: Any = None, **kwargs: Any) -> Any:
+    """Write an Arrow IPC (Feather) file, in a pipe or on its own. See :func:`write_csv`."""
+    return _writer("write_ipc", x, path, kwargs)
+
+
+def write_excel(x: Any, path: Any = None, **kwargs: Any) -> Any:
+    """Write an xlsx workbook, in a pipe or on its own.
+
+    ``df >> write_excel("out.xlsx", worksheet="Summary")`` and
+    ``write_excel(df, "out.xlsx")`` write one sheet. With ``sheets=`` (a dict
+    of sheet name to frame) and no frame, ``write_excel("out.xlsx",
+    sheets={...})`` writes those sheets at once and returns None.
+    """
+    if not _is_frame(x) and path is None and kwargs.get("sheets") is not None:
+        TidyFrame(pl.LazyFrame()).write_excel(x, **kwargs)
+        return None
+    return _writer("write_excel", x, path, kwargs)

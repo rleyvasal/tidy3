@@ -241,3 +241,58 @@ def test_read_csv_one_pass_parse_matches_the_scan(tmp_path, has_header):
     assert found.equals(t3.problems(scan).collect())
     assert found["original"].to_list() == ["oops", "1.x", "maybe"]
     assert found["row"].to_list() == ([122, 122, 122] if has_header else [121, 121, 121])
+
+
+@pytest.mark.parametrize("writer, reader, suffix", [
+    ("write_csv", pl.read_csv, ".csv"),
+    ("write_parquet", pl.read_parquet, ".parquet"),
+    ("write_ipc", pl.read_ipc, ".arrow"),
+])
+def test_writers_work_in_a_pipe_and_on_their_own(tmp_path: Path, writer, reader, suffix):
+    import tidy3 as t3
+
+    cars = tidy({"cyl": [4, 6, 8, 4], "mpg": [30.0, 21.0, 15.0, 33.0]})
+    write = getattr(t3, writer)
+    piped = tmp_path / f"piped{suffix}"
+    # The pipe writes the file and passes the frame on to the next step.
+    out = cars >> filter(col("cyl") == 4) >> write(piped) >> t3.mutate(kpl=col("mpg") * 0.425)
+    assert reader(piped)["mpg"].to_list() == [30.0, 33.0]
+    assert out.collect()["kpl"].to_list() == pytest.approx([12.75, 14.025])
+    # Called with the frame first, as in readr: writes and returns the frame.
+    direct = tmp_path / f"direct{suffix}"
+    assert write(cars, direct) is cars
+    assert reader(direct)["cyl"].to_list() == [4, 6, 8, 4]
+    # Polars and pandas frames are written as they are.
+    polars_path, pandas_path = tmp_path / f"pl{suffix}", tmp_path / f"pd{suffix}"
+    write(pl.DataFrame({"cyl": [6]}), polars_path)
+    write(pd.DataFrame({"cyl": [8]}), pandas_path)
+    assert reader(polars_path)["cyl"].to_list() == [6]
+    assert reader(pandas_path)["cyl"].to_list() == [8]
+
+
+def test_writer_options_and_argument_errors(tmp_path: Path):
+    import tidy3 as t3
+
+    path = tmp_path / "cars.tsv"
+    tidy({"cyl": [4], "mpg": [30.0]}) >> t3.write_csv(path, separator="\t", include_header=False)
+    assert path.read_text() == "4\t30.0\n"
+    with pytest.raises(TypeError, match="needs a path"):
+        t3.write_csv(tidy({"cyl": [4]}))
+    with pytest.raises(TypeError, match="takes a frame and a path"):
+        t3.write_csv("a.csv", "b.csv")
+
+
+def test_write_excel_in_a_pipe_and_with_sheets_on_its_own(tmp_path: Path):
+    pytest.importorskip("xlsxwriter")
+    import tidy3 as t3
+
+    cars = tidy({"cyl": [4, 6], "mpg": [30.0, 21.0]})
+    piped = tmp_path / "piped.xlsx"
+    assert (cars >> t3.write_excel(piped, worksheet="Cars")) is cars
+    with zipfile.ZipFile(piped) as workbook:
+        assert 'name="Cars"' in workbook.read("xl/workbook.xml").decode()
+    book = tmp_path / "book.xlsx"
+    assert t3.write_excel(book, sheets={"Cars": cars, "Four": cars >> filter(col("cyl") == 4)}) is None
+    with zipfile.ZipFile(book) as workbook:
+        listing = workbook.read("xl/workbook.xml").decode()
+        assert 'name="Cars"' in listing and 'name="Four"' in listing

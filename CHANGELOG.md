@@ -4,6 +4,12 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- `write_csv`, `write_parquet`, `write_ipc`, and `write_excel` work as pipe steps and as functions, not only as `TidyFrame` methods. `df >> write_csv("out.csv")` writes the file and passes the frame on, so a pipeline can continue after it; `write_csv(df, "out.csv")` writes and returns `df`, as readr does, and also takes Polars and pandas frames. `write_excel("book.xlsx", sheets={...})` writes several sheets without a frame first.
+
 ## 0.8.0 — 2026-10-22
 
 tidy3 runs on Polars only: pandas comes in and goes out, but the pandas backend is gone. Pipelines export as plain Polars code, and most operations run within a millisecond of raw Polars.
