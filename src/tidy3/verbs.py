@@ -2532,21 +2532,63 @@ def _count_name(tf: Any, requested: str | None, groups: list[str]) -> str:
     return name
 
 
+def _count_keys(
+    tf: Any, cols: tuple[Any, ...], computed: dict[str, Any], verb_name: str
+) -> tuple[Any, tuple[str, ...]]:
+    """Resolve count()/add_count() keys to column names.
+
+    Names, bare notebook names, ``col("x")`` and ``pl.col("x")`` select
+    existing columns; keyword or backtick-named expressions
+    (``count(big=col("x") > 1)``, dplyr's ``count(big = x > 1)``) are
+    computed first, as in ``group_by()``.
+    """
+    from tidy3.masking import NamedAssign
+
+    computed_map = dict(computed)
+    names: list[str] = []
+    for spec in cols:
+        if isinstance(spec, NamedAssign):
+            computed_map[spec.name] = spec.value
+        elif isinstance(spec, str) or _is_name_ref(spec):
+            names.extend(resolve_selection(tf, [spec]))
+        elif isinstance(spec, Expr) and spec.node[0] == "col":
+            names.extend(resolve_selection(tf, [spec.node[1]]))
+        elif isinstance(spec, pl.Expr) and spec.meta.is_column():
+            names.extend(resolve_selection(tf, [spec.meta.output_name()]))
+        elif isinstance(spec, (Expr, pl.Expr)):
+            raise TypeError(
+                f"{verb_name}() takes column names, col('x'), or named "
+                f"expressions; name a computed group, e.g. "
+                f"{verb_name}(big=col('x') > 1)"
+            )
+        else:
+            names.extend(resolve_selection(tf, [spec]))
+    if not computed_map:
+        return tf, tuple(names)
+    assignments = {
+        name: _resolved_value(tf, value) for name, value in computed_map.items()
+    }
+    lf = tf._lf
+    for stage in _assignment_stages(assignments):
+        lf = lf.with_columns(
+            **{name: _pl_expr(value) for name, value in stage.items()}
+        )
+    return tf._with_lf(lf, groups=tf._groups), (*names, *computed_map)
+
+
 def _count_rows(
     tf: Any,
-    cols: tuple[str, ...],
+    cols: tuple[Any, ...],
     *,
     wt: Any,
     sort: bool,
     name: str | None,
     result_groups: list[str] | None,
     drop: bool,
+    computed: dict[str, Any] | None = None,
+    verb_name: str = "count",
 ):
-    # Bare notebook names (count(g)) become the column names they resolve to.
-    cols = tuple(
-        column for spec in cols
-        for column in (resolve_selection(tf, [spec]) if _is_name_ref(spec) else [spec])
-    )
+    tf, cols = _count_keys(tf, cols, computed or {}, verb_name)
     eff = list(dict.fromkeys([*(tf._groups or []), *cols]))
     out_name = _count_name(tf, name, eff)
 
@@ -2586,13 +2628,17 @@ def _count_rows(
 
 
 def count(
-    *cols: str,
+    *cols: Any,
     wt: Any = None,
     sort: bool = False,
     name: str | None = None,
     drop: bool | None = None,
+    **computed: Any,
 ) -> Verb:
     """Count rows per group (dplyr): existing ``group_by`` groups plus *cols*.
+
+    *cols* are column names or ``col("x")``; keyword expressions add computed
+    groups, so ``count(big=col("x") > 1)`` ≡ R's ``count(big = x > 1)``.
 
     ``group_by("a") >> count()`` ≡ R's ``group_by(a) %>% tally()``.
     Existing groups are used for the calculation and preserved on the result.
@@ -2614,6 +2660,7 @@ def count(
             name=name,
             result_groups=groups,
             drop=effective_drop,
+            computed=computed,
         )
 
     return Verb(_apply, "count")
@@ -2632,6 +2679,7 @@ def tally(*, wt: Any = None, sort: bool = False, name: str | None = None) -> Ver
             name=name,
             result_groups=groups,
             drop=tf._group_drop,
+            verb_name="tally",
         )
 
     return Verb(_apply, "tally")
@@ -2639,17 +2687,15 @@ def tally(*, wt: Any = None, sort: bool = False, name: str | None = None) -> Ver
 
 def _add_count_rows(
     tf: Any,
-    cols: tuple[str, ...],
+    cols: tuple[Any, ...],
     *,
     wt: Any,
     sort: bool,
     name: str | None,
+    computed: dict[str, Any] | None = None,
+    verb_name: str = "add_count",
 ):
-    # Bare notebook names (count(g)) become the column names they resolve to.
-    cols = tuple(
-        column for spec in cols
-        for column in (resolve_selection(tf, [spec]) if _is_name_ref(spec) else [spec])
-    )
+    tf, cols = _count_keys(tf, cols, computed or {}, verb_name)
     eff = list(dict.fromkeys([*(tf._groups or []), *cols]))
     out_name = _count_name(tf, name, eff)
     if wt is None:
@@ -2670,15 +2716,21 @@ def _add_count_rows(
 
 
 def add_count(
-    *cols: str,
+    *cols: Any,
     wt: Any = None,
     sort: bool = False,
     name: str | None = None,
+    **computed: Any,
 ) -> Verb:
-    """Add counts for existing groups plus *cols*, without collapsing rows."""
+    """Add counts for existing groups plus *cols*, without collapsing rows.
+
+    *cols* and keyword computed groups work as in :func:`count`.
+    """
 
     def _apply(tf):
-        return _add_count_rows(tf, cols, wt=wt, sort=sort, name=name)
+        return _add_count_rows(
+            tf, cols, wt=wt, sort=sort, name=name, computed=computed
+        )
 
     return Verb(_apply, "add_count")
 
@@ -2689,7 +2741,9 @@ def add_tally(
     """Add counts for the current groups, without collapsing rows."""
 
     def _apply(tf):
-        return _add_count_rows(tf, (), wt=wt, sort=sort, name=name)
+        return _add_count_rows(
+            tf, (), wt=wt, sort=sort, name=name, verb_name="add_tally"
+        )
 
     return Verb(_apply, "add_tally")
 

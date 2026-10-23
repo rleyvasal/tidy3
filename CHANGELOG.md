@@ -4,6 +4,16 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- `count()` and `add_count()` take computed groups as keyword arguments, as dplyr's `count(big = x > 1)` does: `count(heavy=col("body_mass_g") > 4000)` counts by a new `heavy` column, and `add_count()` keeps that column on each row.
+
+### Fixed
+
+- `count()` and `add_count()` accept `col("x")` (and `pl.col("x")`) wherever they accept a column name, so scripts can write `count(col("species"))`; it used to raise `TypeError: cannot use 'tidy3.expr.Expr' as a dict key`. An unnamed computed expression such as `count(col("x") > 1)` now raises a `TypeError` that shows the keyword form.
+
 ## 0.8.3 — 2026-10-23
 
 `tidy()` works on fitted models whichever package was imported last.
