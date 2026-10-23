@@ -616,6 +616,11 @@ to `fun`. Empty levels use `default=float("inf")`; `desc=True` reverses the
 summary order, keeping missing summaries last. `fct_infreq(f, w=)` accepts a
 weight column with non-negative, non-missing weights.
 
+`frame.factor_levels()` returns each factor column's levels in order, such as
+`{"cyl": ["4", "6", "8"]}`: columns with recorded levels and Polars `Enum`
+columns, as plain lists, read from the schema without computing rows.
+Packages built on tidy3 frames, such as stats3, read factor order through it.
+
 `fct_relevel(f, "Gentoo", "Adelie", after=0)` keeps unmentioned levels in
 their existing order. `after=float("inf")` moves the named levels to the end.
 One callable, such as `sorted`, may replace the level names. Unknown levels

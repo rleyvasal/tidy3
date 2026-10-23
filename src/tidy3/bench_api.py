@@ -595,6 +595,7 @@ REASONS = {
 
 METHOD_REASONS = {
     "explain": "prints a query plan",
+    "factor_levels": "reads recorded levels and the schema; not a query",
     "to_polars_code": "prints Polars source for the pipeline; not a query",
     "preview": "prints a preview",
     "show": "prints a preview",
