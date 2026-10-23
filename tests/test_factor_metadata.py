@@ -106,3 +106,38 @@ def test_overwriting_a_factor_with_new_text_stays_text():
     ).collect(as_="pandas")["f"]
     assert collected.tolist() == ["z", "nope", "zz"]
     assert not isinstance(collected.dtype, pd.CategoricalDtype)
+
+
+def test_factor_levels_lists_each_factor_column_in_order():
+    frame = (
+        t.tidy({"g": ["a", "b", "a"], "h": ["x", "y", "x"], "n": [1, 2, 3]})
+        >> t.mutate(h=t.fct_relevel(t.col("h"), "y"), g=t.fct_infreq(t.col("g")))
+    )
+    assert frame.factor_levels() == {"g": ["a", "b"], "h": ["y", "x"]}
+    assert list(frame.factor_levels()) == ["g", "h"]  # column order
+
+
+def test_factor_levels_keeps_pandas_categories_and_unused_levels():
+    frame = t.tidy(factor_frame())
+    assert frame.factor_levels() == {"f": ["b", "a", "unused"]}
+
+
+def test_factor_levels_includes_polars_enum_columns():
+    frame = t.tidy(pl.DataFrame({"e": pl.Series(["lo", "hi"], dtype=pl.Enum(["lo", "mid", "hi"]))}))
+    assert frame.factor_levels() == {"e": ["lo", "mid", "hi"]}
+
+
+def test_factor_levels_leaves_out_dropped_columns():
+    frame = (
+        t.tidy({"g": ["a", "b"], "x": [1, 2]})
+        >> t.mutate(g=t.fct_relevel(t.col("g"), "b"))
+        >> t.select("x")
+    )
+    assert frame.factor_levels() == {}
+
+
+def test_factor_levels_returns_copies():
+    frame = t.tidy({"g": ["a", "b"]}) >> t.mutate(g=t.fct_rev(t.col("g")))
+    frame.factor_levels()["g"].append("z")
+    assert frame.factor_levels() == {"g": ["b", "a"]}
+    assert type(frame.factor_levels()["g"]) is list

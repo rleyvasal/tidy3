@@ -1361,6 +1361,24 @@ class TidyFrame:
     def lazy(self) -> pl.LazyFrame:
         return self._lf
 
+    def factor_levels(self) -> dict[str, list[Any]]:
+        """Each factor column's levels, in order: ``{column: [level, ...]}``.
+
+        Factor columns are those with recorded levels (``fct_*`` results and
+        imported pandas categoricals) and Polars ``Enum`` columns, listed in
+        column order. Levels a column no longer has a column for are left
+        out. The lists are copies, without the ordered flag. Reads only the
+        schema, so no rows are computed. For packages built on tidy3 frames
+        (such as stats3) that need factor order without tidy3's internals.
+        """
+        levels: dict[str, list[Any]] = {}
+        for name, dtype in self._schema().items():
+            if name in self._category_levels:
+                levels[name] = list(self._category_levels[name])
+            elif isinstance(dtype, pl.Enum):
+                levels[name] = dtype.categories.to_list()
+        return levels
+
     def explain(self, **kwargs: Any) -> str:
         return self._lf.explain(**kwargs)
 

@@ -4,6 +4,12 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- `TidyFrame.factor_levels()` returns each factor column's levels in order, as `{column: [levels]}`: columns with recorded levels (from `fct_*` and imported pandas categoricals) and Polars `Enum` columns, as plain lists. It reads only the schema, and leaves out levels recorded for columns a later `select` dropped. Packages built on tidy3 frames, such as stats3, use it instead of tidy3's internals.
+
 ## 0.8.1 — 2026-10-22
 
 The file writers work as pipe steps.
