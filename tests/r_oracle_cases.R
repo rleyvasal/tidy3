@@ -447,7 +447,9 @@ result <- switch(
     counted=base |> count(g),
     tallied=base |> group_by(g) |> tally(),
     added=base |> add_count(g),
-    add_tallied=base |> group_by(g) |> add_tally() |> ungroup()
+    add_tallied=base |> group_by(g) |> add_tally() |> ungroup(),
+    counted_computed=base |> count(big=y > 15),
+    added_computed=base |> add_count(g, big=y > 15, name="k")
   ),
   joins = {
     left <- tibble(k=c(1, 2, NA_real_), x=c("a", "b", "c"))

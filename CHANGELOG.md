@@ -6,9 +6,14 @@ under **Changed**.
 
 ## Unreleased
 
+### Added
+
+- `count()` and `add_count()` take computed groups as keyword arguments, as dplyr's `count(big = x > 1)` does: `count(heavy=col("body_mass_g") > 4000)` counts by a new `heavy` column, and `add_count()` keeps that column on each row.
+
 ### Fixed
 
 - Multi-line `>>` pipes now work inside functions, loops, `if` blocks and other indented code in notebooks, not only at the top level of a cell. Before, a pipe step on its own line inside a `def` raised `IndentationError: unexpected indent`, so pipes there had to be wrapped in parentheses. Each step joins the statement above it at the same indentation; top-level cells rewrite exactly as before, and line numbers in errors still match the cell as typed. A broken pipe inside a block now reports the real mistake rather than an `IndentationError`.
+- `count()` and `add_count()` accept `col("x")` (and `pl.col("x")`) wherever they accept a column name, so scripts can write `count(col("species"))`; it used to raise `TypeError: cannot use 'tidy3.expr.Expr' as a dict key`. An unnamed computed expression such as `count(col("x") > 1)` now raises a `TypeError` that shows the keyword form.
 
 ## 0.8.3 — 2026-10-23
 

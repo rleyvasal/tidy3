@@ -573,16 +573,17 @@ class TidyFrame:
 
     def count(
         self,
-        *cols: str,
+        *cols: Any,
         wt: Any = None,
         sort: bool = False,
         name: str | None = None,
         drop: bool | None = None,
+        **computed: Any,
     ) -> TidyFrame:
         from tidy3.verbs import count as count_verb
 
         return self >> count_verb(
-            *cols, wt=wt, sort=sort, name=name, drop=drop
+            *cols, wt=wt, sort=sort, name=name, drop=drop, **computed
         )
 
     def tally(
@@ -598,14 +599,17 @@ class TidyFrame:
 
     def add_count(
         self,
-        *cols: str,
+        *cols: Any,
         wt: Any = None,
         sort: bool = False,
         name: str | None = None,
+        **computed: Any,
     ) -> TidyFrame:
         from tidy3.verbs import add_count as add_count_verb
 
-        return self >> add_count_verb(*cols, wt=wt, sort=sort, name=name)
+        return self >> add_count_verb(
+            *cols, wt=wt, sort=sort, name=name, **computed
+        )
 
     def add_tally(
         self,

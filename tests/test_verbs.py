@@ -244,6 +244,39 @@ def test_count_weight_sort_name_collision_and_group_metadata():
         tally("g")
 
 
+def test_count_family_accepts_col_and_named_expressions():
+    from tidy3 import add_count, count
+
+    penguins = tidy(
+        {
+            "species": ["Adelie", "Adelie", "Gentoo", "Chinstrap", "Gentoo"],
+            "island": ["Torgersen", "Biscoe", "Biscoe", "Dream", "Biscoe"],
+            "body_mass_g": [3750, 3800, 5000, 3500, 5400],
+        }
+    )
+    by_name = (penguins >> count("species")).collect()
+    assert (penguins >> count(col("species"))).collect().equals(by_name)
+    assert (penguins >> count(pl.col("species"))).collect().equals(by_name)
+    assert penguins.count(col("species")).collect().equals(by_name)
+
+    added = (penguins >> add_count(col("species"), col("island"), name="k")).collect()
+    assert added["k"].to_list() == [1, 1, 2, 1, 2]
+
+    heavy = (penguins >> count(heavy=col("body_mass_g") > 4000)).collect()
+    assert heavy.columns == ["heavy", "n"]
+    assert heavy.rows() == [(False, 3), (True, 2)]
+    flagged = (
+        penguins >> add_count(col("species"), heavy=col("body_mass_g") > 4000)
+    ).collect()
+    assert flagged.columns == ["species", "island", "body_mass_g", "heavy", "n"]
+    assert flagged["n"].to_list() == [2, 2, 2, 1, 2]
+
+    with pytest.raises(TypeError, match=r"count\(\) takes column names"):
+        penguins >> count(col("body_mass_g") > 4000)
+    with pytest.raises(TypeError, match=r"add_count\(\) takes column names"):
+        penguins >> add_count(col("body_mass_g") + 1)
+
+
 @pytest.mark.parametrize("rows, expected", [(1, 0), (3, 1), (5, 2), (7, 3)])
 def test_sample_frac_rounds_towards_zero(rows, expected):
     from tidy3 import sample_frac

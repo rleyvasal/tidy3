@@ -348,6 +348,8 @@ def _counts():
         "tallied": frame >> group_by("g") >> tally(),
         "added": frame >> add_count("g"),
         "add_tallied": frame >> group_by("g") >> add_tally() >> ungroup(),
+        "counted_computed": frame >> count(big=col("y") > 15),
+        "added_computed": frame >> add_count(col("g"), big=col("y") > 15, name="k"),
     }
 
 
