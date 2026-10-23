@@ -4,6 +4,12 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- `filter()` works when one function is nested inside another, such as `filter(str_trim(str_replace_na(col("island"), "")) == "")`. In 0.8.4 any such nesting in `filter()` raised `TypeError: cannot use 'tuple' as a set element`, while the same expression worked in `mutate()`.
+
 ## 0.8.4 — 2026-10-23
 
 Multi-line pipes work inside functions, and `count()` takes `col("x")` and computed groups.

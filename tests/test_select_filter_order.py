@@ -14,6 +14,11 @@ from tidy3 import (
     select,
     slice_max,
     slice_min,
+    str_detect,
+    str_length,
+    str_replace_na,
+    str_to_lower,
+    str_trim,
     tidy,
 )
 
@@ -165,3 +170,34 @@ def test_filter_arrange_slice_stack_after_select():
     assert out.columns == ["wt", "mpg"]
     assert out["wt"].to_list() == [1.0]
     assert out["mpg"].to_list() == [30.0]
+
+
+def _penguins():
+    return pl.DataFrame(
+        {
+            "species": ["Adelie", "Gentoo", "Chinstrap", "Adelie", "Gentoo"],
+            "island": ["Biscoe", None, "", "  ", "Dream"],
+            "body_mass_g": [3750, 5000, 3500, 3800, 5400],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "predicate, kept",
+    [
+        (lambda: str_trim(str_replace_na(col("island"), "")) == "", [5000, 3500, 3800]),
+        (lambda: str_trim(str_to_lower(col("island"))) == "biscoe", [3750]),
+        (lambda: str_detect(str_replace_na(col("island"), ""), "D"), [5400]),
+        (lambda: str_length(str_trim(col("island"))) == 0, [3500, 3800]),
+    ],
+)
+def test_filter_with_nested_functions(predicate, kept):
+    """A function nested inside another, in filter() (crashed in 0.8.4)."""
+    out = (tidy(_penguins()) >> filter(predicate())).collect()
+    assert out["body_mass_g"].to_list() == kept
+    # Also after select dropped the column the nested call reads.
+    dropped = (
+        tidy(_penguins()) >> select("body_mass_g") >> filter(predicate())
+    ).collect()
+    assert dropped.columns == ["body_mass_g"]
+    assert dropped["body_mass_g"].to_list() == kept

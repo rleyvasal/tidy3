@@ -708,6 +708,10 @@ def _expr_column_names(value: Any) -> set[str]:
         if not isinstance(node, tuple) or not node:
             return
         kind = node[0]
+        if not isinstance(kind, str):  # a tuple of arguments, not a node
+            for child in node:
+                walk(child.node if isinstance(child, Expr) else child)
+            return
         if kind in {"col", "name"}:  # a bare notebook name may be a column
             names.add(str(node[1]))
         elif kind == "lit":
@@ -734,6 +738,10 @@ def _expr_column_names(value: Any) -> set[str]:
                     walk(val.node)
                 elif isinstance(val, tuple):
                     walk(val)
+        elif kind == "func":
+            # ("func", name, args, kwargs)
+            for child in (*node[2], *node[3].values()):
+                walk(child.node if isinstance(child, Expr) else child)
         elif kind == "n":
             return
         else:
