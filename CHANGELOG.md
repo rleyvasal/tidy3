@@ -4,7 +4,9 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.8.3 — 2026-10-23
+
+`tidy()` works on fitted models whichever package was imported last.
 
 ### Added
 
