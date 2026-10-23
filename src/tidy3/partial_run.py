@@ -151,15 +151,83 @@ class _Statement:
     tokens: list[tokenize.TokenInfo] = field(default_factory=list)
 
 
+def _line_starts(lines: list[str]) -> list[tuple[int, bool]]:
+    """Bracket depth, and whether a string is open, where each line starts.
+
+    A light scan (comments, quotes, triple quotes, escapes), enough to tell
+    which lines start a statement before the cell can be tokenized.
+    """
+    starts: list[tuple[int, bool]] = []
+    depth, quote = 0, ""
+    for line in lines:
+        starts.append((depth, bool(quote)))
+        i = 0
+        while i < len(line):
+            if quote:
+                if line[i] == "\\":
+                    i += 2
+                elif line.startswith(quote, i):
+                    i += len(quote)
+                    quote = ""
+                else:
+                    i += 1
+                continue
+            ch = line[i]
+            if ch == "#":
+                break
+            if ch in "\"'":
+                quote = line[i : i + 3] if line[i : i + 3] in ('"""', "'''") else ch
+                i += len(quote)
+                continue
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth = max(depth - 1, 0)
+            i += 1
+        if quote in ('"', "'"):  # an unclosed one-line string ends here
+            quote = ""
+    return starts
+
+
+def _continuation_indents(text: str) -> list[int | None]:
+    """For each line that continues a pipe (it starts with ``>>`` or ``+``
+    outside brackets), the indentation of the statement it continues;
+    ``None`` for other lines.
+
+    At the top level of a cell that is 0. Inside a function or another
+    block it is the block's indentation, so re-indented steps keep the
+    block's structure when the cell is tokenized.
+    """
+    lines = text.split("\n")
+    out: list[int | None] = []
+    anchor = 0
+    for line, (depth, in_string) in zip(lines, _line_starts(lines)):
+        stripped = line.lstrip()
+        if depth or in_string or not stripped or stripped.startswith("#"):
+            out.append(None)
+            continue
+        if stripped.startswith((">>", "+")):
+            out.append(anchor)
+            continue
+        anchor = len(line) - len(stripped)
+        out.append(None)
+    return out
+
+
 def _statements(text: str) -> list[_Statement] | None:
     """Split *text* into logical lines; ``None`` if it cannot be tokenized.
 
-    Lines that start with ``>>`` or ``+`` are dedented first, so indented
-    pipe steps (``    >> filter(...)``) never trip indentation checks.
+    Lines that start with ``>>`` or ``+`` are re-indented first: to the
+    indentation of the statement they continue (column 0 at the top of a
+    cell, the block's indentation inside a function), or to column 0 inside
+    brackets, so indented pipe steps (``    >> filter(...)``) never trip
+    indentation checks.
     """
+    indents = _continuation_indents(text)
     analysed = "\n".join(
-        line.lstrip() if line.lstrip().startswith((">>", "+")) else line
-        for line in text.split("\n")
+        (" " * indent + line.lstrip()) if indent is not None
+        else (line.lstrip() if line.lstrip().startswith((">>", "+")) else line)
+        for line, indent in zip(text.split("\n"), indents)
     )
     statements: list[_Statement] = []
     current: _Statement | None = None
@@ -212,9 +280,10 @@ def _wrap_pipe_statements(text: str) -> str | None:
 
     A logical line that starts with ``>>`` continues the statement above it,
     across blank and comment lines. A line that starts with ``+`` continues
-    it too when the statement already holds a pipe (plot3 layers). Only
-    statements at the top level of the cell are joined. Brackets are added
-    on existing lines, so line numbers in errors match the cell as typed.
+    it too when the statement already holds a pipe (plot3 layers). Pipes
+    are joined at the top level of the cell and inside functions, loops and
+    other blocks. Brackets are added on existing lines, so line numbers in
+    errors match the cell as typed.
     """
     statements = _statements(text)
     if not statements:
@@ -225,7 +294,8 @@ def _wrap_pipe_statements(text: str) -> str | None:
         previous = groups[-1] if groups else None
         joins = (
             previous is not None
-            and previous[0].tokens[0].start[1] == 0
+            # Steps were re-indented to the statement they continue.
+            and previous[0].tokens[0].start[1] == lead.start[1]
             and lead.type == tokenize.OP
             and (
                 lead.string == ">>"
@@ -243,12 +313,16 @@ def _wrap_pipe_statements(text: str) -> str | None:
             groups.append([statement])
 
     lines = text.split("\n")
-    # Columns in tokens are for the dedented text; map them back.
-    shift = [0] + [len(line) - len(line.lstrip()) for line in lines]
+    # Columns in tokens are for the re-indented text; map them back.
+    indents = _continuation_indents(text)
 
     def column(row: int, col: int) -> int:
-        stripped = lines[row - 1].lstrip()
-        return col + shift[row] if stripped.startswith((">>", "+")) else col
+        line = lines[row - 1]
+        stripped = line.lstrip()
+        if not stripped.startswith((">>", "+")):
+            return col
+        given = len(line) - len(stripped)
+        return col - (indents[row - 1] or 0) + given
 
     edits: list[tuple[int, int, str]] = []  # (row, column, text), 1-based rows
     for group in groups:
@@ -286,7 +360,8 @@ def join_broken_pipe(source: str) -> str | None:
     since nothing may follow a backslash. Line numbers are unchanged.
 
     Returns ``None`` when *source* parses, is not a pipe, or has nothing to
-    join. Like :func:`_wrap_pipe_statements`, only top-level pipes are joined.
+    join. Like :func:`_wrap_pipe_statements`, pipes are joined at the top
+    level and inside blocks.
     """
     if not source or ">>" not in source:
         return None
@@ -330,6 +405,8 @@ def join_broken_pipe(source: str) -> str | None:
 
     joins: list[int] = []  # rows that get a trailing backslash
     previous: int | None = None  # last code row
+    # ``top``: the current statement starts outside brackets, at any
+    # indentation (top level of the cell, or inside a block).
     top = piped = False
     start_depth = 0
     for row, line in enumerate(lines):
@@ -342,7 +419,7 @@ def join_broken_pipe(source: str) -> str | None:
         if continues and top and previous is not None:
             joins.extend(range(previous, row))
         elif start_depth == 0 and not continues:
-            top, piped = line == stripped, False
+            top, piped = True, False
         piped = piped or ">>" in line
         if row not in end_depth or row in in_string:
             break

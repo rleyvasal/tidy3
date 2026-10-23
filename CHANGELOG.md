@@ -4,6 +4,12 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- Multi-line `>>` pipes now work inside functions, loops, `if` blocks and other indented code in notebooks, not only at the top level of a cell. Before, a pipe step on its own line inside a `def` raised `IndentationError: unexpected indent`, so pipes there had to be wrapped in parentheses. Each step joins the statement above it at the same indentation; top-level cells rewrite exactly as before, and line numbers in errors still match the cell as typed. A broken pipe inside a block now reports the real mistake rather than an `IndentationError`.
+
 ## 0.8.3 — 2026-10-23
 
 `tidy()` works on fitted models whichever package was imported last.
