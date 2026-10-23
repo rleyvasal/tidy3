@@ -124,3 +124,31 @@ def test_aes_bare_names_work_in_the_cell_that_imports_plot3():
     finally:
         shell.run_line_magic("unload_ext", "tidy3.jupyter")
         InteractiveShell.clear_instance()
+
+
+def test_multiline_pipe_inside_a_function_runs_in_ipython():
+    pytest = __import__("pytest")
+    pytest.importorskip("IPython")
+    from IPython.core.interactiveshell import InteractiveShell
+
+    InteractiveShell.clear_instance()
+    shell = InteractiveShell.instance()
+    try:
+        shell.run_line_magic("load_ext", "tidy3.jupyter")
+        shell.run_cell(
+            'penguins = tidy({"species": ["Adelie", "Adelie", "Gentoo"],'
+            ' "island": ["Dream", "Dream", "Biscoe"]})'
+        )
+        defined = shell.run_cell(
+            "def duplicate_rows(panel):\n"
+            "    counted = panel\n"
+            '    >> add_count(species, island, name="Duplicate Count")\n'
+            "    return counted\n"
+        )
+        called = shell.run_cell("result = duplicate_rows(penguins).collect()")
+        assert defined.success, defined.error_before_exec or defined.error_in_exec
+        assert called.success, called.error_in_exec
+        assert shell.user_ns["result"]["Duplicate Count"].to_list() == [2, 2, 1]
+    finally:
+        shell.run_line_magic("unload_ext", "tidy3.jupyter")
+        InteractiveShell.clear_instance()

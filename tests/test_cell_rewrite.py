@@ -161,8 +161,67 @@ def test_rewrite_plus_continues_a_pipe_only():
     assert out.splitlines()[-1] == "+ geom_point())  # layer"
 
 
-def test_rewrite_leaves_pipes_inside_blocks_alone():
-    assert maybe_rewrite_cell('if True:\n    tidy(cars)\n    >> select("mpg")\n') is None
+def _run(source: str, **names) -> dict:
+    """Rewrite a cell as the notebook does, then run it."""
+    import tidy3
+
+    out = maybe_rewrite_cell(source)
+    assert out is not None
+    assert len(out.splitlines()) == len(source.splitlines())  # line numbers kept
+    namespace = {name: getattr(tidy3, name) for name in tidy3.__all__}
+    namespace.update(names)
+    exec(compile(out, "<cell>", "exec"), namespace)
+    return namespace
+
+
+PENGUINS = {
+    "species": ["Adelie", "Adelie", "Gentoo", "Gentoo", "Gentoo"],
+    "island": ["Dream", "Dream", "Biscoe", "Biscoe", "Biscoe"],
+    "mass": [3700.0, 3800.0, 5000.0, 5100.0, 5200.0],
+}
+
+
+def test_rewrite_joins_a_pipe_inside_a_function():
+    import tidy3
+
+    ns = _run(
+        "def duplicate_rows(panel):\n"
+        "    counted = panel\n"
+        '    >> add_count("species", "island", name="Duplicate Count")\n'
+        "    return counted\n",
+    )
+    out = ns["duplicate_rows"](tidy3.tidy(PENGUINS)).collect()
+    assert out["Duplicate Count"].to_list() == [2, 2, 3, 3, 3]
+
+
+def test_rewrite_joins_pipes_in_nested_blocks_and_at_the_top_level():
+    import tidy3
+
+    ns = _run(
+        "heavy = {}\n"
+        "for name in ['Adelie', 'Gentoo']:\n"
+        "    if name:\n"
+        "        rows = penguins\n"
+        '            >> filter(col("species") == name)   # one species\n'
+        "            # a comment between steps\n"
+        '            >> summarise(mass = mean("mass"))\n'
+        "        heavy[name] = rows.collect()['mass'][0]\n"
+        "total = penguins\n"
+        ">> count()\n",
+        penguins=tidy3.tidy(PENGUINS),
+    )
+    assert ns["heavy"] == {"Adelie": 3750.0, "Gentoo": 5100.0}
+    assert ns["total"].collect()["n"][0] == 5
+
+
+def test_rewrite_joins_a_bare_pipe_in_a_block():
+    out = maybe_rewrite_cell('if True:\n    tidy(cars)\n    >> select("mpg")\n')
+    assert out == 'if True:\n    (tidy(cars)\n    >> select("mpg"))\n'
+
+
+def test_rewrite_leaves_a_valid_function_alone():
+    source = "def f(df):\n    return (df\n        >> head(2))\n"
+    assert maybe_rewrite_cell(source) is None
 
 
 def test_rewrite_ignores_pipe_text_inside_strings():
@@ -202,8 +261,18 @@ def test_broken_pipe_join_is_idempotent():
     assert tidy3_input_transformer(once) == once
 
 
-def test_broken_pipe_inside_a_block_is_left_alone():
+def test_broken_pipe_inside_a_function_reports_the_real_error():
+    error = _syntax_error(
+        "def f(frame):\n"
+        "    out = frame\n"
+        "    >> mutate(across(cols, )\n"
+        "    return out\n"
+    )
+    assert not isinstance(error, IndentationError)
+    assert error.lineno == 3
+
+
+def test_broken_pipe_join_leaves_other_code_alone():
     from tidy3.partial_run import join_broken_pipe
 
-    assert join_broken_pipe("if True:\n    frame\n    >> f(\n") is None
     assert join_broken_pipe("x = 1 +\n") is None
