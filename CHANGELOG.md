@@ -4,6 +4,12 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- `tidy()` gives the table of any object with a `__tidy__` method, passing its arguments on: `tidy(fit, conf_int=True)` on a model fitted with stats3 returns its coefficients, as broom's `tidy` does in R, so `tidy()` works on models whichever of tidy3 and stats3 was imported last. With no arguments `tidy()` is a pipe step: `fit >> tidy()`, and `df >> tidy()` wraps data.
+
 ## 0.8.2 — 2026-10-23
 
 Factor levels have a public accessor.

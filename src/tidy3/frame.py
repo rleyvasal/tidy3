@@ -1499,16 +1499,41 @@ class TidyFrame:
         return int(self._lf.select(pl.len()).collect().item())
 
 
-def tidy(data: Any = None, **kwargs: Any) -> TidyFrame:
+class _TidyStep:
+    """``x >> tidy()``: a model's table, or data wrapped as a TidyFrame."""
+
+    def __rrshift__(self, other: Any) -> Any:
+        return tidy(other)
+
+    def __call__(self, other: Any) -> Any:
+        return tidy(other)
+
+    def __repr__(self) -> str:
+        return "<tidy3 tidy(): pipe a model or data into it with >>>"
+
+
+def tidy(data: Any = None, **kwargs: Any) -> Any:
     """Wrap data as a TidyFrame.
 
     Accepts a pandas DataFrame, a Polars DataFrame or LazyFrame, a dict of
     columns, or keyword columns like ``tidy(x=[1,2], y=[3,4])``. pandas input
     becomes a lazy Polars frame that keeps its factor levels; use
     ``collect(as_="pandas")`` to hand a result back to pandas.
+
+    An object with a ``__tidy__`` method, such as a model fitted with
+    stats3, gives its own table: ``tidy(fit, conf_int=True)`` returns
+    ``fit.__tidy__(conf_int=True)``, as broom's ``tidy`` does in R. With no
+    arguments, ``tidy()`` is a pipe step: ``fit >> tidy()``.
     """
     if "backend" in kwargs:
         raise TypeError(_NO_PANDAS_BACKEND)
+    # Packages built on tidy3 (stats3) define __tidy__ on their results, so
+    # tidy() works on them whichever package's tidy was imported last.
+    hook = getattr(type(data), "__tidy__", None)
+    if hook is not None:
+        return hook(data, **kwargs)
+    if data is None and not kwargs:
+        return _TidyStep()
     # Best-effort: multi-line >> rewrite in IPython/SolveIt/CRAFT.
     try:
         from tidy3.jupyter import ensure_ipython_integration
@@ -1517,11 +1542,9 @@ def tidy(data: Any = None, **kwargs: Any) -> TidyFrame:
     except Exception:
         pass
 
-    if data is None and kwargs:
+    if data is None:
         data = kwargs
         kwargs = {}
-    if data is None:
-        raise TypeError("tidy() requires data or column kwargs")
     if isinstance(data, TidyFrame):
         return data
     if isinstance(data, pl.LazyFrame):
