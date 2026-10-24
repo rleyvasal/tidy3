@@ -4,6 +4,12 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- Notebook bare names are rewritten only in calls to tidy3's own verbs. A notebook's own `mutate` function, or a verb with the same name from another package (such as tidy3a), is left alone, so `def select(...)` or `from tidy3a import *` no longer has its arguments turned into tidy3 columns. The cell that does the import is handled too, because the cell's own imports decide before the live namespace does.
+
 ## 0.8.5 — 2026-10-23
 
 `filter()` works with one function nested inside another.

@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import ast
 import builtins
+import importlib
 import re
+from types import ModuleType
 from typing import Any, Iterable, Literal
 
 # Sentinel / injected names (must match jupyter registration).
@@ -913,6 +915,43 @@ def soft_names(namespace: dict[str, Any] | None = None) -> set[str]:
     return soft
 
 
+def _owned_by_tidy3(value: Any) -> bool:
+    """Whether *value* is a tidy3 object (not tidy3a, plot3, or the user's own)."""
+    module = getattr(value, "__name__" if isinstance(value, ModuleType) else "__module__", "")
+    return module == "tidy3" or str(module).startswith("tidy3.")
+
+
+def _star_names(module: str) -> list[str]:
+    try:
+        imported = importlib.import_module(module)
+    except Exception:
+        return []
+    names = getattr(imported, "__all__", None)
+    if names is None:
+        names = [name for name in dir(imported) if not name.startswith("_")]
+    return list(names)
+
+
+def _cell_import_sources(node: ast.Module) -> dict[str, str]:
+    """Names this cell imports, mapped to the package they come from; the last import wins."""
+    statements = [s for s in ast.walk(node) if isinstance(s, (ast.Import, ast.ImportFrom))]
+    statements.sort(key=lambda s: (s.lineno, s.col_offset))
+    sources: dict[str, str] = {}
+    for statement in statements:
+        if isinstance(statement, ast.Import):
+            for alias in statement.names:
+                sources[(alias.asname or alias.name).split(".")[0]] = alias.name.split(".")[0]
+        elif statement.module and statement.level == 0:
+            package = statement.module.split(".")[0]
+            for alias in statement.names:
+                if alias.name == "*":
+                    for name in _star_names(statement.module):
+                        sources[name] = package
+                else:
+                    sources[alias.asname or alias.name] = package
+    return sources
+
+
 def _imports_plot3(node: ast.Module) -> bool:
     for statement in ast.walk(node):
         if isinstance(statement, ast.ImportFrom) and statement.module:
@@ -966,6 +1005,26 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
         self._soft: set[str] = set()
         self._variables: dict[str, Any] = {}
         self._cell_names: set[str] = set()
+        self._cell_imports: dict[str, str] = {}
+
+    def _owns(self, verb: str) -> bool:
+        """Whether *verb* in this cell is tidy3's, so its arguments may be rewritten.
+
+        Another package can export the same verb names (tidy3a does), and a
+        notebook can define its own ``mutate``; only tidy3's calls are masked.
+        The cell's own imports decide first, because masking runs before the
+        cell does.
+        """
+        if self._known_static is not None:
+            return True
+        if verb in self._cell_imports:
+            return self._cell_imports[verb] == "tidy3"
+        if verb in self._cell_names:
+            return False  # the cell defines it itself
+        namespace = self._namespace()
+        if namespace is None or verb not in namespace:
+            return True
+        return _owned_by_tidy3(namespace[verb])
 
     def _known(self) -> set[str]:
         if self._known_static is not None:
@@ -1003,6 +1062,7 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
             # before the cell. Treat them as variables, as a script does,
             # and drop any stale value from an earlier cell.
             self._cell_names = bound_names(node)
+            self._cell_imports = _cell_import_sources(node)
             self._soft -= self._cell_names
             self._variables = {
                 k: v for k, v in self._variables.items() if k not in self._cell_names
@@ -1050,6 +1110,8 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
             return self.generic_visit(node)
 
         verb = node.func.id
+        if not self._owns(verb):
+            return self.generic_visit(node)
 
         if verb in _EXPR_ARG_VERBS:
             node.args = [self._mask(arg, "expr") for arg in node.args]
