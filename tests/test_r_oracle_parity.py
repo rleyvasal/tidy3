@@ -322,6 +322,10 @@ def _grouping():
         >> summarise(n=n(), avg=mean("y"), groups="drop"),
         "transient": frame >> summarise(n=n(), avg=mean("y"), by="g"),
         "ungrouped": frame >> group_by("g") >> ungroup() >> summarise(n=n()),
+        "by_col": frame
+        >> group_by(col("g"), pl.col("x"))
+        >> ungroup(col("x"))
+        >> summarise(n=n(), groups="drop"),
     }
 
 

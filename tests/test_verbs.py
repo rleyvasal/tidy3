@@ -277,6 +277,63 @@ def test_count_family_accepts_col_and_named_expressions():
         penguins >> add_count(col("body_mass_g") + 1)
 
 
+def test_column_selection_verbs_accept_plain_col():
+    from tidy3 import (
+        distinct,
+        pull,
+        relocate,
+        slice_head,
+        slice_max,
+        ungroup,
+        with_groups,
+    )
+
+    penguins = tidy(
+        {
+            "species": ["Adelie", "Adelie", "Gentoo", "Chinstrap", "Gentoo"],
+            "island": ["Torgersen", "Biscoe", "Biscoe", "Dream", "Biscoe"],
+            "body_mass_g": [3750, 3800, 5000, 3500, 5400],
+        }
+    )
+
+    def same(left, right):
+        assert left._groups == right._groups
+        assert left.collect().equals(right.collect())
+
+    for species in (col("species"), pl.col("species")):
+        same(penguins >> group_by(species), penguins >> group_by("species"))
+        same(penguins >> distinct(species), penguins >> distinct("species"))
+        same(
+            penguins >> slice_head(n=1, by=species),
+            penguins >> slice_head(n=1, by="species"),
+        )
+        same(
+            penguins >> slice_max(col("body_mass_g"), n=1, by=species),
+            penguins >> slice_max("body_mass_g", n=1, by="species"),
+        )
+        same(
+            penguins >> relocate(col("body_mass_g"), before=species),
+            penguins >> relocate("body_mass_g", before="species"),
+        )
+    same(
+        penguins >> group_by(col("species"), col("island")) >> ungroup(col("island")),
+        penguins >> group_by("species"),
+    )
+    same(
+        penguins >> with_groups(col("species"), lambda g: g >> mutate(k=n())),
+        penguins >> with_groups("species", lambda g: g >> mutate(k=n())),
+    )
+    assert (penguins >> pull(col("body_mass_g"))).to_list() == [3750, 3800, 5000, 3500, 5400]
+    named = penguins >> pull(pl.col("body_mass_g"), name=col("species"))
+    assert named.index.tolist() == ["Adelie", "Adelie", "Gentoo", "Chinstrap", "Gentoo"]
+
+    # select() still treats an expression as a computed column.
+    doubled = (penguins >> select(col("body_mass_g") * 2)).collect()
+    assert doubled["body_mass_g"].to_list() == [7500, 7600, 10000, 7000, 10800]
+    with pytest.raises(TypeError, match="unsupported column selection"):
+        penguins >> group_by(col("body_mass_g") > 4000)
+
+
 @pytest.mark.parametrize("rows, expected", [(1, 0), (3, 1), (5, 2), (7, 3)])
 def test_sample_frac_rounds_towards_zero(rows, expected):
     from tidy3 import sample_frac

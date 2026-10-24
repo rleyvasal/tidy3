@@ -103,6 +103,18 @@ def as_selector(value: Any) -> Selector:
     raise TypeError(f"cannot use {value!r} as a column selector")
 
 
+def _plain_col_name(spec: Any) -> str | None:
+    """The column name of a plain ``col("x")`` / ``pl.col("x")``, else None."""
+    if isinstance(spec, Expr):
+        node = spec.node
+        if node[0] == "col" and isinstance(node[1], str):
+            return node[1]
+        return None
+    if isinstance(spec, pl.Expr) and spec.meta.is_column():
+        return spec.meta.output_name()
+    return None
+
+
 def resolve_selection(
     tf: Any,
     specs: Iterable[Any],
@@ -128,6 +140,8 @@ def resolve_selection(
                     raise KeyError(f"column not found: {spec!r}")
                 return
             selected.append(spec)
+        elif (name := _plain_col_name(spec)) is not None:
+            add(name)
         elif isinstance(spec, int) and not isinstance(spec, bool):
             if spec == 0:
                 raise ValueError("column positions are 1-based and cannot be zero")

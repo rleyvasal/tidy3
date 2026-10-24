@@ -434,7 +434,8 @@ result <- switch(
   grouping = list(
     persistent=base |> group_by(g) |> summarise(n=n(), avg=mean(y), .groups="drop"),
     transient=base |> summarise(n=n(), avg=mean(y), .by=g),
-    ungrouped=base |> group_by(g) |> ungroup() |> summarise(n=n())
+    ungrouped=base |> group_by(g) |> ungroup() |> summarise(n=n()),
+    by_col=base |> group_by(g, x) |> ungroup(x) |> summarise(n=n(), .groups="drop")
   ),
   rowwise = tibble(id=1:2, x=c(1, 2), y=c(10, 20)) |>
     rowwise(id) |>
