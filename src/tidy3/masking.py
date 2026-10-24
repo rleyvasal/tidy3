@@ -67,6 +67,7 @@ _SELECTOR_ARG_VERBS = frozenset(
     {
         "select",
         "get_dupes",
+        "tabyl",
         "drop",
         "relocate",
         "ungroup",
@@ -148,6 +149,7 @@ _PASSTHROUGH_KW = frozenset(
         "drop",
         "sort",
         "na_rm",
+        "where",
         "with_ties",
         "n",
         "prop",
@@ -183,6 +185,7 @@ _FIRST_COLUMN_ARG = frozenset(
         "is_na", "is_nan", "is_finite", "is_infinite",
         "as_numeric", "as_double", "as_integer", "as_character", "as_string",
         "as_logical",
+        "fct_recode", "fct_collapse", "fct_lump_n", "fct_lump_prop", "fct_lump_min",
         "as_date", "as_datetime",
         "ymd", "mdy", "dmy", "ym", "year", "month", "day",
         "floor_date", "ceiling_date", "days_in_month", "add_with_rollback",
@@ -1210,7 +1213,7 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
             ]
             return node
 
-        if verb in _SLICE_BY_VERBS:
+        if verb in _SLICE_BY_VERBS or verb == "adorn_totals":
             node.args = [self.visit(a) for a in node.args]
             node.keywords = [
                 self._mask_keyword(kw, default="selector") for kw in node.keywords

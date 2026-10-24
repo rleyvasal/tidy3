@@ -153,6 +153,7 @@ class Verb:
                         select_base=getattr(other, "_select_base", None),
                         problems=getattr(other, "_problems", None),
                         data_reads=getattr(other, "_data_reads", ()),
+                        totals=getattr(other, "_totals", None),
                     )
                 except (AttributeError, TypeError) as e:
                     raise TypeError(
@@ -989,7 +990,8 @@ def mutate(
             lf = tf._lf.with_row_index(marker)
             for stage in stages:
                 lf, stage, stage_ordered = prepare_polars(
-                    tf, lf, stage, [marker], sort_groups=False
+                    tf, lf, stage, [marker], sort_groups=False,
+                    ordered_flags=produced_ordered,
                 )
                 # later stages see earlier columns; the first reuses tf's cached schema
                 _COMPILE_FRAME.set(tf if lf is tf._lf else lf)
@@ -1012,7 +1014,8 @@ def mutate(
             lf = tf._lf
             for stage in stages:
                 lf, stage, stage_ordered = prepare_polars(
-                    tf, lf, stage, groups, sort_groups=not transient
+                    tf, lf, stage, groups, sort_groups=not transient,
+                    ordered_flags=produced_ordered,
                 )
                 # later stages see earlier columns; the first reuses tf's cached schema
                 _COMPILE_FRAME.set(tf if lf is tf._lf else lf)

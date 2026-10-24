@@ -61,6 +61,71 @@ base <- tibble(
 
 result <- switch(
   case_name,
+  janitor_totals = {
+    if (!requireNamespace("janitor", quietly=TRUE)) {
+      list(skip=TRUE, reason="janitor is not installed")
+    } else {
+      source <- data.frame(label=c("a", "b"), yes=c(1L, NA_integer_), no=c(2L, 3L), note=c("x", "y"))
+      result <- list(
+        row=janitor::adorn_totals(source),
+        col=janitor::adorn_totals(source, "col"),
+        both=janitor::adorn_totals(source, c("row", "col")),
+        propagate=janitor::adorn_totals(source, c("row", "col"), na.rm=FALSE),
+        custom=janitor::adorn_totals(source, where=c("row", "col"), fill="-", na.rm=TRUE, name=c("All", "Grand"), yes),
+        typed_fill=janitor::adorn_totals(source, where="row", fill=NA, na.rm=TRUE, name="Total", yes),
+        row_then_col=janitor::adorn_totals(janitor::adorn_totals(source), "col"),
+        col_then_row=janitor::adorn_totals(janitor::adorn_totals(source, "col"))
+      )
+      factor <- janitor::adorn_totals(data.frame(g=ordered(c("b", "a"), levels=c("b", "a", "unused")), n=c(1L, 2L)))
+      result$factor <- factor
+      result$factor_levels <- levels(factor$g)
+      result$factor_ordered <- is.ordered(factor$g)
+      numeric <- data.frame(g=c(1L, 2L), n=c(3L, 4L))
+      result$numeric_label <- janitor::adorn_totals(numeric)
+      result$numeric_first_selected <- janitor::adorn_totals(numeric, where=c("row", "col"), fill="-", na.rm=TRUE, name="Total", dplyr::everything())
+      result$empty <- janitor::adorn_totals(data.frame(label=character(), n=integer()), c("row", "col"))
+      result$missing <- janitor::adorn_totals(data.frame(label=c("a", "b"), n=c(NA_real_, NaN)), c("row", "col"))
+      report <- janitor::tabyl(data.frame(g=c("a", "a", "b"), answer=c("yes", "no", "yes")), g, answer)
+      result$tabyl <- janitor::adorn_totals(report, c("row", "col"))
+      result
+    }
+  },
+  janitor_tabyl = {
+    if (!requireNamespace("janitor", quietly=TRUE)) {
+      list(skip=TRUE, reason="janitor is not installed")
+    } else {
+      source <- data.frame(x=c("b", "a", "a", NA_character_))
+      f <- data.frame(x=ordered(c("b", NA, "b"), levels=c("c", "b", "a")))
+      result <- list(
+        ordinary=janitor::tabyl(source, x),
+        without_na=janitor::tabyl(source, x, show_na=FALSE)
+      )
+      for (na in c(FALSE, TRUE)) for (missing in c(FALSE, TRUE)) {
+        result[[paste0("factor_", as.integer(na), "_", as.integer(missing))]] <-
+          janitor::tabyl(f, x, show_na=na, show_missing_levels=missing)
+      }
+      result$empty <- janitor::tabyl(data.frame(x=character()), x)
+      result$empty_factor <- janitor::tabyl(data.frame(x=factor(character(), levels=c("b", "a"))), x)
+      result$all_missing <- janitor::tabyl(data.frame(x=rep(NA_character_, 2)), x)
+      result$nan_null <- janitor::tabyl(data.frame(x=c(NA_real_, NaN, 1, NaN)), x)
+      two_way <- data.frame(x=c("b", "a", "a", NA, "b"), y=c("", "z", NA, "m", "z"))
+      result$two_way <- janitor::tabyl(two_way, x, y)
+      result$two_way_no_na <- janitor::tabyl(two_way, x, y, show_na=FALSE)
+      factors <- data.frame(x=ordered(c("b", NA, "b"), levels=c("c", "b", "a")),
+                            y=factor(c("z", "m", NA), levels=c("q", "z", "m")))
+      for (na in c(FALSE, TRUE)) for (missing in c(FALSE, TRUE)) {
+        result[[paste0("two_way_factor_", as.integer(na), "_", as.integer(missing))]] <-
+          janitor::tabyl(factors, x, y, show_na=na, show_missing_levels=missing)
+      }
+      result$two_way_empty <- janitor::tabyl(data.frame(x=factor(character(), levels=c("b", "a")),
+                                                       y=factor(character(), levels=c("z", "m"))), x, y)
+      result$two_way_empty_after_drop <- janitor::tabyl(data.frame(x=c("a", NA), y=c(NA, "b")), x, y, show_na=FALSE)
+      result$two_way_numeric <- janitor::tabyl(data.frame(x=c("b", "a", "b"), y=c(10, 2, 1)), x, y)
+      result$two_way_boolean <- janitor::tabyl(data.frame(x=c("b", "a", "b"), y=c(TRUE, FALSE, TRUE)), x, y)
+      result$two_way_nan <- janitor::tabyl(data.frame(x=c("b", "a", "b"), y=c(1, NaN, NA_real_)), x, y)
+      result
+    }
+  },
   rolling_joins = {
     x <- tibble(g=c("b", "a", NA, "a", "z"), x=c(4, 2, 2, 0, 9), lid=as.double(1:5))
     y <- tibble(h=c("a", "a", NA, "b", "q"), y=c(1, 1, 1, 4, 8), rid=as.double(1:5))
@@ -373,6 +438,50 @@ result <- switch(
         median=forcats::fct_reorder(f, mass),
         mean_desc=forcats::fct_reorder(f, mass, mean, .desc=TRUE)
       ), payload)
+    }
+  },
+  factor_values = {
+    if (!requireNamespace("forcats", quietly=TRUE)) {
+      list(skip=TRUE, reason="forcats is not installed")
+    } else {
+      f <- ordered(c("b", "a", "a", "c", NA), levels=c("b", "a", "c", "unused"))
+      w <- c(1, 1, 1, 4, 10)
+      payload <- function(f) list(
+        values=list(kind="vector", data=unname(as.list(as.character(f)))),
+        levels=list(kind="vector", data=unname(as.list(levels(f)))),
+        ordered=is.ordered(f)
+      )
+      result <- list(
+        recode=payload(forcats::fct_recode(f, renamed="a", spare="unused")),
+        remove=payload(forcats::fct_recode(f, b="a", NULL="c")),
+        collapse=payload(forcats::fct_collapse(f, pair=c("a", "b"))),
+        remainder=payload(forcats::fct_collapse(f, pair=c("a", "b"), other_level="rest")),
+        existing=payload(forcats::fct_collapse(f, b="a", other_level="rest")),
+        overlap=payload(forcats::fct_collapse(f, first=c("a", "b"), last="a")),
+        other_collision=payload(forcats::fct_lump_min(f, 2, other_level="b"))
+      )
+      for (n in c(0, 1, 2, -1, -2, 10)) {
+        result[[paste0("n_", n)]] <- payload(forcats::fct_lump_n(f, n))
+        result[[paste0("weighted_n_", n)]] <- payload(forcats::fct_lump_n(f, n, w=w))
+      }
+      props <- c(zero=0, low=.2, high=.4, negative_low=-.2, negative_high=-.4, all=1, negative_all=-1)
+      for (label in names(props)) {
+        result[[paste0("prop_", label)]] <- payload(forcats::fct_lump_prop(f, props[[label]]))
+        result[[paste0("weighted_prop_", label)]] <- payload(forcats::fct_lump_prop(f, props[[label]], w=w))
+      }
+      for (minimum in c(0, 1, 2, 3)) {
+        result[[paste0("min_", minimum)]] <- payload(forcats::fct_lump_min(f, minimum))
+        result[[paste0("weighted_min_", minimum)]] <- payload(forcats::fct_lump_min(f, minimum, w=w))
+      }
+      for (method in c("min", "average", "first", "last", "max")) {
+        result[[paste0("ties_", method)]] <- payload(forcats::fct_lump_n(f, 2, ties.method=method))
+      }
+      grouped <- tibble(g=c(2L, 2L, 2L, 1L, 1L, 1L), species=c("a", "a", "b", "b", "b", "a"))
+      persistent <- grouped |> group_by(g) |> mutate(species=forcats::fct_lump_n(species, 1))
+      transient <- grouped |> mutate(species=forcats::fct_lump_n(species, 1), .by=g)
+      result$persistent <- payload(persistent$species)[c("values", "levels")]
+      result$transient <- payload(transient$species)[c("values", "levels")]
+      result
     }
   },
   factor_grouped = {

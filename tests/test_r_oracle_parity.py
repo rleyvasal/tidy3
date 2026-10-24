@@ -1378,6 +1378,80 @@ def _excel_text(values, **kwargs):
     )
 
 
+def _janitor_totals():
+    import tidy3 as t3
+
+    source = tidy({"label": ["a", "b"], "yes": [1, None], "no": [2, 3], "note": ["x", "y"]})
+    result = {"row": source >> t3.adorn_totals(),
+              "col": source >> t3.adorn_totals("col"),
+              "both": source >> t3.adorn_totals("both"),
+              "propagate": source >> t3.adorn_totals("both", na_rm=False),
+              "custom": source >> t3.adorn_totals("both", cols="yes", name=("All", "Grand")),
+              "typed_fill": source >> t3.adorn_totals(cols="yes", fill=None),
+              "row_then_col": source >> t3.adorn_totals() >> t3.adorn_totals("col"),
+              "col_then_row": source >> t3.adorn_totals("col") >> t3.adorn_totals()}
+    factor = tidy(pd.DataFrame({
+        "g": pd.Categorical(["b", "a"], categories=["b", "a", "unused"], ordered=True),
+        "n": [1, 2],
+    })) >> t3.adorn_totals()
+    result["factor"] = factor
+    result["factor_levels"] = pl.Series(factor.factor_levels()["g"])
+    result["factor_ordered"] = factor.collect(as_="pandas")["g"].cat.ordered
+    numeric = tidy({"g": [1, 2], "n": [3, 4]})
+    result["numeric_label"] = numeric >> t3.adorn_totals()
+    result["numeric_first_selected"] = numeric >> t3.adorn_totals("both", cols=t3.everything())
+    empty = tidy(pl.DataFrame(schema={"label": pl.String, "n": pl.Int64}))
+    result["empty"] = empty >> t3.adorn_totals("both")
+    missing = tidy(pl.DataFrame({"label": ["a", "b"], "n": pl.Series([None, float("nan")], dtype=pl.Float64)}))
+    result["missing"] = missing >> t3.adorn_totals("both")
+    report = tidy({"g": ["a", "a", "b"], "answer": ["yes", "no", "yes"]}) >> t3.tabyl("g", "answer")
+    result["tabyl"] = report >> t3.adorn_totals("both")
+    return result
+
+
+def _janitor_tabyl():
+    import tidy3 as t3
+
+    source = tidy({"x": ["b", "a", "a", None]})
+    factor = tidy(pd.DataFrame({"x": pd.Categorical(
+        ["b", None, "b"], categories=["c", "b", "a"], ordered=True,
+    )}))
+    result = {"ordinary": source >> t3.tabyl("x"),
+              "without_na": source >> t3.tabyl("x", show_na=False)}
+    for show_na in (False, True):
+        for missing in (False, True):
+            result[f"factor_{int(show_na)}_{int(missing)}"] = factor >> t3.tabyl(
+                "x", show_na=show_na, show_missing_levels=missing,
+            )
+    result["empty"] = t3.tabyl(pd.Series([], dtype="string", name="x"))
+    result["empty_factor"] = tidy(pd.DataFrame({
+        "x": pd.Categorical([], categories=["b", "a"]),
+    })) >> t3.tabyl("x")
+    result["all_missing"] = tidy(pl.DataFrame({"x": pl.Series([None, None], dtype=pl.String)})) >> t3.tabyl("x")
+    result["nan_null"] = tidy(pl.DataFrame({"x": [None, float("nan"), 1., float("nan")]})) >> t3.tabyl("x")
+    two_way = tidy({"x": ["b", "a", "a", None, "b"], "y": ["", "z", None, "m", "z"]})
+    result["two_way"] = two_way >> t3.tabyl("x", "y")
+    result["two_way_no_na"] = two_way >> t3.tabyl("x", "y", show_na=False)
+    factors = tidy(pd.DataFrame({
+        "x": pd.Categorical(["b", None, "b"], categories=["c", "b", "a"], ordered=True),
+        "y": pd.Categorical(["z", "m", None], categories=["q", "z", "m"]),
+    }))
+    for show_na in (False, True):
+        for missing in (False, True):
+            result[f"two_way_factor_{int(show_na)}_{int(missing)}"] = factors >> t3.tabyl(
+                "x", "y", show_na=show_na, show_missing_levels=missing,
+            )
+    result["two_way_empty"] = tidy(pd.DataFrame({
+        "x": pd.Categorical([], categories=["b", "a"]),
+        "y": pd.Categorical([], categories=["z", "m"]),
+    })) >> t3.tabyl("x", "y")
+    result["two_way_empty_after_drop"] = tidy({"x": ["a", None], "y": [None, "b"]}) >> t3.tabyl("x", "y", show_na=False)
+    for label, values in (("numeric", [10, 2, 1]), ("boolean", [True, False, True]),
+                          ("nan", [1., float("nan"), None])):
+        result[f"two_way_{label}"] = tidy({"x": ["b", "a", "b"], "y": values}) >> t3.tabyl("x", "y")
+    return result
+
+
 def _janitor_cleaning():
     cleaning = tidy(
         pd.DataFrame(
@@ -1753,6 +1827,47 @@ def _factor_ordering():
     return {name: _factor_payload(frame >> mutate(species=expr)) for name, expr in expressions.items()}
 
 
+def _factor_values():
+    import tidy3 as t3
+
+    frame = tidy(pd.DataFrame({
+        "species": pd.Categorical(["b", "a", "a", "c", None],
+                                  categories=["b", "a", "c", "unused"], ordered=True),
+        "w": [1., 1., 1., 4., 10.],
+    }))
+    expressions = {
+        "recode": t3.fct_recode("species", renamed="a", spare="unused"),
+        "remove": t3.fct_recode("species", b="a", NULL="c"),
+        "collapse": t3.fct_collapse("species", pair=["a", "b"]),
+        "remainder": t3.fct_collapse("species", pair=["a", "b"], other_level="rest"),
+        "existing": t3.fct_collapse("species", b="a", other_level="rest"),
+        "overlap": t3.fct_collapse("species", first=["a", "b"], last="a"),
+        "other_collision": t3.fct_lump_min("species", 2, other_level="b"),
+    }
+    for n in (0, 1, 2, -1, -2, 10):
+        expressions[f"n_{n}"] = t3.fct_lump_n("species", n)
+        expressions[f"weighted_n_{n}"] = t3.fct_lump_n("species", n, w="w")
+    for label, prop in (("zero", 0), ("low", .2), ("high", .4),
+                        ("negative_low", -.2), ("negative_high", -.4), ("all", 1), ("negative_all", -1)):
+        expressions[f"prop_{label}"] = t3.fct_lump_prop("species", prop)
+        expressions[f"weighted_prop_{label}"] = t3.fct_lump_prop("species", prop, w="w")
+    for minimum in (0, 1, 2, 3):
+        expressions[f"min_{minimum}"] = t3.fct_lump_min("species", minimum)
+        expressions[f"weighted_min_{minimum}"] = t3.fct_lump_min("species", minimum, w="w")
+    for method in ("min", "average", "first", "last", "max"):
+        expressions[f"ties_{method}"] = t3.fct_lump_n("species", 2, ties_method=method)
+    result = {}
+    for name, expression in expressions.items():
+        changed = frame >> mutate(species=expression)
+        result[name] = {**_factor_payload(changed),
+                        "ordered": changed.collect(as_="pandas")["species"].cat.ordered}
+    grouped = tidy({"g": [2, 2, 2, 1, 1, 1], "species": ["a", "a", "b", "b", "b", "a"]})
+    expr = t3.fct_lump_n("species", 1)
+    result["persistent"] = _factor_payload(grouped >> group_by("g") >> mutate(species=expr))
+    result["transient"] = _factor_payload(grouped >> mutate(species=expr, by="g"))
+    return result
+
+
 def _factor_grouped():
     import tidy3 as t3
 
@@ -2118,6 +2233,8 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "reshape_metadata": _reshape_metadata,
     "janitor_dupes": _janitor_dupes,
     "janitor_cleaning": _janitor_cleaning,
+    "janitor_tabyl": _janitor_tabyl,
+    "janitor_totals": _janitor_totals,
     "timezone_conversion": _timezone_conversion,
     "timezone_dst": _timezone_dst,
     "timezone_resolved_repeats": _timezone_resolved_repeats,
@@ -2131,6 +2248,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "fiscal_quarters": _fiscal_quarters,
     "clock_components": _clock_components,
     "factor_ordering": _factor_ordering,
+    "factor_values": _factor_values,
     "factor_grouped": _factor_grouped,
     "factor_missing": _factor_missing,
     "filter_missing": _filter_missing,

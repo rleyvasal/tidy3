@@ -1,4 +1,4 @@
-"""Factor ordering for tidy3 expressions and categorical vectors.
+"""Factor ordering and value changes for expressions and categorical vectors.
 
 Polars factor mutations compute a snapshot to discover Enum levels. The
 result resumes as a lazy frame; other mutations keep their usual lazy path.
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 import math
+from numbers import Real
 from typing import Any
 import warnings
 
@@ -17,8 +18,12 @@ import polars as pl
 
 from tidy3.expr import Expr, _func, col, median
 
-__all__ = ["fct_relevel", "fct_reorder", "fct_infreq", "fct_rev"]
+__all__ = [
+    "fct_relevel", "fct_reorder", "fct_infreq", "fct_rev",
+    "fct_recode", "fct_collapse", "fct_lump_n", "fct_lump_prop", "fct_lump_min",
+]
 FUNCTIONS = frozenset(__all__)
+_ORDERING_FUNCTIONS = frozenset({"fct_relevel", "fct_reorder", "fct_infreq", "fct_rev"})
 SORT_GROUPS: ContextVar[bool] = ContextVar("tidy3_factor_sort_groups", default=True)
 
 
@@ -85,6 +90,139 @@ def fct_rev(f: Any) -> Any:
     return _dispatch("fct_rev", f)
 
 
+def fct_recode(f: Any, **levels: str) -> Any:
+    """Rename levels with ``new="old"``; ``NULL="old"`` removes a level.
+
+    Unmentioned levels stay unchanged. Unknown old levels warn. Use
+    :func:`fct_collapse` to combine several old levels under one name.
+    """
+    if any(not isinstance(old, str) for old in levels.values()):
+        raise TypeError("fct_recode() levels must be named strings")
+    return _dispatch("fct_recode", f, levels=levels)
+
+
+def fct_collapse(f: Any, *, other_level: str | None = None, **levels: Any) -> Any:
+    """Combine levels with ``new=["old", ...]`` (or one old string).
+
+    Unmentioned levels stay unchanged unless *other_level* is supplied;
+    that level collects the remainder and is placed last.
+    """
+    if other_level is not None and not isinstance(other_level, str):
+        raise TypeError("fct_collapse() other_level must be a string or None")
+    normalized = {}
+    for new, old in levels.items():
+        old = [old] if isinstance(old, str) else old
+        if not isinstance(old, (list, tuple)) or any(not isinstance(value, str) for value in old):
+            raise TypeError("fct_collapse() levels must be strings or lists of strings")
+        normalized[new] = list(old)
+    return _dispatch("fct_collapse", f, levels=normalized, other_level=other_level)
+
+
+def _lump_call(name: str, f: Any, value: Any, w: Any, other_level: str, **kwargs: Any) -> Any:
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
+        raise ValueError(f"{name}() threshold must be a finite number")
+    if name == "fct_lump_min" and value < 0:
+        raise ValueError("fct_lump_min() min must be non-negative")
+    if not isinstance(other_level, str):
+        raise TypeError(f"{name}() other_level must be a string")
+    args = () if w is None else (_column(w),)
+    return _dispatch(name, f, *args, threshold=value, other_level=other_level, **kwargs)
+
+
+def fct_lump_n(
+    f: Any, n: float, w: Any = None, *, other_level: str = "Other", ties_method: str = "min",
+) -> Any:
+    """Keep the *n* most frequent levels, or the least frequent if *n* < 0.
+
+    Ties default to keeping all levels at the cutoff. ``ties_method`` accepts
+    min, average, first, last, random, or max. Weights apply to rows.
+    """
+    if ties_method not in {"min", "average", "first", "last", "random", "max"}:
+        raise ValueError("fct_lump_n() unknown ties_method")
+    return _lump_call("fct_lump_n", f, n, w, other_level, ties_method=ties_method)
+
+
+def fct_lump_prop(f: Any, prop: float, w: Any = None, *, other_level: str = "Other") -> Any:
+    """Keep frequencies strictly above *prop*; if negative, keep <= abs(prop).
+
+    The denominator includes missing rows (and their weights), as in forcats.
+    A zero denominator with existing levels raises ValueError.
+    """
+    return _lump_call("fct_lump_prop", f, prop, w, other_level)
+
+
+def fct_lump_min(f: Any, min: float, w: Any = None, *, other_level: str = "Other") -> Any:
+    """Keep levels with frequency at least *min*, optionally weighted."""
+    return _lump_call("fct_lump_min", f, min, w, other_level)
+
+
+def _revalue(source: pd.Series, mapping: dict[str, str | None]) -> pd.Series:
+    """Relabel categorical codes, merging duplicates and preserving missing rows."""
+    renamed = [mapping.get(level, level) for level in source.cat.categories]
+    categories = list(dict.fromkeys(level for level in renamed if level is not None))
+    lookup = {level: code for code, level in enumerate(categories)}
+    codes = np.array([lookup.get(level, -1) for level in renamed] + [-1], dtype=np.int64)
+    result = pd.Categorical.from_codes(
+        codes[source.cat.codes.to_numpy()], categories=categories, ordered=source.cat.ordered,
+    )
+    return pd.Series(result, index=source.index, name=source.name)
+
+
+def _keep_levels(source: pd.Series, keep: Any, other_level: str) -> pd.Series:
+    if all(keep):
+        return source
+    mapping = {level: other_level for level, kept in zip(source.cat.categories, keep) if not kept}
+    result = _revalue(source, mapping)
+    categories = [level for level in result.cat.categories if level != other_level] + [other_level]
+    return result.cat.reorder_categories(categories)
+
+
+def _change_levels(name: str, source: pd.Series, args: tuple[Any, ...], kw: dict[str, Any]) -> pd.Series:
+    if name in {"fct_recode", "fct_collapse"}:
+        levels = kw["levels"]
+        removed = [levels["NULL"]] if name == "fct_recode" and "NULL" in levels else []
+        mapping = {}
+        for new, old in levels.items():
+            if name == "fct_recode" and new == "NULL":
+                continue
+            for level in ([old] if isinstance(old, str) else old):
+                mapping[level] = new
+        unknown = [level for level in mapping if level not in source.cat.categories or level in removed]
+        if unknown:
+            warnings.warn(f"{name}(): unknown levels: {unknown}", UserWarning, stacklevel=4)
+        mapping.update({level: None for level in removed})
+        result = _revalue(source, mapping)
+        if name == "fct_collapse" and kw["other_level"] is not None:
+            return _keep_levels(result, result.cat.categories.isin(levels), kw["other_level"])
+        return result
+
+    weights = args[0] if args else pd.Series(1.0, index=source.index)
+    if (not pd.api.types.is_numeric_dtype(weights) or weights.isna().any()
+            or not np.isfinite(weights.to_numpy(dtype=float)).all() or (weights < 0).any()):
+        raise ValueError(f"{name}() weights must be finite, non-negative and non-missing")
+    counts = weights.groupby(source, observed=False, sort=False).sum().reindex(source.cat.categories, fill_value=0)
+    threshold = kw["threshold"]
+    if name == "fct_lump_n":
+        scores = counts if threshold < 0 else -counts
+        method = kw["ties_method"]
+        if method == "last":
+            ranks = scores.iloc[::-1].rank(method="first").iloc[::-1]
+        elif method == "random":
+            ranks = scores.iloc[np.random.permutation(len(scores))].rank(method="first").reindex(scores.index)
+        else:
+            ranks = scores.rank(method=method)
+        keep = ranks <= abs(threshold)
+    elif name == "fct_lump_prop":
+        denominator = weights.sum()
+        if denominator == 0 and len(counts):
+            raise ValueError("fct_lump_prop() requires a positive total weight when levels exist")
+        proportions = counts / denominator
+        keep = proportions <= -threshold if threshold < 0 else proportions > threshold
+    else:
+        keep = counts >= threshold
+    return _keep_levels(source, keep, kw["other_level"])
+
+
 def _factor(value: Any, levels: list[str] | None = None, *, ordered: bool | None = None) -> pd.Series:
     if isinstance(value, pl.Series):
         if isinstance(value.dtype, pl.Enum):
@@ -120,6 +258,8 @@ def _summary(values: pd.Series, fun: Any, kwargs: dict[str, Any]) -> Any:
 
 
 def _apply(name: str, source: pd.Series, args: tuple[Any, ...], kw: dict[str, Any]) -> pd.Series:
+    if name not in _ORDERING_FUNCTIONS:
+        return _change_levels(name, source, args, kw)
     levels = source.cat.categories.tolist()
     ordered = source.cat.ordered
     if name == "fct_rev":
@@ -213,7 +353,7 @@ def _columns_only(node: tuple) -> bool:
 
     Nested factor calls or computed arguments use the per-group loop.
     """
-    if not (isinstance(node, tuple) and node[0] == "func" and node[1] in FUNCTIONS):
+    if not (isinstance(node, tuple) and node[0] == "func" and node[1] in _ORDERING_FUNCTIONS):
         return False
     columns = all(isinstance(arg, tuple) and arg[0] in {"col", "name"} for arg in node[2])
     literals = all(isinstance(value, tuple) and value[0] == "lit" for value in node[3].values())
@@ -385,7 +525,7 @@ def _native_spec(value: Any, schema: Any, groups: list[str] | None) -> dict[str,
     unused levels and per-group Python summaries stay exact.
     """
     node = value.node if isinstance(value, Expr) else None
-    if not isinstance(node, tuple) or node[0] != "func" or node[1] not in FUNCTIONS:
+    if not isinstance(node, tuple) or node[0] != "func" or node[1] not in _ORDERING_FUNCTIONS:
         return None
     name, args, kwargs = node[1], node[2], node[3]
     if len(args) < 1:
@@ -579,7 +719,10 @@ def _apply_native_factors(
     return lf, remaining, ordered
 
 
-def prepare_polars(tf: Any, lf: pl.LazyFrame, stage: dict[str, Any], groups: list[str] | None, *, sort_groups: bool) -> tuple[pl.LazyFrame, dict[str, Any], dict[str, bool]]:
+def prepare_polars(
+    tf: Any, lf: pl.LazyFrame, stage: dict[str, Any], groups: list[str] | None,
+    *, sort_groups: bool, ordered_flags: dict[str, bool] | None = None,
+) -> tuple[pl.LazyFrame, dict[str, Any], dict[str, bool]]:
     """Compute factor assignments once; preserve other columns' Polars dtypes.
 
     The third result maps each produced factor column to its ordered flag.
@@ -615,13 +758,15 @@ def prepare_polars(tf: Any, lf: pl.LazyFrame, stage: dict[str, Any], groups: lis
         pdf = data.select([name for name in data.columns if name in required]).to_pandas()
         if not required:
             pdf = pd.DataFrame(index=pd.RangeIndex(data.height))
-    for column, levels in tf._category_levels.items():
-        if column in pdf:
+    flags = {column: bool(getattr(levels, "ordered", False))
+             for column, levels in tf._category_levels.items()}
+    flags.update(ordered_flags or {})
+    flags.update(native_ordered)
+    for column, flag in flags.items():
+        if column in pdf and isinstance(pdf[column].dtype, pd.CategoricalDtype):
             # An Enum collected to pandas is always ordered. Reapply the
-            # recorded flag so fct_* can preserve an unordered factor.
-            pdf[column] = _factor(
-                pdf[column], list(levels), ordered=bool(getattr(levels, "ordered", False))
-            )
+            # current flag, retaining levels from earlier assignment stages.
+            pdf[column] = pdf[column].cat.as_ordered() if flag else pdf[column].cat.as_unordered()
     token = SORT_GROUPS.set(sort_groups)
     try:
         results = {name: eval_expr(value, pdf, groups, "window") for name, value in factors.items()}
@@ -660,9 +805,9 @@ def _level_source(value: Any) -> Any:
     ``species``.
     """
     node = value.node if isinstance(value, Expr) else None
-    if not isinstance(node, tuple) or node[0] != "func" or node[1] not in FUNCTIONS:
+    if not isinstance(node, tuple) or node[0] != "func" or node[1] not in _ORDERING_FUNCTIONS:
         return None
-    while isinstance(node, tuple) and node[0] == "func" and node[1] in FUNCTIONS:
+    while isinstance(node, tuple) and node[0] == "func" and node[1] in _ORDERING_FUNCTIONS:
         node = node[2][0]
     if isinstance(node, tuple) and node and node[0] == "func" and node[1] in FUNCTIONS:
         return None

@@ -199,6 +199,8 @@ class TidyFrame:
         "_data_reads",
         # The plan's schema, resolved once: a frame's plan never changes.
         "_schema_cache",
+        # Totals added by reporting verbs; ordinary data changes clear them.
+        "_totals",
     )
 
     def __init__(
@@ -212,6 +214,7 @@ class TidyFrame:
         select_base: Any | None = None,
         problems: Any | None = None,
         data_reads: tuple[str, ...] = (),
+        totals: dict[str, str] | None = None,
     ):
         if not isinstance(data, pl.LazyFrame):
             import pandas as pd
@@ -230,6 +233,7 @@ class TidyFrame:
         self._problems = problems
         self._data_reads = tuple(data_reads)
         self._schema_cache = None
+        self._totals = dict(totals or {})
 
     @property
     def _lf(self) -> pl.LazyFrame:
@@ -322,6 +326,7 @@ class TidyFrame:
         keep_select_base: bool = False,
         problems: Any = _KEEP,
         data_reads: tuple[str, ...] = (),
+        totals: dict[str, str] | None = None,
     ) -> TidyFrame:
         # Default: clear select_base (most verbs invalidate the rewrite window).
         # select/filter set select_base=...; pass keep_select_base to preserve.
@@ -344,6 +349,7 @@ class TidyFrame:
             select_base=select_base,
             problems=problems,
             data_reads=_merge_reads(self._data_reads, data_reads),
+            totals=totals,
         )
 
     # ── pipe ────────────────────────────────────────────────────────────
@@ -1084,11 +1090,13 @@ class TidyFrame:
         _validate_execution_engine(engine)
         if self._problems is None:
             return self._with_lf(
-                self._lf.collect(engine=engine).lazy(), groups=self._groups, data_reads=reads
+                self._lf.collect(engine=engine).lazy(), groups=self._groups,
+                data_reads=reads, totals=self._totals,
             )
         data, found = pl.collect_all([self._lf, self._problems], engine=engine)
         return self._with_lf(
-            data.lazy(), groups=self._groups, problems=found.lazy(), data_reads=reads
+            data.lazy(), groups=self._groups, problems=found.lazy(),
+            data_reads=reads, totals=self._totals,
         )
 
     def collect(

@@ -66,7 +66,10 @@ from tidy3.groups import (
 )
 from tidy3.frame import TidyFrame, options, tidy
 from tidy3.polars_export import ExportError, to_polars_code
-from tidy3.forcats import fct_relevel, fct_reorder, fct_infreq, fct_rev
+from tidy3.forcats import (
+    fct_relevel, fct_reorder, fct_infreq, fct_rev,
+    fct_recode, fct_collapse, fct_lump_n, fct_lump_prop, fct_lump_min,
+)
 from tidy3.io import (
     excel_sheets,
     read_csv,
@@ -374,6 +377,7 @@ from tidy3.verbs import (
     with_groups,
 )
 from tidy3.janitor import (
+    adorn_totals,
     compare_df_cols,
     compare_df_cols_same,
     describe_class,
@@ -381,16 +385,24 @@ from tidy3.janitor import (
     remove_constant,
     remove_empty,
     row_to_names,
+    tabyl,
 )
 
 from tidy3.__version__ import __version__
 
 __all__ = [
     "TidyFrame",
+    "tabyl",
+    "adorn_totals",
     "fct_relevel",
     "fct_reorder",
     "fct_infreq",
     "fct_rev",
+    "fct_recode",
+    "fct_collapse",
+    "fct_lump_n",
+    "fct_lump_prop",
+    "fct_lump_min",
     "ColumnNotFoundError",
     "JoinCondition",
     "JoinSpec",

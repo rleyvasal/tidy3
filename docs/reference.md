@@ -116,8 +116,9 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 | Convert | `as_numeric`/`as_double`, `as_integer`, `as_character`/`as_string`, `as_logical`, `as_date`, `as_datetime`, `ConversionError` |
 | Parse | `parse_double`, `parse_integer`, `parse_logical`, `parse_date`, `parse_datetime`, `parse_number`, `locale`, `problems`, `stop_for_problems` |
 | Dates | `ymd`, `mdy`, `dmy`, `ym`, `ymd_hms`, `ymd_hm`, `mdy_hms`, `dmy_hms`, `with_tz`, `force_tz`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `days_in_month`, `months`, `years`, `add_with_rollback`, `today`, `now`, `excel_numeric_to_date` |
-| Factors | `fct_relevel`, `fct_reorder`, `fct_infreq`, `fct_rev` |
+| Factors | `fct_relevel`, `fct_reorder`, `fct_infreq`, `fct_rev`, `fct_recode`, `fct_collapse`, `fct_lump_n`, `fct_lump_prop`, `fct_lump_min` |
 | Cleaning | `clean_names`, `make_clean_names`, `set_names`, `get_dupes`, `remove_empty`, `remove_constant`, `row_to_names`, `find_header`, `compare_df_cols`, `compare_df_cols_same`, `describe_class` |
+| Reporting | `tabyl` (one-variable frequencies and two-variable count tables), `adorn_totals` |
 | Rows | `filter`, `filter_out`, `arrange`, `distinct`, `slice`, `slice_head`, `slice_tail`, `slice_min`, `slice_max`, `slice_sample`, `head`, `sample_n`, `sample_frac` |
 | Columns | `mutate`, `transmute`, `select`, `drop`, `rename`, `rename_with`, `relocate`, `pull`, `glimpse` |
 | Groups | `group_by`, `rowwise`, `ungroup`, `with_groups`, `group_split`, `group_map`, `group_modify`, `group_walk`, `group_nest`, `nest_by`, `group_data`, `group_keys`, `group_rows`, `group_size`, `group_indices`, `group_vars`, `groups`, `n_groups`, `group_trim`, `summarise`, `reframe`, `count`, `tally`, `add_count`, `add_tally` |
@@ -246,6 +247,87 @@ grouping, group-drop settings, factor metadata, and parsing diagnostics are
 preserved. Polars remains lazy. The helper does not print janitor's status
 messages. Unlike janitor, an existing `dupe_count` column raises an error;
 rename it first to keep its values.
+
+### Frequency tables
+
+`tabyl("column")` tabulates **one variable**, returning a `TidyFrame` with
+the selected column, `n`, and `percent` (a numeric proportion from 0 to 1).
+When missing values are present, it also returns `valid_percent`, calculated
+from non-missing rows; the missing row's valid percentage is missing.
+
+```python
+tidy({"answer": ["yes", "no", "yes", None]}) >> tabyl("answer")
+```
+
+`tabyl("row", "column")` makes a **two-variable count table**: values of
+the second variable become column names, the first variable labels rows,
+and empty combinations have numeric zero counts. Factor order determines
+row and column order; ordinary numeric values sort numerically.
+
+```python
+tidy({"group": ["A", "A", "B"], "answer": ["yes", "no", "yes"]}) >> tabyl("group", "answer")
+```
+
+Missing column values use the name `NA_`, NaN uses `NaN`, and blank strings
+use `emptystring_`. The blank and missing columns come last. Numeric and
+date column names follow tidy3's header text rules: for example, `1e6`
+becomes `"1000000"` rather than R's `"1e+06"`. If column values produce
+duplicate labels, or a label matches the row column's name, rename or
+recode those values first. An empty input (including one emptied by
+`show_na=False`) returns zero rows and only the row column, as janitor does.
+
+Use `show_na=False` to omit null and NaN rows and recalculate percentages.
+For two variables, it omits records missing either selected value.
+Unused factor levels have zero counts by default; `show_missing_levels=False`
+omits those rows. Factor order and the ordered flag survive. Null and NaN
+are separate rows, and both are excluded from valid percentages.
+Existing grouping is ignored and the output is ungrouped.
+
+In notebooks, `answers >> tabyl(answer)` and `answers >> tabyl(group, answer)`
+accept bare column names.
+A vector can be passed directly: `tabyl(["yes", "no", "yes"])`; its column
+name is `"x"`, or the name of a supplied Series. Rename an input column named
+`n`, `percent`, or `valid_percent` before one-variable tabulation to avoid duplicate
+output names. The count table and existing parse diagnostics are computed
+once; later steps run from that snapshot. Three-variable tables and
+percentage/formatting helpers are not implemented yet.
+
+Both forms are checked against [janitor's `tabyl`](https://sfirke.github.io/janitor/reference/tabyl.html).
+
+### Totals
+
+`adorn_totals()` appends a totals row. Use `"col"` for a totals column or
+`"both"` (also `("row", "col")`) for both, including the grand total.
+By default it sums numeric columns after the first column, treating the
+first as a row label even if it is numeric. Existing groups are ignored.
+
+```python
+tidy({"group": ["A", "A", "B"], "answer": ["yes", "no", "yes"]}) >> tabyl("group", "answer") >> adorn_totals("both")
+```
+
+`cols=` accepts names, `col(...)`, or tidyselect helpers. It can explicitly
+include the first column; in that case its total is numeric, with no text
+label. Non-numeric selections are ignored. For one-variable frequency
+tables, use `adorn_totals(cols="n", fill=None)` to total counts while
+leaving the percentage columns numeric and their total cells missing.
+
+Missing values, including NaN, are omitted by default; `na_rm=False`
+propagates them. `name="All"` sets both labels, or `name=("All", "Grand")`
+sets the row and column labels separately. Unselected columns are converted
+to text and filled with `fill="-"` in the total row. `fill=None` preserves
+their types and inserts missing values; the first column still becomes a
+text label. A factor row label keeps its level order and ordered flag, with
+the new label appended. Use a fresh label if it is already a factor level.
+Column totals are floating-point numbers, matching R's row sums.
+
+Totals stay lazy and numeric, and parse diagnostics are retained. Adding
+the same totals dimension twice raises an error; adding row and column
+totals in separate consecutive steps works. `compute()` preserves that
+record. Ordinary data-changing verbs clear it, so keep reporting steps
+together at the end of the pipe. An existing column with the requested
+totals name raises an error instead of overwriting its values.
+
+Behavior is checked against [janitor's `adorn_totals`](https://sfirke.github.io/janitor/reference/adorn_totals.html).
 
 ### Empty columns, headers, and class checks
 
@@ -592,7 +674,7 @@ against R, dplyr, readr, and lubridate. These differences are deliberate:
 - `read_csv` guesses whole-number columns as integers (as Polars does);
   readr guesses double. The values are the same.
 
-### Factor ordering
+### Factor ordering and recoding
 
 Use `fct_relevel` to move named levels to the front, `fct_reorder` to order
 them by another column, `fct_infreq` to put frequent levels first, and
@@ -608,6 +690,36 @@ ordered_cars = (
 ordered_cars >> arrange("cyl")
 ordered_cars >> mutate(cyl=fct_rev("cyl"))
 ```
+
+`fct_recode(f, new="old")` renames a level and keeps unmentioned levels.
+`NULL="old"` removes that level and makes its rows missing. To merge several
+levels, use `fct_collapse(f, new=["old1", "old2"])`. Its optional
+`other_level="Other"` combines the remaining levels at the end. Unknown
+old levels warn; renamed unused levels and the ordered flag are preserved.
+
+```python
+ordered_cars >> mutate(cyl=fct_recode("cyl", four="4"))
+ordered_cars >> mutate(cyl=fct_collapse("cyl", small=["4", "6"], other_level="large"))
+ordered_cars >> mutate(cyl=fct_lump_n("cyl", 2))
+```
+
+`fct_lump_n(f, n)` keeps the most frequent levels; negative `n` keeps the
+least frequent. `ties_method="min"` keeps all levels tied at the cutoff;
+`"average"`, `"first"`, `"last"`, `"max"`, and `"random"` select other rank
+rules. Random ties use NumPy's random state, independently of R's generator.
+`fct_lump_min(f, min)` keeps counts at least `min`.
+`fct_lump_prop(f, prop)` keeps proportions strictly greater than `prop`;
+negative `prop` keeps proportions at most `abs(prop)`. All three accept
+row weights through `w=` and a replacement name through `other_level=`
+(default `"Other"`). Missing rows remain missing and count toward the
+proportion denominator, including their weights. Weights must be finite,
+non-negative, and non-missing. A zero proportion denominator with existing
+levels raises `ValueError`. Grouped mutations compute frequencies per group.
+The replacement level comes last when any levels are lumped.
+
+The contracts are checked against [forcats recoding](https://forcats.tidyverse.org/reference/fct_recode.html),
+[collapsing](https://forcats.tidyverse.org/reference/fct_collapse.html), and
+[lumping](https://forcats.tidyverse.org/reference/fct_lump.html).
 
 `fct_reorder(f, x, fun=median)` summarizes numeric `x` with the median; `fun` may be a tidy3
 aggregation or a callable returning one number. `na_rm=None` removes missing
@@ -627,8 +739,8 @@ One callable, such as `sorted`, may replace the level names. Unknown levels
 warn and are ignored; duplicate names are an error.
 
 Use factor expressions in `mutate`, `transmute`, or `across` before sorting,
-grouping, or plotting. On pandas the result is categorical; on Polars it is
-an Enum, so its level order survives collection and plot3 handoff. **A Polars
+grouping, or plotting. The result is a Polars Enum, so its level order
+survives collection and plot3 handoff. **A Polars
 mutation containing a factor expression computes a snapshot**, including the
 source frame, to discover levels. Later verbs build a lazy plan on that
 snapshot. This path uses Python callbacks and is intended for preparing
@@ -644,8 +756,8 @@ still reports `ordered=False` after `fct_infreq(ordered=False)`.
 
 An imported pandas factor keeps unused levels, level order, and its ordered
 flag on the frame. Collecting a Polars plan with `as_="pandas"` writes those
-levels back. `arrange` orders factor columns by that level list on both
-backends. Missing keys stay last, and ties keep the previous row order.
+levels back. `arrange` orders factor columns by that level list.
+Missing keys stay last, and ties keep the previous row order.
 
 ### Tidy-select and column-wise operations
 
