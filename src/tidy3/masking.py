@@ -67,6 +67,7 @@ _SELECTOR_ARG_VERBS = frozenset(
     {
         "select",
         "get_dupes",
+        "tabyl",
         "drop",
         "relocate",
         "ungroup",
@@ -148,6 +149,7 @@ _PASSTHROUGH_KW = frozenset(
         "drop",
         "sort",
         "na_rm",
+        "where",
         "with_ties",
         "n",
         "prop",
@@ -183,6 +185,7 @@ _FIRST_COLUMN_ARG = frozenset(
         "is_na", "is_nan", "is_finite", "is_infinite",
         "as_numeric", "as_double", "as_integer", "as_character", "as_string",
         "as_logical",
+        "fct_recode", "fct_collapse", "fct_lump_n", "fct_lump_prop", "fct_lump_min",
         "as_date", "as_datetime",
         "ymd", "mdy", "dmy", "ym", "year", "month", "day",
         "floor_date", "ceiling_date", "days_in_month", "add_with_rollback",
@@ -932,23 +935,44 @@ def _star_names(module: str) -> list[str]:
     return list(names)
 
 
-def _cell_import_sources(node: ast.Module) -> dict[str, str]:
-    """Names this cell imports, mapped to the package they come from; the last import wins."""
-    statements = [s for s in ast.walk(node) if isinstance(s, (ast.Import, ast.ImportFrom))]
-    statements.sort(key=lambda s: (s.lineno, s.col_offset))
-    sources: dict[str, str] = {}
+def _cell_import_sources(node: ast.Module) -> dict[str, list[tuple[tuple[int, int], str | None]]]:
+    """Module bindings in source order, without imports from nested scopes."""
+    def statements_in_scope(tree: ast.AST):
+        for child in ast.iter_child_nodes(tree):
+            yield child
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                yield from statements_in_scope(child)
+
+    statements = sorted(
+        statements_in_scope(node),
+        key=lambda s: (getattr(s, "lineno", 0), getattr(s, "col_offset", 0)),
+    )
+    sources: dict[str, list[tuple[tuple[int, int], str | None]]] = {}
     for statement in statements:
+        bindings: dict[str, str | None] = {}
         if isinstance(statement, ast.Import):
             for alias in statement.names:
-                sources[(alias.asname or alias.name).split(".")[0]] = alias.name.split(".")[0]
-        elif statement.module and statement.level == 0:
+                bindings[(alias.asname or alias.name).split(".")[0]] = alias.name.split(".")[0]
+        elif isinstance(statement, ast.ImportFrom) and statement.module and statement.level == 0:
             package = statement.module.split(".")[0]
             for alias in statement.names:
                 if alias.name == "*":
                     for name in _star_names(statement.module):
-                        sources[name] = package
+                        bindings[name] = package
                 else:
-                    sources[alias.asname or alias.name] = package
+                    bindings[alias.asname or alias.name] = package
+        elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bindings[statement.name] = None
+        elif isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            for target in targets:
+                bindings.update({
+                    name.id: None for name in ast.walk(target)
+                    if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store)
+                })
+        for name, package in bindings.items():
+            position = (statement.end_lineno, statement.end_col_offset)
+            sources.setdefault(name, []).append((position, package))
     return sources
 
 
@@ -1005,22 +1029,22 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
         self._soft: set[str] = set()
         self._variables: dict[str, Any] = {}
         self._cell_names: set[str] = set()
-        self._cell_imports: dict[str, str] = {}
+        self._cell_imports: dict[str, list[tuple[tuple[int, int], str | None]]] = {}
 
-    def _owns(self, verb: str) -> bool:
+    def _owns(self, verb: str, call: ast.Call) -> bool:
         """Whether *verb* in this cell is tidy3's, so its arguments may be rewritten.
 
         Another package can export the same verb names (tidy3a does), and a
         notebook can define its own ``mutate``; only tidy3's calls are masked.
-        The cell's own imports decide first, because masking runs before the
-        cell does.
+        Imports and rebindings before the call decide first, because masking
+        runs before the cell does.
         """
         if self._known_static is not None:
             return True
-        if verb in self._cell_imports:
-            return self._cell_imports[verb] == "tidy3"
-        if verb in self._cell_names:
-            return False  # the cell defines it itself
+        position = (call.lineno, call.col_offset)
+        for bound_at, package in reversed(self._cell_imports.get(verb, [])):
+            if bound_at <= position:
+                return package == "tidy3"
         namespace = self._namespace()
         if namespace is None or verb not in namespace:
             return True
@@ -1110,7 +1134,7 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
             return self.generic_visit(node)
 
         verb = node.func.id
-        if not self._owns(verb):
+        if not self._owns(verb, node):
             return self.generic_visit(node)
 
         if verb in _EXPR_ARG_VERBS:
@@ -1189,7 +1213,7 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
             ]
             return node
 
-        if verb in _SLICE_BY_VERBS:
+        if verb in _SLICE_BY_VERBS or verb == "adorn_totals":
             node.args = [self.visit(a) for a in node.args]
             node.keywords = [
                 self._mask_keyword(kw, default="selector") for kw in node.keywords

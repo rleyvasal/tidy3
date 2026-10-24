@@ -6,9 +6,24 @@ under **Changed**.
 
 ## Unreleased
 
+### Added
+
+- `adorn_totals()` adds numeric row, column, or grand totals, with `cols=` selection, custom labels, optional typed missing fills, and missing-value control. It ignores existing groups, retains parse diagnostics, and extends factor row labels without losing their order or ordered flag. Totals stay lazy. Re-adding a totals dimension raises an error, including after `compute()`; ordinary data-changing verbs clear the reporting markers. R janitor comparisons cover row/column composition, selected columns, empty inputs, missing values, and factor levels. A checked raw Polars benchmark case is included.
+
+- Two-variable frequency tables: `frame >> tabyl("row", "column")` returns numeric counts with zero-filled combinations, factor levels in order, optional unused levels, and `NA_`/`emptystring_` columns for missing and blank values. `show_na=False` drops records missing either variable. Tables preserve row-factor metadata and stored parse failures, ignore existing groups, and compute one count snapshot. Results are checked against R janitor, with a separate raw Polars benchmark case. Numeric headers use tidy3's header text rules, and ambiguous labels raise an error.
+
+- `tabyl()` starts the reporting helpers with one-variable frequency tables: `frame >> tabyl("column")` or `tabyl(vector)`. It returns numeric counts and proportions, adds `valid_percent` when missing rows are shown, and supports `show_na` and `show_missing_levels`. Factor order, ordered flags, and parse diagnostics survive. It computes the count table once and returns an ungrouped snapshot. One-variable results are checked against R janitor, with a raw Polars benchmark case; three-variable tables, `adorn_percentages()`, and the formatting `adorn_*` helpers remain future work.
+
+- Factor value helpers: `fct_recode(new="old", NULL="removed")`, `fct_collapse(new=["old1", "old2"], other_level=...)`, and `fct_lump_n`, `fct_lump_prop`, and `fct_lump_min`. They work on vectors and in mutations, including per-group frequencies, row weights, tie rules, nested calls, and `across`. Missing values, unused levels, level order, and the ordered flag are checked against R forcats. These helpers compute a snapshot, as the existing factor helpers do. Each has a checked raw Polars benchmark case.
+
 ### Changed
 
 - Notebook bare names are rewritten only in calls to tidy3's own verbs. A notebook's own `mutate` function, or a verb with the same name from another package (such as tidy3a), is left alone, so `def select(...)` or `from tidy3a import *` no longer has its arguments turned into tidy3 columns. The cell that does the import is handled too, because the cell's own imports decide before the live namespace does.
+
+### Fixed
+
+- Notebook ownership follows statement order: defining or assigning your own `mutate` after importing tidy3 in the same cell leaves its arguments alone; importing tidy3 again restores bare-column rewriting. Imports inside an uncalled function do not change ownership outside that function.
+- Sequential factor mutations use the levels of the intermediate column, so recoding a factor created earlier in the same `mutate` does not replace renamed values with missing ones.
 
 ## 0.8.6 — 2026-10-24
 

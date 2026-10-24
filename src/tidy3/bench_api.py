@@ -493,6 +493,44 @@ def _grouped_factor(how: str):
     return tidy, raw
 
 
+def _factor_values(how: str):
+    def tidy(df, extra=None):
+        import tidy3 as t
+
+        calls = {
+            "recode": lambda: t.fct_recode("species", G="Gentoo"),
+            "collapse": lambda: t.fct_collapse("species", small=["Adelie", "Chinstrap"]),
+            "lump_n": lambda: t.fct_lump_n("species", 1, ties_method="first"),
+            "lump_prop": lambda: t.fct_lump_prop("species", .34),
+            "lump_min": lambda: t.fct_lump_min("species", df.height / 3 + .5),
+        }
+        return (t.tidy(df) >> t.mutate(out=calls[how]()) >> t.select("out")).collect()
+
+    def raw(df, extra=None):
+        if isinstance(df, pl.LazyFrame):
+            df = df.collect()
+        categories = sorted(df["species"].drop_nulls().unique().to_list())
+        if how == "recode":
+            mapping = {level: "G" if level == "Gentoo" else level for level in categories}
+        elif how == "collapse":
+            mapping = {level: "small" if level in {"Adelie", "Chinstrap"} else level for level in categories}
+        else:
+            counts = df.drop_nulls("species").group_by("species").len().sort("species")
+            if how == "lump_n":
+                keep = counts.sort("len", descending=True, maintain_order=True).head(1)["species"].to_list()
+            elif how == "lump_prop":
+                keep = counts.filter(pl.col("len") / df.height > .34)["species"].to_list()
+            else:
+                keep = counts.filter(pl.col("len") >= df.height / 3 + .5)["species"].to_list()
+            mapping = {level: level if level in keep else "Other" for level in categories}
+        levels = list(dict.fromkeys(mapping.values()))
+        if how.startswith("lump") and any(old != new for old, new in mapping.items()):
+            levels = [level for level in levels if level != "Other"] + ["Other"]
+        return df.select(pl.col("species").replace_strict(mapping).cast(pl.Enum(levels)).alias("out"))
+
+    return tidy, raw
+
+
 def _sub(column: str, start: int, end: int) -> pl.Expr:
     value = pl.col(column).cast(pl.String)
     length = value.str.len_chars().cast(pl.Int64)
@@ -1037,6 +1075,10 @@ def _cases() -> list[Case]:
     ):
         tidy, raw = _grouped_factor(how)
         add(Case(f"fct_{how}" if how != "infreq" else "fct_infreq", "forcats", names, tidy, raw))
+
+    for how in ("recode", "collapse", "lump_n", "lump_prop", "lump_min"):
+        tidy, raw = _factor_values(how)
+        add(Case(f"fct_{how}", "forcats", [f"fct_{how}"], tidy, raw))
 
     from tidy3.bench_rest import attach
 

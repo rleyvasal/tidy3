@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 import tidy3
 from tidy3.jupyter import (
     disable_pipe_transform,
@@ -179,6 +181,59 @@ def test_masking_leaves_a_notebook_defined_verb_alone():
         result = shell.run_cell("out = mutate(z = w)")
         assert result.success, result.error_in_exec
         assert shell.user_ns["out"] == {"z": 3}
+    finally:
+        _close_shell(shell)
+
+
+@pytest.mark.parametrize("binding", [
+    "def mutate(**kw): return kw",
+    "mutate = lambda **kw: kw",
+])
+def test_masking_respects_rebinding_after_an_import_in_the_same_cell(binding):
+    shell = _fresh_shell()
+    try:
+        shell.run_cell("w = 3")
+        result = shell.run_cell(
+            "from tidy3 import mutate\n" + binding + "\nout = mutate(z=w)"
+        )
+        assert result.success, result.error_before_exec or result.error_in_exec
+        assert shell.user_ns["out"] == {"z": 3}
+    finally:
+        _close_shell(shell)
+
+
+def test_masking_tracks_imports_and_rebindings_in_statement_order():
+    shell = _fresh_shell()
+    try:
+        shell.run_cell("w = 3")
+        result = shell.run_cell(
+            'from tidy3 import mutate\n'
+            'cars = tidy({"mpg": [21, 30]})\n'
+            'first = (cars >> mutate(z=mpg)).collect()\n'
+            'def mutate(**kw): return kw\n'
+            'middle = mutate(z=w)\n'
+            'from tidy3 import mutate\n'
+            'last = (cars >> mutate(z=mpg)).collect()'
+        )
+        assert result.success, result.error_before_exec or result.error_in_exec
+        assert shell.user_ns["first"]["z"].to_list() == [21, 30]
+        assert shell.user_ns["middle"] == {"z": 3}
+        assert shell.user_ns["last"]["z"].to_list() == [21, 30]
+    finally:
+        _close_shell(shell)
+
+
+def test_masking_ignores_imports_inside_an_uncalled_function():
+    shell = _fresh_shell()
+    try:
+        result = shell.run_cell(
+            'def unused():\n'
+            '    from builtins import filter\n'
+            'cars = tidy({"mpg": [21, 30]})\n'
+            'out = (cars >> filter(mpg > 25)).collect()'
+        )
+        assert result.success, result.error_before_exec or result.error_in_exec
+        assert shell.user_ns["out"]["mpg"].to_list() == [30]
     finally:
         _close_shell(shell)
 

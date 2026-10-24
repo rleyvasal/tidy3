@@ -24,6 +24,255 @@ _RETURNS = frozenset({"all", "match", "mismatch"})
 _BIND = frozenset({"bind_rows", "rbind"})
 
 
+def tabyl(
+    column: Any, column2: Any = None, *, show_na: bool = True,
+    show_missing_levels: bool = True,
+) -> Any:
+    """One-variable frequencies or a two-variable table of numeric counts.
+
+    ``frame >> tabyl("x")`` selects one column; a vector is tabulated
+    immediately, using its name or ``"x"``. Missing rows are shown by default
+    and add ``valid_percent`` (proportions excluding missing rows). Unused
+    factor levels have zero counts unless ``show_missing_levels=False``.
+    ``frame >> tabyl("x", "y")`` makes one column per value of y. Empty
+    combinations have zero counts. Existing groups are ignored. The small
+    count table is computed once.
+    """
+    from tidy3.expr import Expr
+    from tidy3.frame import note_data_read, tidy
+    from tidy3.tidyselect import Selector, resolve_selection
+    from tidy3.verbs import arrange, count
+
+    _bool("tabyl() show_na", show_na)
+    _bool("tabyl() show_missing_levels", show_missing_levels)
+    if not isinstance(column, (str, Expr, pl.Expr, Selector)):
+        if column2 is not None:
+            raise TypeError("tabyl() with two variables requires frame column selections")
+        import pandas as pd
+
+        name = str(getattr(column, "name", None) or "x")
+        source = tidy(column.rename(name).to_frame()) if isinstance(column, pl.Series) else tidy(pd.DataFrame({name: column}))
+        return source >> tabyl(
+            name, show_na=show_na, show_missing_levels=show_missing_levels,
+        )
+
+    def _apply(tf):
+        if column2 is not None:
+            return _tabyl_two_way(tf, column, column2, show_na, show_missing_levels)
+        selected = resolve_selection(tf, [column])
+        if len(selected) != 1:
+            raise ValueError("tabyl() requires exactly one column")
+        name = selected[0]
+        if name in {"n", "percent", "valid_percent"}:
+            raise ValueError(f"tabyl() column {name!r} conflicts with an output name; rename it first")
+        dtype = tf._schema()[name]
+        if dtype.base_type() in {pl.List, pl.Array, pl.Struct, pl.Object, pl.Binary}:
+            raise TypeError("tabyl() requires a scalar numeric, text, factor, boolean, or date column")
+        levels = {name: tf._category_levels[name]} if name in tf._category_levels else {}
+        source = tf._with_lf(tf._lf.select(name), groups=None, rowwise=False, category_levels=levels)
+        missing = _missing_expr(name, dtype)
+        if not show_na:
+            source = source._with_lf(source._lf.filter(~missing), rowwise=False)
+        keep_levels = show_missing_levels and (bool(levels) or isinstance(dtype, (pl.Enum, pl.Categorical)))
+        counted = source >> count(name, name="n", drop=not keep_levels)
+        if levels:
+            counted = counted >> arrange(name)
+        else:
+            counted = counted._with_lf(counted._lf.sort(name, nulls_last=True), rowwise=False)
+        note_data_read("tabyl() reads frequency counts to choose percentage columns")
+        snapshot = counted._compute()
+        data = snapshot.collect()
+        total = data["n"].sum()
+        expressions = [(pl.col("n") / pl.lit(total)).alias("percent")]
+        if data.select(missing.any()).item():
+            valid_total = data.filter(~missing)["n"].sum()
+            expressions.append(
+                pl.when(missing).then(None)
+                .otherwise(pl.col("n") / pl.lit(valid_total)).alias("valid_percent")
+            )
+        return snapshot._with_lf(data.lazy().with_columns(expressions), rowwise=False)
+
+    return Verb(_apply, "tabyl")
+
+
+def _tabyl_axis(tf: Any, data: pl.DataFrame, name: str, show_missing_levels: bool) -> pl.Series:
+    """Distinct axis values, including unused factor levels when requested."""
+    from tidy3.verbs import arrange
+
+    values = data[name]
+    levels = tf._category_levels.get(name)
+    if levels is None and isinstance(values.dtype, pl.Enum):
+        levels = values.dtype.categories.to_list()
+    elif levels is None and values.dtype == pl.Categorical:
+        levels = values.cat.get_categories().to_list()
+    if show_missing_levels and levels is not None:
+        missing = data.filter(_missing_expr(name, values.dtype))[name].unique()
+        axis = pl.concat([pl.Series(name, levels, dtype=values.dtype), missing])
+    else:
+        axis = values.unique()
+    if values.dtype.is_float() and name not in tf._category_levels:
+        return axis.sort(nulls_last=True)
+    view = tf._with_lf(axis.to_frame().lazy(), rowwise=False)
+    return (view >> arrange(name)).collect()[name]
+
+
+def _tabyl_column_label(value: Any) -> str:
+    if value is None:
+        return "NA_"
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Inf" if value > 0 else "-Inf"
+    return "emptystring_" if value == "" else _header_text(value)
+
+
+def _tabyl_two_way(tf: Any, column: Any, column2: Any, show_na: bool, show_missing_levels: bool) -> Any:
+    from tidy3.frame import note_data_read
+    from tidy3.tidyselect import resolve_selection
+
+    names = []
+    for selection in (column, column2):
+        selected = resolve_selection(tf, [selection])
+        if len(selected) != 1:
+            raise ValueError("tabyl() requires exactly one column for each variable")
+        names.append(selected[0])
+    row, col = names
+    if row == col:
+        raise ValueError("tabyl() requires two distinct columns")
+    schema = tf._schema()
+    if any(schema[name].base_type() in {pl.List, pl.Array, pl.Struct, pl.Object, pl.Binary} for name in names):
+        raise TypeError("tabyl() requires scalar numeric, text, factor, boolean, or date columns")
+    levels = {name: tf._category_levels[name] for name in names if name in tf._category_levels}
+    source = tf._with_lf(tf._lf.select(names), rowwise=False, category_levels=levels)
+    if not show_na:
+        missing = pl.any_horizontal([_missing_expr(name, schema[name]) for name in names])
+        source = source._with_lf(source._lf.filter(~missing), rowwise=False)
+    count_name = "__tabyl_n"
+    while count_name in names:
+        count_name += "_"
+    counts = source._with_lf(source._lf.group_by(names).agg(pl.len().alias(count_name)), rowwise=False)
+    note_data_read("tabyl() reads frequency counts to discover table axes")
+    snapshot = counts._compute()
+    data = snapshot.collect()
+    row_levels = {row: levels[row]} if row in levels else {}
+    if data.is_empty():
+        return snapshot._with_lf(data.select(row).lazy(), rowwise=False, category_levels=row_levels)
+    rows = _tabyl_axis(source, data, row, show_missing_levels)
+    columns = _tabyl_axis(source, data, col, show_missing_levels)
+    labels = [_tabyl_column_label(value) for value in columns]
+    if len(set([row, *labels])) != len(labels) + 1:
+        raise ValueError("tabyl() column labels conflict; rename the row column or recode the column values")
+    ordered = [(value, label) for value, label in zip(columns, labels) if label not in {"emptystring_", "NA_"}]
+    ordered += [(value, label) for value, label in zip(columns, labels) if label == "emptystring_"]
+    ordered += [(value, label) for value, label in zip(columns, labels) if label == "NA_"]
+    expressions = [
+        pl.col(count_name).filter(pl.col(col).eq_missing(pl.lit(value, dtype=columns.dtype))).sum().alias(label)
+        for value, label in ordered
+    ]
+    wide = data.group_by(row).agg(expressions)
+    result = rows.to_frame().join(wide, on=row, how="left", nulls_equal=True, maintain_order="left")
+    result = result.with_columns(pl.col([label for _, label in ordered]).fill_null(0).cast(pl.Float64))
+    return snapshot._with_lf(result.lazy(), rowwise=False, category_levels=row_levels)
+
+
+def adorn_totals(
+    where: Any = "row", *, fill: str | None = "-", na_rm: bool = True,
+    name: Any = "Total", cols: Any = None,
+) -> Verb:
+    """Append totals by row, column, or both; keep totals numeric.
+
+    By default numeric columns after the label column are summed. ``cols``
+    accepts tidyselect specifications, including the first column explicitly.
+    ``fill=None`` keeps unselected columns' types with a missing total cell;
+    the row label still becomes text (or an expanded factor).
+    """
+    from tidy3.frame import _as_levels
+    from tidy3.tidyselect import resolve_selection
+
+    _bool("adorn_totals() na_rm", na_rm)
+    dimensions = [where] if isinstance(where, str) else list(where)
+    if "both" in dimensions:
+        dimensions = ["row", "col"]
+    if not dimensions or any(value not in {"row", "col"} for value in dimensions):
+        raise ValueError('adorn_totals() where must be "row", "col", or both')
+    dimensions = list(dict.fromkeys(dimensions))
+    labels = [name, name] if isinstance(name, str) else list(name)
+    if len(labels) != 2 or any(not isinstance(label, str) or not label for label in labels):
+        raise ValueError("adorn_totals() name must be a string or two non-empty strings")
+    if fill is not None and not isinstance(fill, str):
+        raise TypeError("adorn_totals() fill must be a string or None")
+
+    def _apply(tf):
+        if any(dimension in tf._totals for dimension in dimensions):
+            raise ValueError("adorn_totals() cannot re-add an existing totals dimension")
+        schema = tf._schema()
+        names = schema.names()
+        selected = names[1:] if cols is None else resolve_selection(tf, [cols])
+        selected = [column for column in selected if schema[column].is_numeric() and column not in tf._category_levels]
+        if not selected:
+            raise ValueError("adorn_totals() requires at least one selected numeric column")
+        if "col" in dimensions and labels[1] in names:
+            raise ValueError(f"adorn_totals() totals column {labels[1]!r} already exists")
+        lf = tf._lf
+        levels = dict(tf._category_levels)
+        if "row" in dimensions:
+            base, totals = [], []
+            for column in names:
+                dtype = schema[column]
+                value = pl.col(column)
+                if column in selected:
+                    summed = value.fill_nan(None) if na_rm and dtype.is_float() else value
+                    total = summed.sum()
+                    if not na_rm:
+                        total = pl.when(value.is_null().any()).then(None).otherwise(total)
+                elif column == names[0]:
+                    total_dtype = pl.String
+                    recorded = levels.get(column)
+                    if recorded is None and isinstance(dtype, pl.Enum):
+                        recorded = dtype.categories.to_list()
+                    if recorded is not None:
+                        category_names = [_header_text(level) for level in recorded]
+                        if labels[0] in category_names:
+                            raise ValueError("adorn_totals() totals row name is already a factor level")
+                        category_names.append(labels[0])
+                        total_dtype = pl.Enum(category_names)
+                        levels[column] = _as_levels(category_names, ordered=bool(getattr(recorded, "ordered", True)))
+                    elif dtype == pl.Categorical:
+                        total_dtype = dtype
+                    value = _adorn_text(column, dtype).cast(total_dtype)
+                    total = pl.lit(labels[0], dtype=total_dtype)
+                elif fill is not None:
+                    value = _adorn_text(column, dtype)
+                    total = pl.lit(fill)
+                    levels.pop(column, None)
+                else:
+                    total = pl.lit(None, dtype=dtype)
+                base.append(value.alias(column))
+                totals.append(total.alias(column))
+            lf = pl.concat([lf.select(base), lf.select(totals)], how="vertical_relaxed")
+        if "col" in dimensions:
+            values = [pl.col(column).fill_nan(None) if na_rm and schema[column].is_float()
+                      else pl.col(column) for column in selected]
+            lf = lf.with_columns(
+                pl.sum_horizontal(values, ignore_nulls=na_rm).cast(pl.Float64).alias(labels[1])
+            )
+        markers = {**tf._totals, **{dimension: labels[0 if dimension == "row" else 1] for dimension in dimensions}}
+        return tf._with_lf(lf, rowwise=False, category_levels=levels, totals=markers)
+
+    return Verb(_apply, "adorn_totals")
+
+
+def _adorn_text(column: str, dtype: Any) -> pl.Expr:
+    """Native text conversion for label/fill columns in numeric reports."""
+    value = pl.col(column).cast(pl.String)
+    if dtype == pl.Boolean:
+        return value.replace({"true": "TRUE", "false": "FALSE"})
+    if dtype.is_float():
+        return value.str.replace(r"\.0$", "")
+    return value
+
+
 def _bool(name: str, value: Any) -> None:
     if not isinstance(value, bool):
         raise TypeError(f"{name} must be a boolean")

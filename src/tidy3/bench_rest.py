@@ -902,6 +902,27 @@ def attach(add, Case) -> None:
 
     # ── janitor and eda ────────────────────────────────────────────────
     verb(
+        "adorn_totals", "janitor", ["adorn_totals"],
+        lambda df, extra=None: (pipe(df.select("species", "mass", "bill")) >> t.adorn_totals("both")).collect(),
+        lambda df, extra=None: pl.concat([
+            df.select("species", "mass", "bill"),
+            df.select(pl.lit("Total").alias("species"), pl.col("mass").sum(), pl.col("bill").sum()),
+        ]).with_columns(pl.sum_horizontal("mass", "bill").alias("Total")),
+    )
+    verb(
+        "tabyl", "janitor", ["tabyl"],
+        lambda df, extra=None: (pipe(df) >> t.tabyl("species")).collect(),
+        lambda df, extra=None: df.group_by("species").len(name="n").sort("species")
+        .with_columns((pl.col("n") / pl.col("n").sum()).alias("percent")),
+    )
+    verb(
+        "tabyl_two_way", "janitor", [],
+        lambda df, extra=None: (pipe(df) >> t.tabyl("species", "island")).collect(),
+        lambda df, extra=None: df.group_by("species", "island").len(name="n")
+        .pivot(on="island", index="species", values="n", sort_columns=True)
+        .fill_null(0).with_columns(pl.exclude("species").cast(pl.Float64)).sort("species"),
+    )
+    verb(
         "get_dupes", "janitor", ["get_dupes"],
         lambda df, extra=None: (pipe(df.select("species", "id")) >> t.get_dupes("species")).collect(),
         lambda df, extra=None: (
