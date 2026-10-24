@@ -116,7 +116,7 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 | Convert | `as_numeric`/`as_double`, `as_integer`, `as_character`/`as_string`, `as_logical`, `as_date`, `as_datetime`, `ConversionError` |
 | Parse | `parse_double`, `parse_integer`, `parse_logical`, `parse_date`, `parse_datetime`, `parse_number`, `locale`, `problems`, `stop_for_problems` |
 | Dates | `ymd`, `mdy`, `dmy`, `ym`, `ymd_hms`, `ymd_hm`, `mdy_hms`, `dmy_hms`, `with_tz`, `force_tz`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `days_in_month`, `months`, `years`, `add_with_rollback`, `today`, `now`, `excel_numeric_to_date` |
-| Factors | `fct_relevel`, `fct_reorder`, `fct_infreq`, `fct_rev`, `fct_recode`, `fct_collapse`, `fct_lump_n`, `fct_lump_prop`, `fct_lump_min` |
+| Factors | `as_factor`, `fct_relevel`, `fct_reorder`, `fct_reorder2` (`last2`, `first2`), `fct_infreq`, `fct_inorder`, `fct_rev`, `fct_recode`, `fct_collapse`, `fct_lump_n`, `fct_lump_prop`, `fct_lump_min`, `fct_drop`, `fct_expand`, `fct_na_value_to_level`, `fct_na_level_to_value` |
 | Cleaning | `clean_names`, `make_clean_names`, `set_names`, `get_dupes`, `remove_empty`, `remove_constant`, `row_to_names`, `find_header`, `compare_df_cols`, `compare_df_cols_same`, `describe_class` |
 | Reporting | `tabyl` (one-variable frequencies and two-variable count tables), `adorn_totals` |
 | Rows | `filter`, `filter_out`, `arrange`, `distinct`, `slice`, `slice_head`, `slice_tail`, `slice_min`, `slice_max`, `slice_sample`, `head`, `sample_n`, `sample_frac` |
@@ -737,6 +737,49 @@ Packages built on tidy3 frames, such as stats3, read factor order through it.
 their existing order. `after=float("inf")` moves the named levels to the end.
 One callable, such as `sorted`, may replace the level names. Unknown levels
 warn and are ignored; duplicate names are an error.
+
+`as_factor(x)` makes a factor without sorting text: levels follow first
+appearance, as in forcats. Numbers get levels in numeric order and logical
+values get `FALSE` and `TRUE`. Level names follow tidy3's header text rules,
+so `2.0` becomes `"2"`; unlike R, numbers are never rounded to 15 digits or
+written in scientific notation (`1e6` is `"1000000"`, not `"1e+06"`).
+Dates and other types raise; convert them with `as_character` first.
+`fct_inorder(f)` orders existing levels by first appearance, with unused
+levels after them.
+
+```python
+cars >> mutate(cyl=as_factor("cyl"), model=fct_inorder("model"))
+cars >> mutate(cyl=fct_reorder2(as_factor("cyl"), "wt", "mpg"))
+```
+
+`fct_reorder2(f, x, y)` orders levels by `fun(x, y)`, largest first. The
+default `last2` is the `y` value at the largest `x`, so a line chart's legend
+lists lines in the order they end; `first2` takes the `y` value at the
+smallest `x`. Ties in `x` use the first row. `fun` may be any callable taking
+the level's `x` and `y` Series and returning one number; extra keyword
+arguments pass through. Rows missing `x` or `y` are left out of the
+summaries with a warning (`na_rm=None`), silently (`True`), or passed to
+`fun` (`False`). Empty levels use `default=-inf`, and `desc=False` puts the
+smallest first. Every row stays in the result; forcats also drops the
+removed rows from the factor it returns.
+
+`fct_drop(f)` removes unused levels; `only=` limits that to the named
+levels. `fct_expand(f, "a", ["b", "c"], after=inf)` adds levels without
+changing values, ignoring ones already present. `fct_na_value_to_level(f,
+level="(Missing)")` turns missing values into a level, added last if new,
+even when nothing is missing. forcats defaults to an `NA` level, which a
+tidy3 factor cannot hold, so the default is forcats' earlier `"(Missing)"`.
+`fct_na_level_to_value(f, extra_levels=)` turns those levels' rows missing
+and removes the levels; without `extra_levels` nothing changes. All of these
+keep the ordered flag and run per group in grouped mutations.
+
+These are checked against forcats 1.0.1
+([as_factor](https://forcats.tidyverse.org/reference/as_factor.html),
+[fct_reorder2](https://forcats.tidyverse.org/reference/fct_reorder.html),
+[fct_inorder](https://forcats.tidyverse.org/reference/fct_inorder.html),
+[fct_drop](https://forcats.tidyverse.org/reference/fct_drop.html),
+[fct_expand](https://forcats.tidyverse.org/reference/fct_expand.html), and
+[missing values](https://forcats.tidyverse.org/reference/fct_na_value_to_level.html)).
 
 Use factor expressions in `mutate`, `transmute`, or `across` before sorting,
 grouping, or plotting. The result is a Polars Enum, so its level order

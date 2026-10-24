@@ -182,3 +182,118 @@ def test_random_ties_keep_one_tied_level():
 def test_invalid_arguments(call, message):
     with pytest.raises((TypeError, ValueError), match=message):
         call()
+
+
+def test_level_helpers_on_vectors_keep_values_and_ordered_flag():
+    f = pd.Categorical(["b", "a", None, "b"], categories=["c", "b", "a", "d"], ordered=True)
+    assert t.fct_drop(f).categories.tolist() == ["b", "a"]
+    assert t.fct_drop(f, only="d").categories.tolist() == ["c", "b", "a"]
+    assert t.fct_expand(f, ["e", "e"], "a", after=2).categories.tolist() == ["c", "b", "e", "a", "d"]
+    assert t.fct_inorder(f).categories.tolist() == ["b", "a", "c", "d"]
+    assert t.fct_inorder(f, ordered=False).ordered is False
+    for out in (t.fct_drop(f), t.fct_expand(f, "e"), t.fct_inorder(f)):
+        assert out.ordered and [None if pd.isna(v) else v for v in out] == ["b", "a", None, "b"]
+    series = t.fct_inorder(pl.Series(["y", "x", "y"]))
+    assert series.categories.tolist() == ["y", "x"]
+
+
+def test_missing_value_conversions():
+    f = pd.Categorical(["b", None, "a"], categories=["b", "a"])
+    out = t.fct_na_value_to_level(f)
+    assert out.tolist() == ["b", "(Missing)", "a"] and out.categories.tolist() == ["b", "a", "(Missing)"]
+    assert t.fct_na_value_to_level(f, "a").tolist() == ["b", "a", "a"]
+    assert t.fct_na_value_to_level(["x"], "M").categories.tolist() == ["x", "M"]
+    back = t.fct_na_level_to_value(out, "(Missing)")
+    assert back.categories.tolist() == ["b", "a"] and pd.isna(back[1])
+    assert t.fct_na_level_to_value(f).categories.tolist() == ["b", "a"]
+
+
+@pytest.mark.parametrize("values, levels, text", [
+    (["z", "y", None, "z"], ["z", "y"], ["z", "y", None, "z"]),
+    ([3, 1.5, None, 10], ["1.5", "3", "10"], ["3", "1.5", None, "10"]),
+    ([2, 1], ["1", "2"], ["2", "1"]),
+    ([True, None], ["FALSE", "TRUE"], ["TRUE", None]),
+    ([], [], []),
+])
+def test_as_factor_levels(values, levels, text):
+    out = t.as_factor(values)
+    assert out.categories.tolist() == levels and not out.ordered
+    assert [None if pd.isna(v) else v for v in out] == text
+
+
+def test_as_factor_in_frames_converts_numbers_and_logical_columns():
+    frame = t.tidy({"n": [2, None, 1], "b": [True, None, False], "s": ["q", "p", "q"]})
+    out = (frame >> t.mutate(n=t.as_factor("n"), b=t.as_factor("b"), s=t.as_factor("s"))).collect()
+    assert out["n"].to_list() == ["2", None, "1"] and out.schema["n"] == pl.Enum(["1", "2"])
+    assert out.schema["b"] == pl.Enum(["FALSE", "TRUE"])
+    assert out.schema["s"] == pl.Enum(["q", "p"])
+    with pytest.raises(TypeError, match="as_character"):
+        t.tidy({"d": [pd.Timestamp("2024-01-01")]}) >> t.mutate(d=t.as_factor("d"))
+
+
+def test_reorder2_summaries_missing_values_and_custom_functions():
+    f = pd.Categorical(["a", "a", "b", "b", "c"], categories=list("abcd"))
+    x, y = [1, 2, 1, 2, 5], [10, 1, 3, 4, 2]
+    assert t.fct_reorder2(f, x, y).categories.tolist() == ["b", "c", "a", "d"]
+    assert t.fct_reorder2(f, x, y, desc=False).categories.tolist() == ["d", "a", "c", "b"]
+    assert t.fct_reorder2(f, x, y, t.first2).categories.tolist() == ["a", "b", "c", "d"]
+    total = t.fct_reorder2(f, x, y, lambda x, y, scale: scale * (x * y).sum(), scale=-1)
+    assert total.categories.tolist() == ["c", "b", "a", "d"]
+    with pytest.warns(UserWarning, match="removing 1 missing value;"):
+        out = t.fct_reorder2(f, [1, None, 1, 2, 5], y)
+    assert len(out) == 5 and out.categories.tolist() == ["a", "b", "c", "d"]
+    kept = t.fct_reorder2(f, [1, None, 1, 2, 5], y, lambda x, y: float(x.isna().sum()), na_rm=False)
+    assert kept.categories.tolist() == ["a", "b", "c", "d"]
+    assert t.last2([None, 3, 3], [1, 2, 5]) == 2 and t.first2([None], [1]) is None
+
+
+def test_chained_level_helpers_stay_lazy_casts_of_the_source():
+    frame = t.tidy({"g": [1, 1, 2], "s": ["b", "a", None], "x": [1.0, 2.0, 3.0]})
+    out = frame >> t.mutate(s=t.fct_expand(t.fct_inorder(t.as_factor("s")), "z"), x=t.col("x") * 2)
+    data = out.collect()
+    assert data.schema["s"] == pl.Enum(["b", "a", "z"]) and data["x"].to_list() == [2.0, 4.0, 6.0]
+    grouped = frame >> t.group_by("g") >> t.mutate(s=t.fct_inorder("s"))
+    assert grouped.factor_levels()["s"] == ["b", "a"] and t.group_vars(grouped) == ["g"]
+
+
+def test_new_helpers_need_mutate_on_polars():
+    with pytest.raises(TypeError, match="assigned with mutate"):
+        (t.tidy({"s": ["a"]}) >> t.filter(t.fct_drop("s") == "a")).collect()
+
+
+def test_notebook_bare_columns_in_level_helpers():
+    from IPython.core.interactiveshell import InteractiveShell
+
+    shell = InteractiveShell.instance()
+    try:
+        shell.run_line_magic("load_ext", "tidy3.jupyter")
+        result = shell.run_cell(
+            'df = tidy({"id": [2, 1, 2], "type": ["b", None, "a"], "x": [1, 2, 3]})\n'
+            'out = df >> mutate(id=as_factor(id), type=fct_na_value_to_level(type),'
+            ' r=fct_reorder2(type, x, x))'
+        )
+        assert result.success, result.error_before_exec or result.error_in_exec
+        data = shell.user_ns["out"].collect()
+        assert data["type"].to_list() == ["b", "(Missing)", "a"]
+        assert data.schema["id"] == pl.Enum(["1", "2"])
+    finally:
+        shell.run_line_magic("unload_ext", "tidy3.jupyter")
+        InteractiveShell.clear_instance()
+
+
+@pytest.mark.parametrize("call, message", [
+    (lambda: t.fct_expand(["a"], 1), "strings"),
+    (lambda: t.fct_expand(["a"], "b", after=-1), "after"),
+    (lambda: t.fct_drop(["a"], only=[1]), "strings"),
+    (lambda: t.fct_inorder(["a"], ordered="yes"), "ordered"),
+    (lambda: t.fct_na_value_to_level(["a"], None), "string"),
+    (lambda: t.fct_na_level_to_value(["a"], 3), "strings"),
+    (lambda: t.fct_reorder2(["a"], [1], [1], fun=None), "callable"),
+    (lambda: t.fct_reorder2(["a"], [1], [1], desc=None), "desc"),
+    (lambda: t.fct_reorder2(["a"], [1], [1], lambda x, y: [1, 2]), "one value"),
+    (lambda: t.fct_reorder2(["a"], [1, 2], [1]), "same length"),
+    (lambda: t.as_factor([1, "a"]), "as_character"),
+])
+def test_level_helper_invalid_arguments(call, message):
+    with pytest.raises((TypeError, ValueError), match=message):
+        call()

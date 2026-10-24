@@ -940,7 +940,9 @@ def _compile_pl(node: tuple) -> Any:
         )
         if descending:
             raw_args = (raw_args[0][1], *raw_args[1:])
-        if name in {"fct_relevel", "fct_reorder", "fct_infreq", "fct_rev"}:
+        from tidy3.forcats import FUNCTIONS as _FACTOR_FUNCTIONS
+
+        if name in _FACTOR_FUNCTIONS:
             raise TypeError("factor expressions on Polars must be assigned with mutate() first")
         args = tuple(_compile_pl(arg) for arg in raw_args)
         kwargs = {key: _compile_pl(value) for key, value in raw_kwargs.items()}

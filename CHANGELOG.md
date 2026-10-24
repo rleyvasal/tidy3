@@ -16,6 +16,8 @@ under **Changed**.
 
 - Factor value helpers: `fct_recode(new="old", NULL="removed")`, `fct_collapse(new=["old1", "old2"], other_level=...)`, and `fct_lump_n`, `fct_lump_prop`, and `fct_lump_min`. They work on vectors and in mutations, including per-group frequencies, row weights, tie rules, nested calls, and `across`. Missing values, unused levels, level order, and the ordered flag are checked against R forcats. These helpers compute a snapshot, as the existing factor helpers do. Each has a checked raw Polars benchmark case.
 
+- Factor level helpers: `as_factor`, `fct_inorder`, `fct_reorder2` (with `last2` and `first2`), `fct_drop`, `fct_expand`, `fct_na_value_to_level`, and `fct_na_level_to_value`. They work on vectors and in mutations, including grouped ones, and keep unused levels and the ordered flag. Results are checked against R forcats 1.0.1, and each has a raw Polars benchmark case. `as_factor` names numeric levels with tidy3's header text rules (no 15-digit rounding or scientific notation), `fct_na_value_to_level` defaults to `"(Missing)"` because a tidy3 factor cannot have an `NA` level, and `fct_reorder2(na_rm=True)` keeps every row where forcats drops the missing ones.
+
 ### Changed
 
 - Notebook bare names are rewritten only in calls to tidy3's own verbs. A notebook's own `mutate` function, or a verb with the same name from another package (such as tidy3a), is left alone, so `def select(...)` or `from tidy3a import *` no longer has its arguments turned into tidy3 columns. The cell that does the import is handled too, because the cell's own imports decide before the live namespace does.
@@ -23,6 +25,8 @@ under **Changed**.
 ### Fixed
 
 - Notebook ownership follows statement order: defining or assigning your own `mutate` after importing tidy3 in the same cell leaves its arguments alone; importing tidy3 again restores bare-column rewriting. Imports inside an uncalled function do not change ownership outside that function.
+- In notebooks, the first argument of `fct_relevel`, `fct_reorder`, `fct_infreq`, and `fct_rev` is a column even when it has a builtin's name, such as `type`, as it already was for `fct_recode` and the lumping helpers.
+- Factor helpers used outside `mutate` on Polars (for example in `filter`) raise "must be assigned with mutate() first" for every `fct_*` function, instead of "unknown expression function" for some.
 - Sequential factor mutations use the levels of the intermediate column, so recoding a factor created earlier in the same `mutate` does not replace renamed values with missing ones.
 
 ## 0.8.6 — 2026-10-24

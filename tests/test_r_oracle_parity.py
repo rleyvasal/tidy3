@@ -1868,6 +1868,58 @@ def _factor_values():
     return result
 
 
+def _factor_levels():
+    import tidy3 as t3
+
+    frame = tidy(pd.DataFrame({
+        "species": pd.Categorical(["b", "a", "a", "c", None],
+                                  categories=["b", "a", "c", "unused"], ordered=True),
+        "x": [1., 2., None, 3., 4.],
+        "y": [5., 1., 2., 7., 3.],
+        "ties": [2., 2., 2., 1., 1.],
+        "ones": [1., 1., 1., 1., 1.],
+        "text": ["z", "y", None, "z", "x"],
+        "numbers": [3., 1.5, None, 10., 3.],
+        "integers": pd.array([2, 1, None, 2, 7], dtype="Int64"),
+        "logical": pd.array([True, None, True, True, True], dtype="boolean"),
+    }))
+    expressions = {
+        "drop": t3.fct_drop("species"),
+        "drop_only": t3.fct_drop("species", only=["unused", "a", "zz"]),
+        "expand": t3.fct_expand("species", "z", "a", "y"),
+        "expand_after": t3.fct_expand("species", ["z", "y"], after=1),
+        "expand_front": t3.fct_expand("species", "z", after=0),
+        "inorder": t3.fct_inorder("species"),
+        "inorder_unordered": t3.fct_inorder("species", ordered=False),
+        "inorder_text": t3.fct_inorder("text"),
+        "value_to_level": t3.fct_na_value_to_level("species", "(Missing)"),
+        "value_to_existing": t3.fct_na_value_to_level("species", "c"),
+        "level_to_value": t3.fct_na_level_to_value("species", ["a", "zz"]),
+        "reorder2": t3.fct_reorder2("species", "x", "y", na_rm=True),
+        "reorder2_first": t3.fct_reorder2("species", "x", "y", t3.first2, na_rm=True, desc=False),
+        "reorder2_ties": t3.fct_reorder2("species", "ties", "y"),
+        "reorder2_tied_scores": t3.fct_reorder2("species", "ties", "ones"),
+        "as_factor": t3.as_factor("species"),
+        "as_factor_text": t3.as_factor("text"),
+        "as_factor_numbers": t3.as_factor("numbers"),
+        "as_factor_integers": t3.as_factor("integers"),
+        "as_factor_logical": t3.as_factor("logical"),
+    }
+    result = {}
+    for name, expression in expressions.items():
+        changed = frame >> mutate(species=expression)
+        result[name] = {**_factor_payload(changed),
+                        "ordered": changed.collect(as_="pandas")["species"].cat.ordered}
+    grouped = tidy({"g": [2, 2, 1, 1, 1], "s": ["q", "p", "r", "p", None],
+                    "x": [1., 2., 3., 1., 2.], "y": [1., 2., 3., 4., 5.]})
+    calls = {"inorder": t3.fct_inorder("s"), "reorder2": t3.fct_reorder2("s", "x", "y", na_rm=True)}
+    for name, expr in calls.items():
+        persistent = grouped >> group_by("g") >> mutate(species=expr)
+        result[f"persistent_{name}"] = _factor_payload(persistent)
+        result[f"transient_{name}"] = _factor_payload(grouped >> mutate(species=expr, by="g"))
+    return result
+
+
 def _factor_grouped():
     import tidy3 as t3
 
@@ -2249,6 +2301,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "clock_components": _clock_components,
     "factor_ordering": _factor_ordering,
     "factor_values": _factor_values,
+    "factor_levels": _factor_levels,
     "factor_grouped": _factor_grouped,
     "factor_missing": _factor_missing,
     "filter_missing": _filter_missing,

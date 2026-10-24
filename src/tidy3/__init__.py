@@ -69,6 +69,8 @@ from tidy3.polars_export import ExportError, to_polars_code
 from tidy3.forcats import (
     fct_relevel, fct_reorder, fct_infreq, fct_rev,
     fct_recode, fct_collapse, fct_lump_n, fct_lump_prop, fct_lump_min,
+    fct_drop, fct_expand, fct_inorder, fct_reorder2, first2, last2,
+    fct_na_value_to_level, fct_na_level_to_value, as_factor,
 )
 from tidy3.io import (
     excel_sheets,
@@ -403,6 +405,15 @@ __all__ = [
     "fct_lump_n",
     "fct_lump_prop",
     "fct_lump_min",
+    "fct_drop",
+    "fct_expand",
+    "fct_inorder",
+    "fct_reorder2",
+    "first2",
+    "last2",
+    "fct_na_value_to_level",
+    "fct_na_level_to_value",
+    "as_factor",
     "ColumnNotFoundError",
     "JoinCondition",
     "JoinSpec",
