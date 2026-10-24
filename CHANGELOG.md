@@ -4,6 +4,12 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- `group_by()`, `distinct()`, `ungroup()`, `with_groups()`, `relocate()`, `pull()`, `rowwise()`, the `by=` argument of `slice_*()` and other verbs that take column selections accept `col("x")` (and `pl.col("x")`) wherever they accept a column name, as `count()` does since 0.8.4, so scripts can write `group_by(col("species"))`. It used to raise `TypeError: unsupported column selection`. `select(col("x") * 2)` still makes a computed column.
+
 ## 0.8.5 — 2026-10-23
 
 `filter()` works with one function nested inside another.

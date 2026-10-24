@@ -22,6 +22,7 @@ from tidy3.tidyselect import (
     HorizontalSpec,
     Selector,
     _group_rows_token,
+    _plain_col_name,
     _reset_group_rows,
     resolve_selection,
 )
@@ -1539,7 +1540,10 @@ def set_names(*names: Any) -> Verb:
     return Verb(_apply, "set_names")
 
 
-def _column_position(columns: list[str], value: str | int, verb: str) -> str:
+def _column_position(columns: list[str], value: Any, verb: str) -> str:
+    name = _plain_col_name(value)
+    if name is not None:
+        value = name
     if isinstance(value, str):
         if value not in columns:
             raise KeyError(f"{verb}(): column not found: {value!r}")
@@ -2118,7 +2122,9 @@ def with_groups(cols: Any, fn: Any) -> Verb:
     """Run a callable with temporary grouping, then restore prior groups."""
     if not callable(fn):
         raise TypeError("with_groups() fn must be callable")
-    selected = (cols,) if isinstance(cols, str) else tuple(cols)
+    selected = (
+        (cols,) if isinstance(cols, (str, Expr, pl.Expr)) else tuple(cols)
+    )
     if not selected:
         raise TypeError("with_groups() requires at least one grouping column")
 
@@ -2557,12 +2563,12 @@ def _count_keys(
     for spec in cols:
         if isinstance(spec, NamedAssign):
             computed_map[spec.name] = spec.value
-        elif isinstance(spec, str) or _is_name_ref(spec):
+        elif (
+            isinstance(spec, str)
+            or _is_name_ref(spec)
+            or _plain_col_name(spec) is not None
+        ):
             names.extend(resolve_selection(tf, [spec]))
-        elif isinstance(spec, Expr) and spec.node[0] == "col":
-            names.extend(resolve_selection(tf, [spec.node[1]]))
-        elif isinstance(spec, pl.Expr) and spec.meta.is_column():
-            names.extend(resolve_selection(tf, [spec.meta.output_name()]))
         elif isinstance(spec, (Expr, pl.Expr)):
             raise TypeError(
                 f"{verb_name}() takes column names, col('x'), or named "
