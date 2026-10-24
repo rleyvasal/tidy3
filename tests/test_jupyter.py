@@ -152,3 +152,69 @@ def test_multiline_pipe_inside_a_function_runs_in_ipython():
     finally:
         shell.run_line_magic("unload_ext", "tidy3.jupyter")
         InteractiveShell.clear_instance()
+
+
+def _fresh_shell():
+    pytest = __import__("pytest")
+    pytest.importorskip("IPython")
+    from IPython.core.interactiveshell import InteractiveShell
+
+    InteractiveShell.clear_instance()
+    shell = InteractiveShell.instance()
+    shell.run_line_magic("load_ext", "tidy3.jupyter")
+    return shell
+
+
+def _close_shell(shell):
+    from IPython.core.interactiveshell import InteractiveShell
+
+    shell.run_line_magic("unload_ext", "tidy3.jupyter")
+    InteractiveShell.clear_instance()
+
+
+def test_masking_leaves_a_notebook_defined_verb_alone():
+    shell = _fresh_shell()
+    try:
+        shell.run_cell("w = 3\ndef mutate(**kw):\n    return kw")
+        result = shell.run_cell("out = mutate(z = w)")
+        assert result.success, result.error_in_exec
+        assert shell.user_ns["out"] == {"z": 3}
+    finally:
+        _close_shell(shell)
+
+
+def test_masking_leaves_another_packages_verbs_alone(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    # Another package exporting tidy3's verb names, as tidy3a does.
+    other = ModuleType("otherverbs")
+
+    def filter(condition):  # noqa: A001
+        return ("otherverbs", condition)
+
+    filter.__module__ = "otherverbs"
+    other.filter = filter
+    other.__all__ = ["filter"]
+    monkeypatch.setitem(sys.modules, "otherverbs", other)
+
+    shell = _fresh_shell()
+    try:
+        shell.run_cell("w = 3")
+        same_cell = shell.run_cell("from otherverbs import *\nfirst = filter(w > 1)")
+        later = shell.run_cell("second = filter(w > 2)")
+        assert same_cell.success, same_cell.error_in_exec
+        assert later.success, later.error_in_exec
+        assert shell.user_ns["first"] == ("otherverbs", True)
+        assert shell.user_ns["second"] == ("otherverbs", True)
+
+        # Importing tidy3's filter again makes it tidy3's, and masking resumes.
+        back = shell.run_cell(
+            'from tidy3 import filter, tidy\n'
+            'cars = tidy({"mpg": [21.0, 30.0]})\n'
+            "kept = (cars >> filter(mpg > 25)).collect()"
+        )
+        assert back.success, back.error_in_exec
+        assert shell.user_ns["kept"]["mpg"].to_list() == [30.0]
+    finally:
+        _close_shell(shell)
