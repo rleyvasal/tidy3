@@ -287,6 +287,10 @@ decisions, not the next missing Python data-cleaning helpers.
    `round_date`, constructors, then a deliberate calendar-period versus
    elapsed-duration and interval design.
 
+   **Follow-up: rounding and constructors added in the working tree.**
+   `round_date`, `make_date`, `make_datetime`, `isoyear`, and `leap_year`,
+   checked against lubridate 1.9.5, with the differences in the reference.
+
    **Follow-up (parsing): added in the working tree.** `ymd_h`, `mdy_hm`,
    `mdy_h`, `dmy_hm`, and `dmy_h` complete the order family. `parse_date_time`
    reads several orders with lubridate's training: formats ranked by field
