@@ -286,6 +286,9 @@ decisions, not the next missing Python data-cleaning helpers.
 5. **Date/time completeness:** time-of-day parsing, remaining common orders,
    `round_date`, constructors, then a deliberate calendar-period versus
    elapsed-duration and interval design.
+
+   **Follow-up:** the span design is proposed in
+   [design-time-spans.md](design-time-spans.md), awaiting approval.
 6. **Remaining portability:** string case/ranking helpers, quantiles,
    advanced pivot arguments, and typed list-column mapping. Use Python's
    existing collection tools where a new purrr wrapper adds little value.
