@@ -263,6 +263,79 @@ def adorn_totals(
     return Verb(_apply, "adorn_totals")
 
 
+def adorn_percentages(denominator: str = "row", *, na_rm: bool = True, cols: Any = None) -> Verb:
+    """Divide counts by row, column, or grand totals; results stay numeric.
+
+    By default numeric columns after the label column are divided; ``cols``
+    accepts tidyselect specifications, and text or factor columns among them
+    are skipped. Totals from :func:`adorn_totals` are not counted twice: a
+    totals row is left out of column and grand sums, and a totals column
+    becomes 1 (by row) or a share of its own sum, unless ``cols`` leaves it
+    out. ``na_rm`` skips missing values in row and column sums; the grand
+    total always skips them. A zero sum gives NaN.
+    """
+    from tidy3.tidyselect import resolve_selection
+
+    _bool("adorn_percentages() na_rm", na_rm)
+    if denominator not in {"row", "col", "all"}:
+        raise ValueError('adorn_percentages() denominator must be "row", "col", or "all"')
+
+    def _apply(tf):
+        schema = tf._schema()
+        names = schema.names()
+        numeric = {column for column in names
+                   if schema[column].is_numeric() and column not in tf._category_levels}
+        if not any(column in numeric for column in names[1:]):
+            raise ValueError("adorn_percentages() requires a numeric column after the first column")
+        totals_column = tf._totals.get("col")
+        chosen = names[1:] if cols is None else resolve_selection(tf, [cols])
+        # As in janitor, choosing columns without the totals column leaves it alone.
+        include_totals = totals_column is not None and (cols is None or totals_column in chosen)
+        selected = [column for column in chosen if column in numeric and column != totals_column]
+        if not selected:
+            return tf._with_lf(tf._lf, rowwise=False, totals=tf._totals)
+
+        def value(column: str, skip_missing: bool) -> pl.Expr:
+            if skip_missing and schema[column].is_float():
+                return pl.col(column).fill_nan(None)
+            return pl.col(column)
+
+        # A totals row is the last row; it is not part of column or grand sums.
+        body = pl.int_range(pl.len()) < pl.len() - 1 if "row" in tf._totals else pl.lit(True)
+
+        def column_sum(column: str, skip_missing: bool) -> pl.Expr:
+            values = value(column, skip_missing).filter(body)
+            if skip_missing:
+                return values.sum()
+            return pl.when(values.is_null().any()).then(None).otherwise(values.sum())
+
+        def per_row(total: pl.Expr) -> pl.Expr:
+            # Polars divides by a single value as multiplication by its
+            # reciprocal (3 / 5 gives 0.6000000000000001). Repeating the
+            # total on every row keeps true division, as R computes it.
+            return total + pl.int_range(pl.len()).cast(pl.Float64) * 0.0
+
+        if denominator == "row":
+            row_sum = pl.sum_horizontal([value(column, na_rm) for column in selected], ignore_nulls=na_rm)
+            divided = [(pl.col(column) / row_sum).alias(column) for column in selected]
+            if include_totals:
+                divided.append(pl.lit(1.0).alias(totals_column))
+        elif denominator == "col":
+            divided = [(pl.col(column) / per_row(column_sum(column, na_rm))).alias(column) for column in selected]
+            if include_totals:
+                total = per_row(column_sum(totals_column, False))
+                divided.append((pl.col(totals_column) / total).alias(totals_column))
+        else:
+            grand = per_row(pl.sum_horizontal([column_sum(column, True) for column in selected]))
+            divided = [(pl.col(column) / grand).alias(column) for column in selected]
+            if include_totals:
+                divided.append((pl.col(totals_column) / grand).alias(totals_column))
+        lf = tf._lf.with_columns(expr.cast(pl.Float64) for expr in divided)
+        return tf._with_lf(lf, rowwise=False, totals=tf._totals)
+
+    return Verb(_apply, "adorn_percentages")
+
+
 def _adorn_text(column: str, dtype: Any) -> pl.Expr:
     """Native text conversion for label/fill columns in numeric reports."""
     value = pl.col(column).cast(pl.String)

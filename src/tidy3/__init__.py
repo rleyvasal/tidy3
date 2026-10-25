@@ -379,6 +379,7 @@ from tidy3.verbs import (
     with_groups,
 )
 from tidy3.janitor import (
+    adorn_percentages,
     adorn_totals,
     compare_df_cols,
     compare_df_cols_same,
@@ -396,6 +397,7 @@ __all__ = [
     "TidyFrame",
     "tabyl",
     "adorn_totals",
+    "adorn_percentages",
     "fct_relevel",
     "fct_reorder",
     "fct_infreq",
