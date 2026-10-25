@@ -910,6 +910,22 @@ def attach(add, Case) -> None:
         ]).with_columns(pl.sum_horizontal("mass", "bill").alias("Total")),
     )
     verb(
+        "adorn_percentages", "janitor", ["adorn_percentages"],
+        lambda df, extra=None: (pipe(df.select("species", "mass", "bill")) >> t.adorn_percentages()).collect(),
+        lambda df, extra=None: df.select(
+            "species",
+            (pl.col("mass") / (pl.col("mass") + pl.col("bill"))).alias("mass"),
+            (pl.col("bill") / (pl.col("mass") + pl.col("bill"))).alias("bill"),
+        ),
+    )
+    verb(
+        "adorn_percentages_col", "janitor", [],
+        lambda df, extra=None: (pipe(df.select("species", "mass", "bill")) >> t.adorn_percentages("col")).collect(),
+        lambda df, extra=None: df.select(
+            "species", pl.col("mass") / pl.col("mass").sum(), pl.col("bill") / pl.col("bill").sum(),
+        ),
+    )
+    verb(
         "tabyl", "janitor", ["tabyl"],
         lambda df, extra=None: (pipe(df) >> t.tabyl("species")).collect(),
         lambda df, extra=None: df.group_by("species").len(name="n").sort("species")

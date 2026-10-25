@@ -4,6 +4,12 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- `adorn_percentages()` divides report counts by row (`"row"`, the default), column (`"col"`), or grand (`"all"`) totals, with `cols=` selection and `na_rm`. Results stay numeric and lazy. Totals from `adorn_totals()` are not counted twice: the totals row is left out of column and grand sums, and the totals column becomes 1 or its own share unless `cols=` leaves it out. Divisions are exact (Polars would otherwise multiply by the reciprocal, giving 0.6000000000000001 for 3 / 5). Checked against R janitor 2.2.1 for every denominator with and without totals, selections, missing values, factor labels, and tabyl reports, with raw Polars benchmark cases.
+
 ## 0.9.0 — 2026-10-25
 
 Frequency tables, totals, and the everyday forcats value and level helpers, computed in Polars on text columns.

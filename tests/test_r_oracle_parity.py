@@ -1409,6 +1409,39 @@ def _janitor_totals():
     return result
 
 
+def _janitor_percentages():
+    import tidy3 as t3
+
+    source = tidy({"label": ["a", "b", "c"], "yes": [1, None, 0], "no": [2, 3, 0],
+                   "w": [0.5, float("nan"), 1.0], "note": ["x", "y", "z"]})
+    strict = tidy({"label": ["a", "b", "c"], "yes": [1, None, 0], "no": [2, 3, 0]})
+    totals = strict >> t3.adorn_totals("both")
+    result = {}
+    for denominator in ("row", "col", "all"):
+        percentages = lambda **kw: t3.adorn_percentages(denominator, **kw)
+        result[denominator] = source >> percentages()
+        result[f"{denominator}_keep_na"] = strict >> percentages(na_rm=False)
+        result[f"{denominator}_totals"] = totals >> percentages()
+        result[f"{denominator}_row_totals"] = strict >> t3.adorn_totals() >> percentages()
+        result[f"{denominator}_col_totals"] = strict >> t3.adorn_totals("col") >> percentages()
+        result[f"{denominator}_selected"] = totals >> percentages(cols="yes")
+        result[f"{denominator}_selected_totals"] = totals >> percentages(cols=["no", "Total"])
+    result["first_column"] = tidy({"g": [1, 2], "n": [3, 1]}) >> t3.adorn_percentages("col", cols=t3.everything())
+    result["text_selected"] = source >> t3.adorn_percentages(cols=["yes", "note"])
+    result["empty"] = tidy(pl.DataFrame(schema={"label": pl.String, "n": pl.Int64})) >> t3.adorn_percentages("col")
+    report = tidy({"g": ["a", "a", "b", "b"], "answer": ["yes", "no", "yes", "yes"]}) >> t3.tabyl("g", "answer")
+    result["tabyl"] = report >> t3.adorn_totals("both") >> t3.adorn_percentages("all")
+    factor = tidy(pd.DataFrame({
+        "g": pd.Categorical(["b", "a"], categories=["b", "a", "unused"], ordered=True),
+        "n": [1, 3],
+    }))
+    result["factor"] = factor >> t3.adorn_totals() >> t3.adorn_percentages("col")
+    # JSON keeps about 16 digits, so recurring shares are compared at 12.
+    rounded = pl.col(pl.Float64).map_elements(lambda v: float(f"{v:.12g}"), return_dtype=pl.Float64)
+    return {name: frame._with_lf(frame._lf.with_columns(rounded), totals=frame._totals)
+            for name, frame in result.items()}
+
+
 def _janitor_tabyl():
     import tidy3 as t3
 
@@ -2287,6 +2320,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "janitor_cleaning": _janitor_cleaning,
     "janitor_tabyl": _janitor_tabyl,
     "janitor_totals": _janitor_totals,
+    "janitor_percentages": _janitor_percentages,
     "timezone_conversion": _timezone_conversion,
     "timezone_dst": _timezone_dst,
     "timezone_resolved_repeats": _timezone_resolved_repeats,

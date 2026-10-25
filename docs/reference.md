@@ -118,7 +118,7 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 | Dates | `ymd`, `mdy`, `dmy`, `ym`, `ymd_hms`, `ymd_hm`, `mdy_hms`, `dmy_hms`, `with_tz`, `force_tz`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `days_in_month`, `months`, `years`, `add_with_rollback`, `today`, `now`, `excel_numeric_to_date` |
 | Factors | `as_factor`, `fct_relevel`, `fct_reorder`, `fct_reorder2` (`last2`, `first2`), `fct_infreq`, `fct_inorder`, `fct_rev`, `fct_recode`, `fct_collapse`, `fct_lump_n`, `fct_lump_prop`, `fct_lump_min`, `fct_drop`, `fct_expand`, `fct_na_value_to_level`, `fct_na_level_to_value` |
 | Cleaning | `clean_names`, `make_clean_names`, `set_names`, `get_dupes`, `remove_empty`, `remove_constant`, `row_to_names`, `find_header`, `compare_df_cols`, `compare_df_cols_same`, `describe_class` |
-| Reporting | `tabyl` (one-variable frequencies and two-variable count tables), `adorn_totals` |
+| Reporting | `tabyl` (one-variable frequencies and two-variable count tables), `adorn_totals`, `adorn_percentages` |
 | Rows | `filter`, `filter_out`, `arrange`, `distinct`, `slice`, `slice_head`, `slice_tail`, `slice_min`, `slice_max`, `slice_sample`, `head`, `sample_n`, `sample_frac` |
 | Columns | `mutate`, `transmute`, `select`, `drop`, `rename`, `rename_with`, `relocate`, `pull`, `glimpse` |
 | Groups | `group_by`, `rowwise`, `ungroup`, `with_groups`, `group_split`, `group_map`, `group_modify`, `group_walk`, `group_nest`, `nest_by`, `group_data`, `group_keys`, `group_rows`, `group_size`, `group_indices`, `group_vars`, `groups`, `n_groups`, `group_trim`, `summarise`, `reframe`, `count`, `tally`, `add_count`, `add_tally` |
@@ -328,6 +328,37 @@ together at the end of the pipe. An existing column with the requested
 totals name raises an error instead of overwriting its values.
 
 Behavior is checked against [janitor's `adorn_totals`](https://sfirke.github.io/janitor/reference/adorn_totals.html).
+
+### Percentages
+
+`adorn_percentages()` divides each count by its row's sum. Use `"col"` for
+column sums or `"all"` for the grand total. Results are numeric proportions
+(0.25, not "25%"), so they can still be sorted, plotted, or modeled.
+
+```python
+tidy({"group": ["A", "A", "B"], "answer": ["yes", "no", "yes"]}) >> tabyl("group", "answer") >> adorn_percentages("col")
+```
+
+As with `adorn_totals`, numeric columns after the first are divided by
+default, and `cols=` selects others, including the first column; text and
+factor columns in a selection are skipped. Missing values are skipped in
+row and column sums; `na_rm=False` makes a sum with a missing value
+missing. The grand total always skips missing values, as janitor does. A
+zero sum gives NaN (0 / 0). With `na_rm=False`, a row holding both a missing
+value and NaN sums to missing; R may give either NA or NaN there.
+
+Totals added earlier are not counted twice. A totals row is left out of
+column and grand sums and is divided like any other row. A totals column
+becomes 1 when dividing by row, and a share of its own sum otherwise.
+Selecting columns with `cols=` that leave the totals column out keeps it as
+counts. Add totals first and percentages second, as in janitor:
+`adorn_totals("both") >> adorn_percentages("all")`. The totals record
+survives, so adding the same totals again still raises an error.
+
+Percentages stay lazy, drop existing groups, and keep parse diagnostics.
+Divisions are exact, as in R: 3 / 5 is 0.6.
+The table needs a numeric column after the first column. Behavior is checked
+against [janitor's `adorn_percentages`](https://sfirke.github.io/janitor/reference/adorn_percentages.html).
 
 ### Empty columns, headers, and class checks
 

@@ -90,6 +90,35 @@ result <- switch(
       result
     }
   },
+  janitor_percentages = {
+    if (!requireNamespace("janitor", quietly=TRUE)) {
+      list(skip=TRUE, reason="janitor is not installed")
+    } else {
+      source <- data.frame(label=c("a", "b", "c"), yes=c(1L, NA, 0L), no=c(2L, 3L, 0L), w=c(0.5, NaN, 1), note=c("x", "y", "z"))
+      strict <- data.frame(label=c("a", "b", "c"), yes=c(1L, NA, 0L), no=c(2L, 3L, 0L))
+      totals <- janitor::adorn_totals(strict, c("row", "col"))
+      result <- list()
+      for (denominator in c("row", "col", "all")) {
+        result[[denominator]] <- janitor::adorn_percentages(source, denominator)
+        result[[paste0(denominator, "_keep_na")]] <- janitor::adorn_percentages(strict, denominator, na.rm=FALSE)
+        result[[paste0(denominator, "_totals")]] <- janitor::adorn_percentages(totals, denominator)
+        result[[paste0(denominator, "_row_totals")]] <- janitor::adorn_percentages(janitor::adorn_totals(strict), denominator)
+        result[[paste0(denominator, "_col_totals")]] <- janitor::adorn_percentages(janitor::adorn_totals(strict, "col"), denominator)
+        result[[paste0(denominator, "_selected")]] <- janitor::adorn_percentages(totals, denominator, TRUE, yes)
+        result[[paste0(denominator, "_selected_totals")]] <- janitor::adorn_percentages(totals, denominator, TRUE, c(no, Total))
+      }
+      numeric <- data.frame(g=c(1L, 2L), n=c(3L, 1L))
+      result$first_column <- janitor::adorn_percentages(numeric, "col", TRUE, dplyr::everything())
+      result$text_selected <- suppressMessages(janitor::adorn_percentages(source, "row", TRUE, c(yes, note)))
+      result$empty <- janitor::adorn_percentages(data.frame(label=character(), n=integer()), "col")
+      report <- janitor::tabyl(data.frame(g=c("a", "a", "b", "b"), answer=c("yes", "no", "yes", "yes")), g, answer)
+      result$tabyl <- janitor::adorn_percentages(janitor::adorn_totals(report, c("row", "col")), "all")
+      factor <- data.frame(g=ordered(c("b", "a"), levels=c("b", "a", "unused")), n=c(1L, 3L))
+      result$factor <- janitor::adorn_percentages(janitor::adorn_totals(factor), "col")
+      # JSON keeps about 16 digits, so recurring shares are compared at 12.
+      lapply(result, function(df) { df[] <- lapply(df, function(x) if (is.double(x)) signif(x, 12) else x); df })
+    }
+  },
   janitor_tabyl = {
     if (!requireNamespace("janitor", quietly=TRUE)) {
       list(skip=TRUE, reason="janitor is not installed")
