@@ -21,9 +21,19 @@ from tidy3.expr import Expr, _func, col, median
 __all__ = [
     "fct_relevel", "fct_reorder", "fct_infreq", "fct_rev",
     "fct_recode", "fct_collapse", "fct_lump_n", "fct_lump_prop", "fct_lump_min",
+    "fct_drop", "fct_expand", "fct_inorder", "fct_reorder2", "first2", "last2",
+    "fct_na_value_to_level", "fct_na_level_to_value", "as_factor",
 ]
-FUNCTIONS = frozenset(__all__)
+FUNCTIONS = frozenset(__all__) - {"first2", "last2"}
 _ORDERING_FUNCTIONS = frozenset({"fct_relevel", "fct_reorder", "fct_infreq", "fct_rev"})
+# Calls whose values are their source's values; only the levels change.
+_SAME_VALUES = _ORDERING_FUNCTIONS | {"fct_drop", "fct_expand", "fct_inorder", "fct_reorder2", "as_factor"}
+_LUMPS = frozenset({"fct_lump_n", "fct_lump_prop", "fct_lump_min"})
+# Ungrouped calls on one column whose levels Polars can count; see _native_values.
+_NATIVE_VALUES = _LUMPS | {
+    "fct_recode", "fct_collapse", "fct_drop", "fct_expand", "fct_inorder",
+    "fct_na_value_to_level", "fct_na_level_to_value", "as_factor", "fct_reorder2",
+}
 SORT_GROUPS: ContextVar[bool] = ContextVar("tidy3_factor_sort_groups", default=True)
 
 
@@ -34,9 +44,24 @@ def _column(value: Any) -> Any:
 def _dispatch(name: str, f: Any, *args: Any, **kwargs: Any) -> Any:
     if isinstance(f, (str, Expr, pl.Expr)):
         return _func(name, _column(f), *args, **kwargs)
-    source = _factor(f)
     values = tuple(pd.Series(value) if not isinstance(value, pd.Series) else value for value in args)
-    return eval_pandas(name, (source, *values), kwargs).array
+    return eval_pandas(name, (f, *values), kwargs).array
+
+
+def _check_after(name: str, after: Any) -> None:
+    if isinstance(after, bool) or not isinstance(after, (int, float)) or after < 0 or math.isnan(after) or (math.isfinite(after) and after != int(after)):
+        raise ValueError(f"{name}() after must be a non-negative integer or infinity")
+
+
+def _level_list(name: str, values: Any) -> list[str]:
+    """Strings and lists of strings, flattened; None is no levels."""
+    if values is None:
+        return []
+    if isinstance(values, str):
+        return [values]
+    if isinstance(values, (list, tuple)):
+        return [level for value in values for level in _level_list(name, value)]
+    raise TypeError(f"{name}() levels must be strings or lists of strings")
 
 
 def fct_relevel(f: Any, *levels: Any, after: int | float = 0) -> Any:
@@ -45,8 +70,7 @@ def fct_relevel(f: Any, *levels: Any, after: int | float = 0) -> Any:
     Unmentioned levels keep their order. ``after=float('inf')`` moves to
     the end. Unknown levels warn and are ignored, as in forcats.
     """
-    if isinstance(after, bool) or not isinstance(after, (int, float)) or after < 0 or math.isnan(after) or (math.isfinite(after) and after != int(after)):
-        raise ValueError("fct_relevel() after must be a non-negative integer or infinity")
+    _check_after("fct_relevel", after)
     if len(levels) == 1 and isinstance(levels[0], (list, tuple)):
         levels = tuple(levels[0])
     if not (len(levels) == 1 and callable(levels[0])) and not all(isinstance(level, str) for level in levels):
@@ -156,6 +180,119 @@ def fct_lump_min(f: Any, min: float, w: Any = None, *, other_level: str = "Other
     return _lump_call("fct_lump_min", f, min, w, other_level)
 
 
+def fct_drop(f: Any, only: Any = None) -> Any:
+    """Remove unused levels; with *only*, remove just those unused levels.
+
+    Used levels in *only* stay. The ordered flag and remaining order are kept.
+    """
+    return _dispatch("fct_drop", f, only=None if only is None else _level_list("fct_drop", only))
+
+
+def fct_expand(f: Any, *levels: Any, after: int | float = math.inf) -> Any:
+    """Add levels after *after* existing ones (at the end by default).
+
+    Levels may be strings or lists of strings. Levels already present, and
+    repeats, are ignored. Values do not change.
+    """
+    _check_after("fct_expand", after)
+    return _dispatch("fct_expand", f, levels=_level_list("fct_expand", list(levels)), after=after)
+
+
+def fct_inorder(f: Any, *, ordered: bool | None = None) -> Any:
+    """Order levels by first appearance; unused levels follow in their order.
+
+    ``ordered=None`` keeps the input's ordered flag.
+    """
+    if ordered is not None and not isinstance(ordered, bool):
+        raise TypeError("fct_inorder() ordered must be a boolean or None")
+    return _dispatch("fct_inorder", f, ordered=ordered)
+
+
+def _terminal(x: Any, y: Any, desc: bool) -> Any:
+    x, y = pd.Series(x).reset_index(drop=True), pd.Series(y).reset_index(drop=True)
+    keep = (x.notna() & y.notna()).to_numpy()
+    if not keep.any():
+        return None
+    values = x[keep].to_numpy()
+    # argmax and argmin return the first row among ties, as R's order() does.
+    return y[keep].iloc[int(values.argmax() if desc else values.argmin())]
+
+
+def last2(x: Any, y: Any) -> Any:
+    """The *y* value at the largest *x*: :func:`fct_reorder2`'s default summary.
+
+    Rows missing either value are skipped; ties take the first row.
+    """
+    return _terminal(x, y, True)
+
+
+def first2(x: Any, y: Any) -> Any:
+    """The *y* value at the smallest *x*; ties take the first row."""
+    return _terminal(x, y, False)
+
+
+def fct_reorder2(
+    f: Any, x: Any, y: Any, fun: Any = last2, *, na_rm: bool | None = None,
+    default: float = -math.inf, desc: bool = True, **kwargs: Any,
+) -> Any:
+    """Order levels by a summary of *x* and *y*, largest first by default.
+
+    ``fun(x, y)`` returns one number per level; the default :func:`last2`
+    is the *y* value at the largest *x*, so lines in a plot and their legend
+    end in the same order. Rows missing *x* or *y* are left out of the
+    summaries with a warning (``na_rm=None``), silently (True), or passed to
+    *fun* (False). Empty levels use *default*; ties keep the existing level
+    order. Every row stays in the result; forcats also drops the missing rows
+    from its result when it removes them.
+    """
+    if not callable(fun):
+        raise TypeError("fct_reorder2() fun must be callable")
+    if na_rm is not None and not isinstance(na_rm, bool):
+        raise TypeError("fct_reorder2() na_rm must be a boolean or None")
+    if not isinstance(desc, bool):
+        raise TypeError("fct_reorder2() desc must be a boolean")
+    return _dispatch(
+        "fct_reorder2", f, _column(x), _column(y),
+        fun=fun, na_rm=na_rm, default=default, desc=desc, fun_kwargs=kwargs,
+    )
+
+
+def fct_na_value_to_level(f: Any, level: str = "(Missing)") -> Any:
+    """Turn missing values into the level *level*, added last if it is new.
+
+    The level is added even when nothing is missing. forcats defaults to an
+    ``NA`` level, which a tidy3 factor cannot hold, so the default is
+    forcats' earlier ``"(Missing)"``.
+    """
+    if not isinstance(level, str):
+        raise TypeError("fct_na_value_to_level() level must be a string")
+    return _dispatch("fct_na_value_to_level", f, level=level)
+
+
+def fct_na_level_to_value(f: Any, extra_levels: Any = None) -> Any:
+    """Turn the values of *extra_levels* into missing values and drop those levels.
+
+    Unknown levels are ignored. Without *extra_levels* nothing changes: a
+    tidy3 factor never has an ``NA`` level for this to convert.
+    """
+    return _dispatch(
+        "fct_na_level_to_value", f, extra_levels=_level_list("fct_na_level_to_value", extra_levels),
+    )
+
+
+def as_factor(x: Any) -> Any:
+    """Make a factor, as forcats::as_factor does.
+
+    Text gets levels in order of first appearance. Numbers get levels in
+    numeric order and logical values get ``FALSE`` and ``TRUE``, written
+    with tidy3's header text rules: ``2.0`` is ``"2"``, but numbers are
+    never rounded or written in scientific notation as R does. Factors are
+    unchanged. Dates and other types raise; convert them with
+    ``as_character`` first.
+    """
+    return _dispatch("as_factor", x)
+
+
 def _revalue(source: pd.Series, mapping: dict[str, str | None]) -> pd.Series:
     """Relabel categorical codes, merging duplicates and preserving missing rows."""
     renamed = [mapping.get(level, level) for level in source.cat.categories]
@@ -177,7 +314,65 @@ def _keep_levels(source: pd.Series, keep: Any, other_level: str) -> pd.Series:
     return result.cat.reorder_categories(categories)
 
 
+def _reorder2_levels(source: pd.Series, args: tuple[Any, ...], kw: dict[str, Any]) -> list[str]:
+    x, y = args
+    missing = (x.isna() | y.isna()).to_numpy()
+    na_rm = kw["na_rm"]
+    if missing.any() and na_rm is None:
+        count = int(missing.sum())
+        warnings.warn(
+            f"fct_reorder2(): removing {count} missing value{'s' if count != 1 else ''}; set na_rm=True to silence",
+            UserWarning, stacklevel=4,
+        )
+        na_rm = True
+    keep = ~missing if na_rm else np.ones(len(source), dtype=bool)
+    codes = source.cat.codes.to_numpy()[keep]
+    x, y = x[keep], y[keep]
+    scores = []
+    for code in range(len(source.cat.categories)):
+        rows = codes == code
+        if not rows.any():
+            scores.append(kw["default"])
+            continue
+        result = kw["fun"](x[rows], y[rows], **kw["fun_kwargs"])
+        if not pd.api.types.is_scalar(result):
+            raise ValueError("fct_reorder2() fun must return one value per level")
+        scores.append(result)
+    order = pd.Series(scores, dtype="Float64").sort_values(
+        ascending=not kw["desc"], na_position="last", kind="stable"
+    ).index
+    return [source.cat.categories[i] for i in order]
+
+
 def _change_levels(name: str, source: pd.Series, args: tuple[Any, ...], kw: dict[str, Any]) -> pd.Series:
+    categories = source.cat.categories.tolist()
+    if name == "as_factor":
+        return source
+    if name == "fct_drop":
+        used = set(source.cat.codes[source.cat.codes >= 0].tolist())
+        only = kw["only"]
+        kept = [level for code, level in enumerate(categories)
+                if code in used or (only is not None and level not in only)]
+        return source.cat.set_categories(kept)
+    if name == "fct_expand":
+        new = [level for level in dict.fromkeys(kw["levels"]) if level not in categories]
+        position = len(categories) if math.isinf(kw["after"]) else min(int(kw["after"]), len(categories))
+        return source.cat.set_categories(categories[:position] + new + categories[position:])
+    if name == "fct_inorder":
+        codes = source.cat.codes.to_numpy()
+        first = pd.unique(codes[codes >= 0]).tolist()
+        order = first + [code for code in range(len(categories)) if code not in set(first)]
+        ordered = source.cat.ordered if kw["ordered"] is None else kw["ordered"]
+        return source.cat.reorder_categories([categories[code] for code in order], ordered=ordered)
+    if name == "fct_reorder2":
+        return source.cat.reorder_categories(_reorder2_levels(source, args, kw))
+    if name == "fct_na_value_to_level":
+        level = kw["level"]
+        result = source if level in categories else source.cat.add_categories([level])
+        return result.fillna(level)
+    if name == "fct_na_level_to_value":
+        removed = set(kw["extra_levels"])
+        return source.cat.set_categories([level for level in categories if level not in removed])
     if name in {"fct_recode", "fct_collapse"}:
         levels = kw["levels"]
         removed = [levels["NULL"]] if name == "fct_recode" and "NULL" in levels else []
@@ -304,8 +499,37 @@ def _apply(name: str, source: pd.Series, args: tuple[Any, ...], kw: dict[str, An
     return source.cat.reorder_categories(result, ordered=ordered)
 
 
+def _as_factor(value: Any) -> pd.Series:
+    """forcats::as_factor levels: appearance for text, sorted for numbers and logicals."""
+    if isinstance(value, pl.Series):
+        if isinstance(value.dtype, (pl.Enum, pl.Categorical)):
+            return _factor(value)
+        value = value.to_pandas()
+    source = value if isinstance(value, pd.Series) else pd.Series(value)
+    if isinstance(source.dtype, pd.CategoricalDtype):
+        return _factor(source)
+    distinct = pd.unique(source.dropna()).tolist()
+    if all(isinstance(item, str) for item in distinct):
+        return _factor(source, distinct)
+    from tidy3.janitor import _header_text
+
+    if all(isinstance(item, (bool, np.bool_)) for item in distinct):
+        values, labels = [False, True], ["FALSE", "TRUE"]
+    elif all(isinstance(item, (Real, np.number)) and not isinstance(item, (bool, np.bool_)) for item in distinct):
+        values = sorted(distinct)
+        labels = [_header_text(item) for item in values]
+        if len(set(labels)) != len(labels):
+            raise ValueError("as_factor() numbers must have distinct text")
+    else:
+        raise TypeError("as_factor() input must be text, numbers, logical values, or a factor; "
+                        "convert other types with as_character() first")
+    lookup = {item: code for code, item in enumerate(values)}
+    codes = np.array([-1 if pd.isna(item) else lookup[item] for item in source.tolist()], dtype=np.int64)
+    return pd.Series(pd.Categorical.from_codes(codes, categories=labels), index=source.index, name=source.name)
+
+
 def eval_pandas(name: str, args: tuple[Any, ...], kw: dict[str, Any]) -> pd.Series:
-    source = _factor(args[0])
+    source = _as_factor(args[0]) if name == "as_factor" else _factor(args[0])
     extra = []
     for value in args[1:]:
         series = value if isinstance(value, pd.Series) else pd.Series(value)
@@ -525,6 +749,8 @@ def _native_spec(value: Any, schema: Any, groups: list[str] | None) -> dict[str,
     unused levels and per-group Python summaries stay exact.
     """
     node = value.node if isinstance(value, Expr) else None
+    if isinstance(node, tuple) and node and node[0] == "func" and node[1] in _NATIVE_VALUES:
+        return _native_value_spec(node, schema, groups)
     if not isinstance(node, tuple) or node[0] != "func" or node[1] not in _ORDERING_FUNCTIONS:
         return None
     name, args, kwargs = node[1], node[2], node[3]
@@ -575,7 +801,114 @@ def _native_spec(value: Any, schema: Any, groups: list[str] | None) -> dict[str,
             return None
     elif name != "fct_rev":
         return None
-    return {"name": name, "source": source, "extra": extra, "kwargs": kwargs}
+    columns = [source] if extra is None else [source, extra]
+    return {"name": name, "source": source, "extra": extra, "kwargs": kwargs, "columns": columns}
+
+
+def _native_value_spec(node: tuple, schema: Any, groups: list[str] | None) -> dict[str, Any] | None:
+    """An ungrouped value or level helper on a plain column, or None for pandas.
+
+    Text sources, plus numbers and logical values for as_factor. Weights and
+    fct_reorder2's x and y must be numeric columns; fct_reorder2 must use
+    last2 or first2. Arguments are literals, as the public functions build.
+    """
+    name, args, kwargs = node[1], node[2], node[3]
+    if groups or not args or any(not (isinstance(v, tuple) and v and v[0] == "lit") for v in kwargs.values()):
+        return None
+    columns = [_column_name(arg) for arg in args]
+    if any(column is None or column not in schema for column in columns):
+        return None
+    dtype = schema[columns[0]]
+    numeric = dtype.is_integer() or dtype.is_float()
+    if not (dtype == pl.String or (name == "as_factor" and (numeric or dtype == pl.Boolean))):
+        return None
+    if any(not (schema[column].is_integer() or schema[column].is_float()) for column in columns[1:]):
+        return None
+    literals = {key: value[1] for key, value in kwargs.items()}
+    if name == "fct_reorder2" and (literals["fun"] not in {last2, first2} or literals["fun_kwargs"]):
+        return None
+    return {"name": name, "source": columns[0], "columns": columns, "kwargs": literals, "values": True}
+
+
+def _score_order(scores: list[Any], desc: bool) -> list[int]:
+    """Positions sorted by score, missing last, ties in their existing order."""
+    return pd.Series(scores, dtype="Float64").sort_values(
+        ascending=not desc, na_position="last", kind="stable"
+    ).index.tolist()
+
+
+def _native_values(data: pl.DataFrame, spec: dict[str, Any]) -> tuple[pl.Expr, bool] | None:
+    """The Polars expression and ordered flag for a :func:`_native_value_spec` call.
+
+    Polars counts each distinct value once; the pandas rules then run on that
+    small table (one row per level, weighted by its count, plus one row for
+    the missing values), so levels, warnings, and ties match the pandas path.
+    """
+    name, source, kw = spec["name"], spec["source"], spec["kwargs"]
+    column = data[source]
+    if any(data[c].dtype.is_float() and bool(data[c].is_nan().any()) for c in spec["columns"]):
+        return None  # pandas reads NaN as missing; Polars keeps it as a value.
+    if column.dtype != pl.String:
+        from tidy3.janitor import _header_text
+
+        values = [False, True] if column.dtype == pl.Boolean else column.drop_nulls().unique().sort().to_list()
+        labels = ["FALSE", "TRUE"] if column.dtype == pl.Boolean else [_header_text(v) for v in values]
+        if not values or len(set(labels)) != len(labels):
+            return None
+        mapped = pl.col(source).replace_strict(dict(zip(values, labels)), default=None, return_dtype=pl.String)
+        return mapped.cast(pl.Enum(labels)), False
+    present = column.drop_nulls()
+    if present.is_empty():
+        return None
+    if name == "fct_reorder2":
+        return _native_reorder2(data, spec)
+    if name in _LUMPS and len(spec["columns"]) > 1:
+        weight = data[spec["columns"][1]]
+        if weight.null_count() or bool((weight < 0).any()) or (
+            weight.dtype.is_float() and not bool(weight.is_finite().all())
+        ):
+            return None  # the pandas path raises the usual error
+        score = pl.col(weight.name).cast(pl.Float64).sum()
+    else:
+        score = pl.len().cast(pl.Float64)
+    counts = data.group_by(source, maintain_order=True).agg(score.alias("__tidy3_weight"))
+    values = counts[source].to_list()
+    summary = (_as_factor if name == "as_factor" else _factor)(pd.Series(values, dtype=object))
+    weights = pd.Series(counts["__tidy3_weight"].to_list(), index=summary.index, dtype=float)
+    result = _apply(name, summary, (weights,) if name in _LUMPS else (), kw)
+    renamed = [None if pd.isna(value) else value for value in result.astype(object)]
+    mapping = {old: new for old, new in zip(values, renamed) if old is not None}
+    fill = next((new for old, new in zip(values, renamed) if old is None), None)
+    expr = pl.col(source)
+    if any(old != new for old, new in mapping.items()):
+        expr = expr.replace_strict(mapping, default=None, return_dtype=pl.String)
+    if fill is not None:
+        expr = expr.fill_null(pl.lit(fill))
+    return expr.cast(pl.Enum(result.cat.categories.tolist())), bool(result.cat.ordered)
+
+
+def _native_reorder2(data: pl.DataFrame, spec: dict[str, Any]) -> tuple[pl.Expr, bool]:
+    """fct_reorder2 with last2 or first2: the y value at each level's largest or smallest x."""
+    source, x, y = spec["columns"]
+    kw = spec["kwargs"]
+    missing = data[x].is_null() | data[y].is_null()
+    count = int(missing.sum())
+    if count and kw["na_rm"] is None:
+        warnings.warn(
+            f"fct_reorder2(): removing {count} missing value{'s' if count != 1 else ''}; set na_rm=True to silence",
+            UserWarning, stacklevel=5,
+        )
+    pick = pl.col(x).arg_max() if kw["fun"] is last2 else pl.col(x).arg_min()
+    scores = dict(
+        data.filter(~missing).drop_nulls(source).group_by(source)
+        .agg(pl.col(y).get(pick).cast(pl.Float64)).iter_rows()
+    )
+    categories = sorted(data[source].drop_nulls().unique().to_list())
+    # A level whose rows were all removed is empty (default); one whose pairs
+    # last2/first2 skipped itself has no value (missing, so last).
+    empty = kw["default"] if kw["na_rm"] is not False else None
+    order = _score_order([scores.get(level, empty) for level in categories], kw["desc"])
+    return pl.col(source).cast(pl.Enum([categories[i] for i in order])), False
 
 
 def _attach_codes(pairs: pl.DataFrame, source: str, categories: list[str]) -> pl.DataFrame:
@@ -700,13 +1033,17 @@ def _apply_native_factors(
         return lf, factors, {}
     needed = set(groups or [])
     for _, spec in specs:
-        needed.add(spec["source"])
-        if spec["extra"]:
-            needed.add(spec["extra"])
+        needed.update(spec["columns"])
     data = lf.select([name for name in schema.names() if name in needed]).collect()
     exprs = []
     ordered: dict[str, bool] = {}
     for name, spec in specs:
+        if spec.get("values"):
+            native = _native_values(data, spec)
+            if native is not None:
+                exprs.append(native[0].alias(name))
+                ordered[name] = native[1]
+            continue
         levels = _native_levels(data, spec, groups, sort_groups)
         if levels is None:
             continue
@@ -800,14 +1137,15 @@ def prepare_polars(
 def _level_source(value: Any) -> Any:
     """The expression a chain of fct_* calls reorders, or None.
 
-    fct_relevel, fct_reorder, fct_infreq, and fct_rev change the levels and
-    never the values, so ``fct_rev(fct_infreq(species))`` has the values of
-    ``species``.
+    The ordering calls, fct_drop, fct_expand, fct_inorder, fct_reorder2, and
+    as_factor change the levels and never the values, so
+    ``fct_rev(fct_infreq(species))`` has the values of ``species``. (A
+    numeric as_factor source is not text, so it never takes this path.)
     """
     node = value.node if isinstance(value, Expr) else None
-    if not isinstance(node, tuple) or node[0] != "func" or node[1] not in _ORDERING_FUNCTIONS:
+    if not isinstance(node, tuple) or node[0] != "func" or node[1] not in _SAME_VALUES:
         return None
-    while isinstance(node, tuple) and node[0] == "func" and node[1] in _ORDERING_FUNCTIONS:
+    while isinstance(node, tuple) and node[0] == "func" and node[1] in _SAME_VALUES:
         node = node[2][0]
     if isinstance(node, tuple) and node and node[0] == "func" and node[1] in FUNCTIONS:
         return None

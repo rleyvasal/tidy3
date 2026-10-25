@@ -503,6 +503,13 @@ def _factor_values(how: str):
             "lump_n": lambda: t.fct_lump_n("species", 1, ties_method="first"),
             "lump_prop": lambda: t.fct_lump_prop("species", .34),
             "lump_min": lambda: t.fct_lump_min("species", df.height / 3 + .5),
+            "drop": lambda: t.fct_drop("species"),
+            "expand": lambda: t.fct_expand("species", "Unknown"),
+            "inorder": lambda: t.fct_inorder("species"),
+            "reorder2": lambda: t.fct_reorder2("species", "bill", "mass"),
+            "na_value_to_level": lambda: t.fct_na_value_to_level("species"),
+            "na_level_to_value": lambda: t.fct_na_level_to_value("species", "Gentoo"),
+            "as_factor": lambda: t.as_factor("g"),
         }
         return (t.tidy(df) >> t.mutate(out=calls[how]()) >> t.select("out")).collect()
 
@@ -510,6 +517,35 @@ def _factor_values(how: str):
         if isinstance(df, pl.LazyFrame):
             df = df.collect()
         categories = sorted(df["species"].drop_nulls().unique().to_list())
+        species = pl.col("species")
+        if how in {"drop", "expand", "inorder", "na_value_to_level"}:
+            levels = {
+                "drop": categories,
+                "expand": [*categories, "Unknown"],
+                "inorder": df["species"].drop_nulls().unique(maintain_order=True).to_list(),
+                "na_value_to_level": [*categories, "(Missing)"],
+            }[how]
+            value = species.fill_null("(Missing)") if how == "na_value_to_level" else species
+            return df.select(value.cast(pl.Enum(levels)).alias("out"))
+        if how == "na_level_to_value":
+            levels = [level for level in categories if level != "Gentoo"]
+            value = pl.when(species != "Gentoo").then(species)
+            return df.select(value.cast(pl.Enum(levels)).alias("out"))
+        if how == "reorder2":
+            # last2: mass at the largest bill (first row among ties), largest first.
+            scores = (
+                df.drop_nulls(["species", "bill", "mass"]).group_by("species")
+                .agg(pl.col("mass").get(pl.col("bill").arg_max()).alias("score"))
+            )
+            levels = (
+                pl.DataFrame({"species": categories}).join(scores, on="species", how="left", maintain_order="left")
+                .with_columns(pl.col("score").fill_null(float("-inf")))
+                .sort("score", descending=True, maintain_order=True)["species"].to_list()
+            )
+            return df.select(species.cast(pl.Enum(levels)).alias("out"))
+        if how == "as_factor":
+            levels = [str(value) for value in sorted(df["g"].drop_nulls().unique().to_list())]
+            return df.select(pl.col("g").cast(pl.String).cast(pl.Enum(levels)).alias("out"))
         if how == "recode":
             mapping = {level: "G" if level == "Gentoo" else level for level in categories}
         elif how == "collapse":
@@ -1076,9 +1112,14 @@ def _cases() -> list[Case]:
         tidy, raw = _grouped_factor(how)
         add(Case(f"fct_{how}" if how != "infreq" else "fct_infreq", "forcats", names, tidy, raw))
 
-    for how in ("recode", "collapse", "lump_n", "lump_prop", "lump_min"):
+    for how in ("recode", "collapse", "lump_n", "lump_prop", "lump_min", "drop", "expand", "inorder",
+                "na_value_to_level", "na_level_to_value"):
         tidy, raw = _factor_values(how)
         add(Case(f"fct_{how}", "forcats", [f"fct_{how}"], tidy, raw))
+    tidy, raw = _factor_values("reorder2")
+    add(Case("fct_reorder2", "forcats", ["fct_reorder2", "last2", "first2"], tidy, raw))
+    tidy, raw = _factor_values("as_factor")
+    add(Case("as_factor", "forcats", ["as_factor"], tidy, raw))
 
     from tidy3.bench_rest import attach
 

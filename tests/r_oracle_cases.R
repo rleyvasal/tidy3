@@ -484,6 +484,58 @@ result <- switch(
       result
     }
   },
+  factor_levels = {
+    if (!requireNamespace("forcats", quietly=TRUE)) {
+      list(skip=TRUE, reason="forcats is not installed")
+    } else {
+      f <- ordered(c("b", "a", "a", "c", NA), levels=c("b", "a", "c", "unused"))
+      x <- c(1, 2, NA, 3, 4)
+      y <- c(5, 1, 2, 7, 3)
+      ties <- c(2, 2, 2, 1, 1)
+      text <- c("z", "y", NA, "z", "x")
+      payload <- function(f) list(
+        values=list(kind="vector", data=unname(as.list(as.character(f)))),
+        levels=list(kind="vector", data=unname(as.list(levels(f)))),
+        ordered=is.ordered(f)
+      )
+      # fct_reorder2(.na_rm=TRUE) also drops the missing rows from its result;
+      # tidy3 keeps every row, so compare its levels on the original values.
+      all_rows <- function(out) factor(as.character(f), levels=levels(out), ordered=is.ordered(out))
+      grouped <- tibble(g=c(2L, 2L, 1L, 1L, 1L), s=c("q", "p", "r", "p", NA), x=c(1, 2, 3, 1, 2), y=c(1, 2, 3, 4, 5))
+      persistent <- grouped |> group_by(g) |> mutate(
+        inorder=forcats::fct_inorder(s), reorder2=forcats::fct_reorder2(s, x, y, .na_rm=TRUE)
+      )
+      transient <- grouped |> mutate(
+        inorder=forcats::fct_inorder(s), reorder2=forcats::fct_reorder2(s, x, y, .na_rm=TRUE), .by=g
+      )
+      list(
+        drop=payload(forcats::fct_drop(f)),
+        drop_only=payload(forcats::fct_drop(f, only=c("unused", "a", "zz"))),
+        expand=payload(forcats::fct_expand(f, "z", "a", "y")),
+        expand_after=payload(forcats::fct_expand(f, c("z", "y"), after=1)),
+        expand_front=payload(forcats::fct_expand(f, "z", after=0)),
+        inorder=payload(forcats::fct_inorder(f)),
+        inorder_unordered=payload(forcats::fct_inorder(f, ordered=FALSE)),
+        inorder_text=payload(forcats::fct_inorder(text)),
+        value_to_level=payload(forcats::fct_na_value_to_level(f, "(Missing)")),
+        value_to_existing=payload(forcats::fct_na_value_to_level(f, "c")),
+        level_to_value=payload(forcats::fct_na_level_to_value(f, c("a", "zz"))),
+        reorder2=payload(all_rows(forcats::fct_reorder2(f, x, y, .na_rm=TRUE))),
+        reorder2_first=payload(all_rows(forcats::fct_reorder2(f, x, y, forcats::first2, .na_rm=TRUE, .desc=FALSE))),
+        reorder2_ties=payload(forcats::fct_reorder2(f, ties, y)),
+        reorder2_tied_scores=payload(forcats::fct_reorder2(f, ties, c(1, 1, 1, 1, 1))),
+        as_factor=payload(forcats::as_factor(f)),
+        as_factor_text=payload(forcats::as_factor(text)),
+        as_factor_numbers=payload(forcats::as_factor(c(3, 1.5, NA, 10, 3))),
+        as_factor_integers=payload(forcats::as_factor(c(2L, 1L, NA, 2L, 7L))),
+        as_factor_logical=payload(forcats::as_factor(c(TRUE, NA, TRUE, TRUE, TRUE))),
+        persistent_inorder=payload(persistent$inorder)[c("values", "levels")],
+        persistent_reorder2=payload(persistent$reorder2)[c("values", "levels")],
+        transient_inorder=payload(transient$inorder)[c("values", "levels")],
+        transient_reorder2=payload(transient$reorder2)[c("values", "levels")]
+      )
+    }
+  },
   factor_grouped = {
     if (!requireNamespace("forcats", quietly=TRUE)) {
       list(skip=TRUE, reason="forcats is not installed")

@@ -271,6 +271,11 @@ decisions, not the next missing Python data-cleaning helpers.
    sort names by code point.
 3. **Factor value workflows:** `fct_recode`, `fct_collapse`, lumping,
    dropping/expanding levels, and explicit missing levels.
+
+   **Follow-up: added in the working tree.** Recoding, collapsing, and
+   lumping, then `fct_drop`, `fct_expand`, `fct_inorder`, `as_factor`,
+   `fct_reorder2`, `fct_na_value_to_level`, and `fct_na_level_to_value`,
+   checked against forcats 1.0.1.
 4. **Common reporting:** `tabyl`, totals, and percentages. Keep numerical
    counts/percentages usable before adding formatted presentation strings.
 5. **Date/time completeness:** time-of-day parsing, remaining common orders,
