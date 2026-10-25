@@ -342,6 +342,59 @@ result <- switch(
       result
     }
   },
+  date_helpers = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      suppressPackageStartupMessages(library(lubridate))
+      zone <- "America/New_York"
+      instants <- function(x) list(epochs=as.numeric(x), clocks=format(x, "%Y-%m-%d %H:%M:%S %z", tz=tz(x)))
+      d <- as.Date(c("2010-02-01", "2010-02-14", "2010-02-15", "2010-02-16", "2024-02-29",
+                     "2023-12-31", "2024-01-03", "2024-08-16", NA))
+      # Ties (a Wednesday noon, the middle of February 2024, half a second,
+      # half of a 23- or 25-hour day) round up. The first fallback 01:30 is
+      # left out of the hour unit: see calendar_rounding.
+      x <- ymd_hms(c("2024-01-03 12:00:00", "2024-02-15 12:00:00", "2024-07-02 00:00:00.5",
+                     "2024-07-02 23:59:59.4", "2024-03-10 12:00:00", "2024-03-10 12:30:00",
+                     "2024-11-03 12:00:00", "2024-11-03 11:30:00", "2024-03-10 01:30:00",
+                     "2024-11-03T01:30:00-05:00", "2024-08-16 06:00:00", NA_character_), tz=zone)
+      result <- list()
+      for (unit in c("day", "week", "month", "quarter", "year")) {
+        result[[paste("date", unit, sep="_")]] <- as.numeric(round_date(d, unit))
+      }
+      result[["date_week_monday"]] <- as.numeric(round_date(d, "week", week_start=1))
+      for (unit in c("second", "minute", "hour", "day", "week", "month", "quarter", "year")) {
+        result[[paste("time", unit, sep="_")]] <- instants(round_date(x, unit))
+      }
+      result[["time_week_monday"]] <- instants(round_date(x, "week", week_start=1))
+      year <- c(2023, 2023, 2023, 2023, 2023, 2023.7, -5, 0, NA, 2024, 10000, -2023.5, 2024)
+      month <- c(2, 13, 0, 1, 1, 1.9, 1, 1, 1, 2, 1, 1, NA)
+      day <- c(29, 1, 1, 0, 32, 1.5, 1, 1, 1, 29, 1, 1, 1)
+      result[["make_date"]] <- as.numeric(make_date(year, month, day))
+      result[["make_date_defaults"]] <- as.numeric(make_date(c(2020, 2021)))
+      parts <- data.frame(
+        year=c(2023, 2023, 2023, 2023, 2023, 2023, 2023, 2023, 2023, 2023, 2023, NA, 2024),
+        month=c(2, 1, 1, 1, 13, 0, -1, 1, 1, 1, 1, 1, 2),
+        day=c(31, 1, 1, 1, 1, 1, 1, -5, 1, 1, 1, 1, 29),
+        hour=c(0, 25, 0, 23, 0, 0, 0, 0, 1000, 0, 0, 0, 12),
+        min=c(0, 0, -61, 59, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        sec=c(0, 0, 0, 60, 0, 0, 0, 0, 0, -0.5, 1.25, 0, 30)
+      )
+      result[["make_datetime"]] <- with(parts, instants(make_datetime(year, month, day, hour, min, sec)))
+      dst <- data.frame(day=c(10, 3, 10, 10, 9, 3, 3), hour=c(2, 1, 1, 26, 26, 0, 1), min=c(30, 30, 90, 0, 30, 90, 0))
+      dst$month <- c(3, 11, 3, 3, 3, 11, 11)
+      result[["make_datetime_new_york"]] <- with(dst, instants(make_datetime(2024, month, day, hour, min, tz=zone)))
+      result[["make_datetime_kolkata"]] <- instants(make_datetime(2023, 1, c(1, 2), 0, 0, 1, tz="Asia/Kolkata"))
+      span <- c(as.Date("2019-12-25") + 0:1849, as.Date(NA))
+      result[["isoyear"]] <- isoyear(span)
+      result[["isoyear_time"]] <- isoyear(x)
+      result[["leap_number"]] <- leap_year(c(1900, 2000, 2023, 2024, NA, -4, 0, 2000.5, -1.5, 2100))
+      result[["leap_integer"]] <- leap_year(c(1900L, 2000L, 2024L, NA))
+      result[["leap_date"]] <- leap_year(span)
+      result[["leap_time"]] <- leap_year(x)
+      result
+    }
+  },
   datetime_parsers = {
     if (!requireNamespace("lubridate", quietly=TRUE)) {
       list(skip=TRUE, reason="lubridate is not installed")

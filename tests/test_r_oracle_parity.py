@@ -1724,6 +1724,60 @@ def _calendar_rounding():
     return result
 
 
+def _date_helpers():
+    from datetime import date, timedelta
+
+    zone = "America/New_York"
+
+    def epoch_days(frame, expr):
+        return (frame >> mutate(at=expr)).collect()["at"].cast(pl.Int32)
+
+    d = tidy({"x": [date(2010, 2, 1), date(2010, 2, 14), date(2010, 2, 15), date(2010, 2, 16), date(2024, 2, 29),
+                    date(2023, 12, 31), date(2024, 1, 3), date(2024, 8, 16), None]})
+    x = tidy({"x": ["2024-01-03 12:00:00", "2024-02-15 12:00:00", "2024-07-02 00:00:00.5",
+                    "2024-07-02 23:59:59.4", "2024-03-10 12:00:00", "2024-03-10 12:30:00",
+                    "2024-11-03 12:00:00", "2024-11-03 11:30:00", "2024-03-10 01:30:00",
+                    "2024-11-03T01:30:00-05:00", "2024-08-16 06:00:00", None]}) >> mutate(x=tidy3.ymd_hms("x", tz=zone))
+    result = {}
+    for unit in ("day", "week", "month", "quarter", "year"):
+        result[f"date_{unit}"] = epoch_days(d, tidy3.round_date("x", unit))
+    result["date_week_monday"] = epoch_days(d, tidy3.round_date("x", "week", week_start=1))
+    for unit in ("second", "minute", "hour", "day", "week", "month", "quarter", "year"):
+        result[f"time_{unit}"] = _timezone_payload(x >> mutate(at=tidy3.round_date("x", unit)))
+    result["time_week_monday"] = _timezone_payload(x >> mutate(at=tidy3.round_date("x", "week", week_start=1)))
+    parts = tidy(pl.DataFrame({
+        "year": [2023, 2023, 2023, 2023, 2023, 2023.7, -5, 0, None, 2024, 10000, -2023.5, 2024],
+        "month": [2, 13, 0, 1, 1, 1.9, 1, 1, 1, 2, 1, 1, None],
+        "day": [29, 1, 1, 0, 32, 1.5, 1, 1, 1, 29, 1, 1, 1],
+    }, strict=False))
+    result["make_date"] = epoch_days(parts, tidy3.make_date("year", "month", "day"))
+    result["make_date_defaults"] = epoch_days(tidy({"y": [2020, 2021]}), tidy3.make_date("y"))
+    clock = tidy(pl.DataFrame({
+        "year": [2023, 2023, 2023, 2023, 2023, 2023, 2023, 2023, 2023, 2023, 2023, None, 2024],
+        "month": [2, 1, 1, 1, 13, 0, -1, 1, 1, 1, 1, 1, 2],
+        "day": [31, 1, 1, 1, 1, 1, 1, -5, 1, 1, 1, 1, 29],
+        "hour": [0, 25, 0, 23, 0, 0, 0, 0, 1000, 0, 0, 0, 12],
+        "min": [0, 0, -61, 59, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "sec": [0, 0, 0, 60, 0, 0, 0, 0, 0, -0.5, 1.25, 0, 30],
+    }, strict=False))
+    result["make_datetime"] = _timezone_payload(clock >> mutate(at=tidy3.make_datetime("year", "month", "day", "hour", "min", "sec")))
+    dst = tidy({"day": [10, 3, 10, 10, 9, 3, 3], "hour": [2, 1, 1, 26, 26, 0, 1],
+                "min": [30, 30, 90, 0, 30, 90, 0], "month": [3, 11, 3, 3, 3, 11, 11]})
+    result["make_datetime_new_york"] = _timezone_payload(dst >> mutate(at=tidy3.make_datetime(2024, "month", "day", "hour", "min", tz=zone)))
+    kolkata = tidy({"day": [1, 2]}) >> mutate(at=tidy3.make_datetime(2023, 1, "day", 0, 0, 1, tz="Asia/Kolkata"))
+    result["make_datetime_kolkata"] = _timezone_payload(kolkata)
+    span = tidy({"x": [date(2019, 12, 25) + timedelta(days=n) for n in range(1850)] + [None]})
+    result["isoyear"] = (span >> mutate(at=tidy3.isoyear("x"))).collect()["at"]
+    result["isoyear_time"] = (x >> mutate(at=tidy3.isoyear("x"))).collect()["at"]
+    years = tidy({"x": [1900.0, 2000, 2023, 2024, None, -4, 0, 2000.5, -1.5, 2100]})
+    result["leap_number"] = (years >> mutate(at=tidy3.leap_year("x"))).collect()["at"]
+    integers = tidy({"x": [1900, 2000, 2024, None]})
+    result["leap_integer"] = (integers >> mutate(at=tidy3.leap_year("x"))).collect()["at"]
+    result["leap_date"] = (span >> mutate(at=tidy3.leap_year("x"))).collect()["at"]
+    result["leap_time"] = (x >> mutate(at=tidy3.leap_year("x"))).collect()["at"]
+    return result
+
+
 def _datetime_epochs(values: list, parser: Callable, **kwargs):
     out = (tidy({"x": values}) >> mutate(at=parser("x", **kwargs))).collect()["at"]
     return pl.Series([value.timestamp() if value is not None else None for value in out], dtype=pl.Float64)
@@ -2326,6 +2380,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "timezone_resolved_repeats": _timezone_resolved_repeats,
     "formatted_offsets": _formatted_offsets,
     "calendar_rounding": _calendar_rounding,
+    "date_helpers": _date_helpers,
     "datetime_parsers": _datetime_parsers,
     "datetime_truncation": _datetime_truncation,
     "datetime_dst": _datetime_dst,

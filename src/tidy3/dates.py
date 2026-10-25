@@ -17,6 +17,8 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import numbers
+
 import pandas as pd
 import polars as pl
 
@@ -43,7 +45,12 @@ __all__ = [
     "force_tz",
     "floor_date",
     "ceiling_date",
+    "round_date",
     "days_in_month",
+    "make_date",
+    "make_datetime",
+    "isoyear",
+    "leap_year",
     "today",
     "now",
     "excel_numeric_to_date",
@@ -77,6 +84,11 @@ FUNCTIONS = frozenset(
         "days_in_month",
         "add_with_rollback",
         "excel_numeric_to_date",
+        "round_date",
+        "make_date",
+        "make_datetime",
+        "isoyear",
+        "leap_year",
     }
 )
 _UNITS = ("second", "minute", "hour", "day", "week", "month", "quarter", "year")
@@ -342,6 +354,98 @@ def days_in_month(x: Any) -> Expr:
     return _func("days_in_month", _value(x))
 
 
+# ── round_date, make_date, make_datetime, isoyear, leap_year ───────────
+
+
+def round_date(x: Any, unit: str = "day", *, week_start: int = 7) -> Expr:
+    """Round a date to the nearer of :func:`floor_date` and the next boundary.
+
+    Units and ``week_start`` are those of :func:`floor_date`. Distance is
+    elapsed time, and a tie rounds up, as in lubridate: 12:00 rounds to the
+    next day, and 2010-02-15 rounds to March 1 (14 days either way). A date
+    already on a boundary stays there. Across daylight saving the distance
+    is real time, so on a 23-hour day 12:00 rounds down to midnight. The
+    default unit is ``day``, as for :func:`floor_date`; lubridate's default
+    is ``second``.
+    """
+    token = _unit("round_date", unit)
+    start = _week_start(week_start)
+    return _func("round_date", _value(x), unit=token, week_start=start)
+
+
+def _part(function: str, name: str, value: Any, *, whole: bool) -> Any:
+    if isinstance(value, (Expr, pl.Expr)) or value is None:
+        return value
+    if isinstance(value, str):
+        return col(value)
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise TypeError(f"{function}() {name} must be a number, a column name, or a column")
+    if whole and value == value and abs(value) != float("inf") and value != int(value):
+        raise ValueError(f"{function}() {name} must be a whole number, not {value!r}")
+    return value
+
+
+def make_date(year: Any = 1970, month: Any = 1, day: Any = 1) -> Expr:
+    """Build a date from year, month, and day columns or numbers.
+
+    Each part is a column name, a column, or a number, recycled as in
+    lubridate. A date that does not exist (30 February, month 13) or a
+    missing part gives a missing date. Fractions are dropped toward zero,
+    so 2023.7 is year 2023.
+    """
+    parts = zip(("year", "month", "day"), (year, month, day))
+    return _func("make_date", *(_part("make_date", name, value, whole=False) for name, value in parts))
+
+
+def make_datetime(
+    year: Any = 1970,
+    month: Any = 1,
+    day: Any = 1,
+    hour: Any = 0,
+    min: Any = 0,
+    sec: Any = 0,
+    *,
+    tz: str = "UTC",
+) -> Expr:
+    """Build a datetime from its parts, in *tz* (UTC by default).
+
+    As in lubridate, parts outside their range roll over: 31 February is
+    3 March, hour 25 is 01:00 the next day, and second -1 is the previous
+    minute. Only ``sec`` may have a fraction; it keeps microseconds. A
+    missing part gives a missing datetime. A clock skipped by daylight
+    saving lands on the transition (02:30 on a spring-forward day is
+    03:00), and a repeated clock takes the later occurrence. lubridate
+    raises on a fractional year, month, day, hour, or minute; tidy3 raises
+    for a number and gives a missing value for a column.
+    """
+    from tidy3._timezones import validate_zone
+
+    names = ("year", "month", "day", "hour", "min", "sec")
+    values = (year, month, day, hour, min, sec)
+    parts = (
+        _part("make_datetime", name, value, whole=name != "sec")
+        for name, value in zip(names, values)
+    )
+    return _func("make_datetime", *parts, tz=validate_zone(tz))
+
+
+def isoyear(x: Any) -> Expr:
+    """ISO 8601 year, the year that :func:`isoweek` counts in.
+
+    2021-01-01 is in ISO week 53 of 2020, so its ``isoyear`` is 2020.
+    """
+    return _func("isoyear", _value(x))
+
+
+def leap_year(x: Any) -> Expr:
+    """Whether the year of *x* is a leap year.
+
+    *x* holds dates, datetimes, or numeric years. As in lubridate, a
+    fractional year is cut toward zero, so 2000.5 is a leap year.
+    """
+    return _func("leap_year", _value(x))
+
+
 def _zone(tzone: str) -> Any:
     if not isinstance(tzone, str) or not tzone:
         raise ValueError('tzone must be "UTC", "local", or a time zone name')
@@ -454,6 +558,103 @@ def _ceiling_polars(expr: pl.Expr, unit: str, week_start: int) -> pl.Expr:
 
     # The rule depends on the dtype (Date or Datetime), known per batch.
     return expr.map_batches(batch, return_dtype=pl.dtype_of(expr), is_elementwise=True)
+
+
+def _round_polars(expr: pl.Expr, unit: str, week_start: int) -> pl.Expr:
+    # lubridate's tie rule: the later boundary wins when both are as far.
+    below = _floor_polars(expr, unit, week_start)
+    above = below.dt.offset_by(_OFFSET[unit])
+    return pl.when((above - expr) <= (expr - below)).then(above).otherwise(below)
+
+
+def _whole_polars(part: pl.Expr, *, exact: bool = False) -> pl.Expr:
+    """An Int64 part. Fractions go toward zero, or to missing when *exact*."""
+    whole = part.cast(pl.Int64, strict=False)
+    if not exact:
+        return whole
+    return pl.when(part.cast(pl.Float64) == whole.cast(pl.Float64)).then(whole)
+
+
+def _civil_days(year: pl.Expr, month: pl.Expr, day: pl.Expr) -> pl.Expr:
+    """Days since 1970-01-01 for a valid month, in integer arithmetic.
+
+    Howard Hinnant's days_from_civil: no calendar range limit, so years
+    past 9999 work as they do in R.
+    """
+    march = year - (month <= 2).cast(pl.Int64)
+    era = march // 400
+    of_era = march - era * 400
+    of_year = (153 * (month + pl.when(month > 2).then(-3).otherwise(9)) + 2) // 5 + day - 1
+    return era * 146097 + of_era * 365 + of_era // 4 - of_era // 100 + of_year - 719468
+
+
+def _month_days(year: pl.Expr, month: pl.Expr) -> pl.Expr:
+    leap = (year % 4 == 0) & ((year % 100 != 0) | (year % 400 == 0))
+    return (
+        pl.when(month == 2)
+        .then(28 + leap.cast(pl.Int64))
+        .otherwise(30 + (month + month // 8) % 2)
+    )
+
+
+def _make_date_polars(year: pl.Expr, month: pl.Expr, day: pl.Expr) -> pl.Expr:
+    year, month, day = (_whole_polars(part) for part in (year, month, day))
+    valid = month.is_between(1, 12) & (day >= 1) & (day <= _month_days(year, month))
+    days = _civil_days(year, month, day).cast(pl.Int32, strict=False)
+    return pl.when(valid).then(days).cast(pl.Date)
+
+
+_US_PER = {"day": 86_400_000_000, "hour": 3_600_000_000, "min": 60_000_000}
+_MAX_DAYS = 106_751_991  # the Int64 microsecond range
+
+
+def _make_datetime_polars(parts: tuple[pl.Expr, ...], tz: str) -> pl.Expr:
+    year, month, day, hour, minute = (_whole_polars(part, exact=True) for part in parts[:5])
+    # Parts roll over as in lubridate: months into years, then a running
+    # count of days, hours, minutes, and seconds on the local clock.
+    months_ = year * 12 + month - 1
+    days = _civil_days(months_ // 12, months_ % 12 + 1, pl.lit(1)) + day - 1
+    micros = (
+        days * _US_PER["day"]
+        + hour * _US_PER["hour"]
+        + minute * _US_PER["min"]
+        + (parts[5].cast(pl.Float64) * 1e6).round().cast(pl.Int64, strict=False)
+    )
+    clock = pl.when(days.abs() < _MAX_DAYS).then(micros).cast(pl.Datetime("us"))
+    if tz == "UTC":
+        return clock.dt.replace_time_zone("UTC")
+    from tidy3._timezones import transform
+
+    # Skipped clocks land on the transition and repeated clocks take the
+    # later occurrence, as lubridate's make_datetime does. Only those rows
+    # leave Polars.
+    return clock.map_batches(
+        lambda series: transform(series, "force_tz", tzone=tz, roll_dst=("boundary", "post")),
+        return_dtype=pl.Datetime("us", tz),
+        is_elementwise=True,
+    )
+
+
+def _leap_of(value: pl.Expr, dtype: Any) -> pl.Expr:
+    if dtype == pl.Date or isinstance(dtype, pl.Datetime):
+        return value.dt.is_leap_year()
+    if dtype == pl.Null or dtype.is_numeric():
+        year = value.cast(pl.Int64, strict=False)
+        return (year % 4 == 0) & ((year % 100 != 0) | (year % 400 == 0))
+    raise TypeError("leap_year() needs dates, datetimes, or numeric years; parse text first")
+
+
+def _leap_polars(value: pl.Expr) -> pl.Expr:
+    from tidy3.expr import input_dtype
+
+    known = input_dtype(value)
+    if known is not None:
+        return _leap_of(value, known)
+
+    def batch(series: pl.Series) -> pl.Series:
+        return series.to_frame("v").select(_leap_of(pl.col("v"), series.dtype)).to_series()
+
+    return value.map_batches(batch, return_dtype=pl.Boolean, is_elementwise=True)
 
 
 def _period_of(node: Any) -> Period | None:
@@ -876,6 +1077,16 @@ def compile_polars(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> 
         return _ceiling_polars(value, kwargs["unit"], int(kwargs["week_start"]))
     if name == "add_with_rollback":
         return shift_polars(value, kwargs["period"])
+    if name == "round_date":
+        return _round_polars(value, kwargs["unit"], int(kwargs["week_start"]))
+    if name == "make_date":
+        return _make_date_polars(*args)
+    if name == "make_datetime":
+        return _make_datetime_polars(args, kwargs["tz"])
+    if name == "isoyear":
+        return value.dt.iso_year().cast(pl.Int64)
+    if name == "leap_year":
+        return _leap_polars(value)
     raise ValueError(f"unknown date helper: {name}")
 
 
@@ -1079,6 +1290,29 @@ def _ceiling_pandas(
     return stamped.where(same, nudged)
 
 
+_VIA_POLARS = frozenset({"round_date", "make_date", "make_datetime", "isoyear", "leap_year"})
+_PANDAS_DTYPES = {pl.Int64: "Int64", pl.Boolean: "boolean"}
+
+
+def _pandas_via_polars(
+    name: str, args: tuple[Any, ...], kwargs: dict[str, Any], index: pd.Index
+) -> pd.Series:
+    """Run the Polars kernel on pandas values, so both backends agree."""
+    columns = {
+        f"a{position}": pl.from_pandas(
+            arg.reset_index(drop=True) if isinstance(arg, pd.Series)
+            else pd.Series([arg] * len(index), dtype="object" if arg is None else None)
+        )
+        for position, arg in enumerate(args)
+    }
+    frame = pl.DataFrame(columns)
+    result = frame.select(compile_polars(name, tuple(pl.col(key) for key in columns), kwargs)).to_series()
+    if isinstance(result.dtype, pl.Datetime):
+        return result.to_pandas().set_axis(index)
+    dtype = _PANDAS_DTYPES.get(result.dtype, "object")
+    return pd.Series(result.to_list(), index=index, dtype=dtype)
+
+
 def eval_pandas(
     name: str,
     args: tuple[Any, ...],
@@ -1086,6 +1320,8 @@ def eval_pandas(
     df: pd.DataFrame,
 ) -> pd.Series:
     """Evaluate a date helper against a pandas frame."""
+    if name in _VIA_POLARS:
+        return _pandas_via_polars(name, args, kwargs, df.index)
     source = args[0]
     if not isinstance(source, pd.Series):
         source = pd.Series(source, index=df.index)
