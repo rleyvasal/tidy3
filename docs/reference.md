@@ -114,8 +114,8 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 | Output | `collect`, `to_numpy`, `write_parquet`, `write_csv`, `write_ipc`, `write_excel` (pipe steps, functions, and `TidyFrame` methods) |
 | Helpers | `is_na`, `is_nan`, `is_finite`, `is_infinite`, `abs`, `floor`, `ceiling`, `round`, `pmin`, `pmax`, `row_sums`, `row_means` |
 | Convert | `as_numeric`/`as_double`, `as_integer`, `as_character`/`as_string`, `as_logical`, `as_date`, `as_datetime`, `ConversionError` |
-| Parse | `parse_double`, `parse_integer`, `parse_logical`, `parse_date`, `parse_datetime`, `parse_number`, `locale`, `problems`, `stop_for_problems` |
-| Dates | `ymd`, `mdy`, `dmy`, `ym`, `ymd_hms`, `ymd_hm`, `mdy_hms`, `dmy_hms`, `with_tz`, `force_tz`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `round_date`, `days_in_month`, `make_date`, `make_datetime`, `isoyear`, `leap_year`, `months`, `years`, `add_with_rollback`, `today`, `now`, `excel_numeric_to_date` |
+| Parse | `parse_double`, `parse_integer`, `parse_logical`, `parse_date`, `parse_datetime`, `parse_time`, `parse_number`, `locale`, `problems`, `stop_for_problems` |
+| Dates | `ymd`, `mdy`, `dmy`, `ym`, `ymd_hms`, `ymd_hm`, `ymd_h`, `mdy_hms`, `mdy_hm`, `mdy_h`, `dmy_hms`, `dmy_hm`, `dmy_h`, `parse_date_time`, `with_tz`, `force_tz`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `days_in_month`, `months`, `years`, `add_with_rollback`, `today`, `now`, `excel_numeric_to_date` |
 | Factors | `as_factor`, `fct_relevel`, `fct_reorder`, `fct_reorder2` (`last2`, `first2`), `fct_infreq`, `fct_inorder`, `fct_rev`, `fct_recode`, `fct_collapse`, `fct_lump_n`, `fct_lump_prop`, `fct_lump_min`, `fct_drop`, `fct_expand`, `fct_na_value_to_level`, `fct_na_level_to_value` |
 | Cleaning | `clean_names`, `make_clean_names`, `set_names`, `get_dupes`, `remove_empty`, `remove_constant`, `row_to_names`, `find_header`, `compare_df_cols`, `compare_df_cols_same`, `describe_class` |
 | Reporting | `tabyl` (one-variable frequencies and two-variable count tables), `adorn_totals`, `adorn_percentages` |
@@ -530,6 +530,20 @@ datetime. A `%z` offset is converted to UTC and the zone is dropped, as
 `2024-01-01 12:00:00+0200` is 10:00 and `2024-01-01 12:00:00-0500` is 17:00.
 Mixed offsets in one column parse. `ymd_hms` is the timezone-aware parser.
 
+`parse_time` reads times of day as readr does and returns a Polars `Time`
+column. The default format reads `"13:05"`, `"1:05:09"`, `"1:05 pm"`, and
+`"01:05:09.25"`: one or two hour digits, a colon, two minute digits,
+optional seconds (readr's default drops a fraction), and an optional AM/PM
+in any case. A format uses readr's codes: `%H` (0-23), `%I` (1-12) with
+`%p`, `%M` (two digits), `%S` (drops a fraction), `%OS` (keeps it), `%T`
+(the default clock without AM/PM), `%R`, `%AT` (the default), and `%.`,
+`%+`, and `%*` to skip one, one or more, or any non-digits. Date and zone
+codes (`%Y`, `%m`, `%d`, `%b`, `%B`, `%z`, `%Z`) must match but do not change
+the time. A space matches any whitespace, including none. readr keeps
+`"24:00"`, `"25:00"`, and `"13:00 PM"` as durations of a day or more; a time
+of day cannot hold them, so tidy3 records them as problems. Failures use
+the same `problems()` recorder and `strict=True` option as the other parsers.
+
 `problems(frame)` returns a frame with columns `row` (1-based), `column`,
 `original`, and `expected`. As in readr, `row` is the position in the
 column that was parsed: after `filter`, row 1 is the first row that
@@ -577,6 +591,70 @@ numeric offsets). English month names are fixed rather than locale-dependent;
 arbitrary words around a timestamp, timezone abbreviations such as `EST`,
 and truncating the calendar date itself are unsupported. Existing
 `as_datetime` continues to return naive UTC clocks.
+
+`ymd_h`, `mdy_hm`, `mdy_h`, `dmy_hm`, and `dmy_h` complete the family with
+the same rules: `ymd_h("2024-02-29 13")` is 13:00, `"2024-02-29 1 PM"` is
+13:00 too, and `"2024-02-29 24"` is midnight on 1 March. Minutes or seconds
+the order does not name fail. `truncated=1` permits a date alone for the
+`_h` orders; for the `_hm` orders, 1 permits just an hour and 2 a date alone.
+
+`parse_date_time(x, orders)` is lubridate's multi-order parser. An order
+names fields: `y`/`Y` year, `m` month (number or English name), `b`/`B`
+month name, `d` day, `H` hour, `I` hour 1-12 with `p` AM/PM, `M` minute, `S`
+second (with any fraction), `z` an offset (`Z`, `+0530`, `+05:30`, `-05`),
+`a`/`A` a weekday name, and `T`, `R`, `r` for an `H:M:S`, `H:M`, or `H`
+clock with or without AM/PM. lubridate's `O` forms (`OS`, `Om`, `Op`, `Oz`)
+read the same as the plain letters. Separators and `%` in an order are
+ignored, so `"ymd HMS"`, `"Ymd_HMS"`, and `"%Y-%m-%d %H:%M:%S"` are one
+order. As in lubridate, the text may use any non-digits between fields, or
+none (`"20240229123456"`), and words before or after the fields are
+ignored (`"Thursday 2024-02-29"`), but a letter right before the first
+field is not (`"x2024-02-29"` fails). A final AM/PM may be missing when
+other values of the column have one.
+
+With several orders, each value takes the first that reads it in
+lubridate's ranking, not in the listed order: formats with more fields
+first, then the format that reads more of the column, then the listed
+order. A format is an order with the text's own separators, so
+`"01/02/2024"` and `"13-01-2024"` count apart. lubridate ranks on a sample
+of a column of 100 values or more (rows 1, 2, 3, 5, 7, and so on up the
+primes), retrains on the values that sample did not read, and stops when a
+round reads nothing; tidy3 does the same. The result is a datetime in `tz`
+(UTC by default). Text with an offset keeps its instant; other text is a
+clock in `tz`, with the daylight saving rules of `ymd_hms`. `truncated=2`
+also tries each order without its last one or two fields. `exact=True`
+takes the orders as `strptime` formats and uses the first that reads each
+value.
+
+```python
+eggs = tidy({
+    "nest": ["N1A1", "N1A2", "N2A1", "N2A2"],
+    "laid": ["2007-11-11", "11/16/2007 2:05 PM", "16 Nov 2007", "bad"],
+    "check": ["13:05", "1:05 pm", "07:30:15", "25:00"],
+})
+logged = eggs >> mutate(
+    laid=parse_date_time("laid", ["ymd", "mdy IMp", "dbY"]),
+    check=parse_time("check"),
+)
+logged
+```
+
+```python
+problems(logged)
+```
+
+Differences from lubridate: two-digit years need `cutoff` (lubridate
+reads them with a cutoff of 68, so pass `cutoff=68` for its result), and
+orders must include a year (lubridate returns year 0 for an order such as
+`"HMS"`; use `parse_time`). Seconds from 61 to 69, which lubridate rolls into
+the next minute, fail as they do in `ymd_hms`. Negative `truncated`,
+`select_formats`, `train=False`, `drop`, `locale`, and the order letters `j`,
+`q`, `U`, `u`, `W`, and `w` are not supported; an unsupported letter raises
+when the expression is built. `exact=True` formats use Python's `strptime`
+codes, as `parse_date` does: write `%S.%f` where lubridate takes `%OS`. lubridate
+ranks each guessed format by small bonuses for four-digit years and month
+names; tidy3 counts fields only, which changes the choice only between
+formats with equal fields and equal counts.
 
 `with_tz(x, tzone="UTC")` displays the same instant in another zone.
 `force_tz(x, tzone="UTC")` keeps the local clock fields and interprets them
@@ -646,53 +724,6 @@ transitions. Both occurrences of a repeated hour stay distinct. Flooring
 the fraction. Ceiling the first 01:30 of an autumn fallback to an hour
 lands on the second 01:00, the next hour. lubridate's `ceiling_date` lands
 on 02:00 for that one hour; the other units match it.
-
-```python
-cars >> mutate(
-    built=make_date(2000 + col("cyl"), col("cyl"), 31),
-    leap=leap_year(2000 + col("cyl")),
-    tested=make_datetime(2024, 3, 10, col("cyl") - 2, 30, tz="America/New_York"),
-    month=round_date(make_date(2024, 2, col("cyl") * 2), "month"),
-    iso=isoyear(make_date(2016 + col("cyl"), 1, 1)),
-) >> select("model", "cyl", "built", "leap", "tested", "month", "iso") >> head(3)
-```
-
-`round_date` rounds to the nearer of `floor_date` and the next boundary,
-with the same units and `week_start`. Distance is elapsed time, and a tie
-goes to the later boundary, as in lubridate: Wednesday noon rounds to the
-next Sunday, and 15 February 2010 rounds to 1 March (14 days either way).
-On the 23-hour spring-forward day in New York, 12:00 is 11 hours after
-midnight and 12 hours before the next one, so it rounds down; 12:30 is a
-tie and rounds up. A date on a boundary stays there, unlike `ceiling_date`.
-Two choices differ from lubridate. The default unit is `day`, as for
-`floor_date`; lubridate's is `second`. The first 01:30 of an autumn
-fallback is a tie between 01:00 EDT and the next hour, 01:00 EST, so it
-rounds up to 01:00 EST; lubridate takes 02:00 EST as the next hour (see
-`ceiling_date` above) and rounds down to 01:00 EDT. Sub-day units leave a
-date unchanged, where lubridate returns a datetime.
-
-`make_date(year, month, day)` and `make_datetime(year, month, day, hour,
-min, sec, tz="UTC")` build values from columns (a name or `col()`) and
-numbers, with lubridate's defaults of 1970-01-01 00:00:00. A missing part
-gives a missing result. `make_date` returns missing for a date that does
-not exist (30 February, month 13, day 0) and drops fractions toward zero,
-so year 2023.7 is 2023. `make_datetime` rolls out-of-range parts over
-instead, as lubridate does: 31 February 2023 is 3 March, hour 25 is 01:00
-the next day, minute -61 is 22:59 the previous day, and month 13 is January
-of the next year. `sec` keeps fractions to the microsecond. In `tz`, a clock
-that daylight saving skips lands on the transition (02:30 on 10 March 2024
-in New York is 03:00 EDT), and a repeated clock takes the later occurrence
-(01:30 on 3 November 2024 is EST). lubridate raises on a fractional year,
-month, day, hour, or minute; tidy3 raises for a number and returns missing
-for a value in a column. An infinite `sec` is missing, where lubridate
-returns an infinite time. Both run in Polars without reading the rows; a
-`tz` other than UTC resolves skipped and repeated clocks one batch at a
-time.
-
-`isoyear` is the ISO 8601 year that `isoweek` counts in: 1 January 2021 is
-in week 53 of 2020. `leap_year` takes dates, datetimes, or numeric years.
-As in lubridate, it cuts a fractional year toward zero (2000.5 is a leap
-year), and 1900 is not a leap year while 2000 is.
 
 `date + months(1)` and `add_with_rollback` roll an impossible day back to
 the last real day of the destination month. 31 January 2010 plus one month

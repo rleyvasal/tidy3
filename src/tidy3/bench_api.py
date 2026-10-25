@@ -135,6 +135,14 @@ def work(n: int) -> pl.DataFrame:
         at=pl.col("when").str.to_datetime("%Y-%m-%d %H:%M:%S", time_unit="us"),
         items=pl.int_ranges(0, (pl.col("id") % 3) + 1),
         rec=pl.struct(a=pl.col("id") % 5, b=pl.col("species")),
+    ).with_columns(
+        # Hour and hour-minute stamps, and clock times, for the date-time parsers.
+        ymd_h=pl.col("when").str.slice(0, 13),
+        mdy_hm=pl.col("mdy_when").str.slice(0, 16),
+        mdy_h=pl.col("mdy_when").str.slice(0, 13),
+        dmy_hm=pl.col("dmy_when").str.slice(0, 16),
+        dmy_h=pl.col("dmy_when").str.slice(0, 13),
+        clock=pl.col("when").str.slice(11, 8),
     )
 
 
@@ -852,6 +860,26 @@ def _cases() -> list[Case]:
     col("ymd_hms", "convert", ["ymd_hms"], lambda t, df: t.ymd_hms("when"), lambda df: _clock("%Y-%m-%d %H:%M:%S"))
     col("ymd_hm", "convert", ["ymd_hm"], lambda t, df: t.ymd_hm("hm"), lambda df: pl.col("hm").str.to_datetime("%Y-%m-%d %H:%M", time_unit="us").dt.replace_time_zone("UTC", ambiguous="latest", non_existent="null"))
     col("mdy_hms", "convert", ["mdy_hms"], lambda t, df: t.mdy_hms("mdy_when"), lambda df: pl.col("mdy_when").str.to_datetime("%m/%d/%Y %H:%M:%S", time_unit="us").dt.replace_time_zone("UTC", ambiguous="latest", non_existent="null"))
+    def _zoned(column: str, fmt: str):
+        return (
+            pl.col(column).str.to_datetime(fmt, time_unit="us")
+            .dt.replace_time_zone("UTC", ambiguous="latest", non_existent="null")
+        )
+
+    def _hours(column: str, fmt: str):
+        # Polars needs minutes with an hour, so the baseline appends them.
+        return (
+            (pl.col(column) + ":00").str.to_datetime(fmt + ":%M", time_unit="us")
+            .dt.replace_time_zone("UTC", ambiguous="latest", non_existent="null")
+        )
+
+    col("ymd_h", "convert", ["ymd_h"], lambda t, df: t.ymd_h("ymd_h"), lambda df: _hours("ymd_h", "%Y-%m-%d %H"))
+    col("mdy_hm", "convert", ["mdy_hm"], lambda t, df: t.mdy_hm("mdy_hm"), lambda df: _zoned("mdy_hm", "%m/%d/%Y %H:%M"))
+    col("mdy_h", "convert", ["mdy_h"], lambda t, df: t.mdy_h("mdy_h"), lambda df: _hours("mdy_h", "%m/%d/%Y %H"))
+    col("dmy_hm", "convert", ["dmy_hm"], lambda t, df: t.dmy_hm("dmy_hm"), lambda df: _zoned("dmy_hm", "%d/%m/%Y %H:%M"))
+    col("dmy_h", "convert", ["dmy_h"], lambda t, df: t.dmy_h("dmy_h"), lambda df: _hours("dmy_h", "%d/%m/%Y %H"))
+    col("parse_date_time", "convert", ["parse_date_time"], lambda t, df: t.parse_date_time("when", ["ymd HMS", "dmy HMS"]), lambda df: _clock("%Y-%m-%d %H:%M:%S"))
+    col("parse_time", "convert", ["parse_time"], lambda t, df: t.parse_time("clock"), lambda df: pl.col("clock").str.to_time("%H:%M:%S"))
     col("dmy_hms", "convert", ["dmy_hms"], lambda t, df: t.dmy_hms("dmy_when"), lambda df: pl.col("dmy_when").str.to_datetime("%d/%m/%Y %H:%M:%S", time_unit="us").dt.replace_time_zone("UTC", ambiguous="latest", non_existent="null"))
 
     def tidy_problems(df, extra=None):

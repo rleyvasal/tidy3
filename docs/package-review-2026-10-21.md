@@ -287,9 +287,16 @@ decisions, not the next missing Python data-cleaning helpers.
    `round_date`, constructors, then a deliberate calendar-period versus
    elapsed-duration and interval design.
 
-   **Follow-up: rounding and constructors added in the working tree.**
-   `round_date`, `make_date`, `make_datetime`, `isoyear`, and `leap_year`,
-   checked against lubridate 1.9.5, with the differences in the reference.
+   **Follow-up (parsing): added in the working tree.** `ymd_h`, `mdy_hm`,
+   `mdy_h`, `dmy_hm`, and `dmy_h` complete the order family. `parse_date_time`
+   reads several orders with lubridate's training: formats ranked by field
+   count and by how many values each reads, on a prime-row sample for long
+   columns. It supports `tz`, `truncated`, and `exact`. `parse_time` follows
+   readr's default and explicit formats and returns a Polars `Time`, so
+   readr's durations of a day or more are recorded as problems. All are
+   checked against lubridate 1.9.5 and readr 2.2.0. Two-digit years still
+   need `cutoff`, orders need a year, and negative truncation, custom
+   `select_formats`, and week or day-of-year letters remain unsupported.
 6. **Remaining portability:** string case/ranking helpers, quantiles,
    advanced pivot arguments, and typed list-column mapping. Use Python's
    existing collection tools where a new purrr wrapper adds little value.
