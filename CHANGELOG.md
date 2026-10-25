@@ -4,7 +4,9 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.9.0 — 2026-10-25
+
+Frequency tables, totals, and the everyday forcats value and level helpers, computed in Polars on text columns.
 
 ### Added
 
