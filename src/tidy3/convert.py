@@ -44,10 +44,17 @@ __all__ = [
     "parse_date",
     "parse_datetime",
     "parse_number",
+    "parse_time",
+    "parse_date_time",
     "ymd_hms",
     "ymd_hm",
+    "ymd_h",
     "mdy_hms",
+    "mdy_hm",
+    "mdy_h",
     "dmy_hms",
+    "dmy_hm",
+    "dmy_h",
     "problems",
     "stop_for_problems",
 ]
@@ -82,8 +89,15 @@ _SPECS: dict[str, tuple[str, bool, str, str]] = {
     "ym": ("ym", False, "date", "year-month dates"),
     "ymd_hms": ("ymd_hms", False, "datetime", "year-month-day datetimes"),
     "ymd_hm": ("ymd_hm", False, "datetime", "year-month-day datetimes"),
+    "ymd_h": ("ymd_h", False, "datetime", "year-month-day datetimes"),
     "mdy_hms": ("mdy_hms", False, "datetime", "month-day-year datetimes"),
+    "mdy_hm": ("mdy_hm", False, "datetime", "month-day-year datetimes"),
+    "mdy_h": ("mdy_h", False, "datetime", "month-day-year datetimes"),
     "dmy_hms": ("dmy_hms", False, "datetime", "day-month-year datetimes"),
+    "dmy_hm": ("dmy_hm", False, "datetime", "day-month-year datetimes"),
+    "dmy_h": ("dmy_h", False, "datetime", "day-month-year datetimes"),
+    "parse_date_time": ("parse_date_time", False, "datetime", "datetimes in the given orders"),
+    "parse_time": ("parse_time", False, "time", "times of day"),
 }
 
 _DTYPES = {
@@ -99,6 +113,7 @@ _DTYPES = {
     "parse_date": pl.Date,
     "parse_datetime": pl.Datetime("us"),
     "parse_number": pl.Float64,
+    "parse_time": pl.Time,
     "ymd": pl.Date,
     "mdy": pl.Date,
     "dmy": pl.Date,
@@ -124,7 +139,11 @@ _MONTH_NAMES = (
     "july", "august", "september", "october", "november", "december",
 )
 _ORDINALS = frozenset({"st", "nd", "rd", "th"})
-_DATETIME_ORDERS = frozenset({"ymd_hms", "ymd_hm", "mdy_hms", "dmy_hms"})
+_DATETIME_ORDERS = frozenset(
+    f"{order}_{clock}" for order in ("ymd", "mdy", "dmy") for clock in ("hms", "hm", "h")
+)
+# Kinds whose result is a datetime in the caller's tz.
+_ZONED_KINDS = _DATETIME_ORDERS | {"parse_date_time"}
 
 
 class _Bad(Exception):
@@ -681,6 +700,11 @@ def _ordered_datetime(
                     sign = 1 if offset[0] == "+" else -1
                     source_zone = timezone(sign * timedelta(hours=hours, minutes=minutes))
                 parsed = parsed.replace(tzinfo=source_zone)
+    return _in_zone(parsed, zone)
+
+
+def _in_zone(parsed: datetime, zone: ZoneInfo) -> datetime:
+    """*parsed* in *zone*: an instant converts, a naive clock is that zone's clock."""
     if parsed.tzinfo is not None:
         return parsed.astimezone(zone)
     # Choose the later occurrence of a repeated clock time. A UTC round trip
@@ -689,6 +713,396 @@ def _ordered_datetime(
     if local.astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None) != parsed:
         raise _Bad()
     return local
+
+
+# ── parse_date_time orders ──────────────────────────────────────────────
+# lubridate reads an order such as "ymd HMS" with one regex: the fields in
+# that order, any non-digits between them, and any non-digits before and
+# after. Each field has a flexible form ("2024-2-9 1:02:03") and a
+# fixed-width form for compact digits ("20240209010203"). The text outside
+# the fields, with each field replaced by its code, is the format lubridate
+# guesses ("%Y-%m-%d %H:%M:%S"); formats are what its training ranks.
+
+_WEEKDAY_NAMES = (
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+)
+
+
+def _words(names: tuple[str, ...], *extra: str) -> str:
+    """A regex for *names* and *extra* spellings as whole words."""
+    # Longest first, so "september" is not read as "sep" plus text.
+    return "(?:" + "|".join(sorted({*names, *extra}, key=len, reverse=True)) + r")(?![a-z])"
+
+
+_MONTH_WORD = _words(_MONTH_NAMES, "sept", *(name[:3] for name in _MONTH_NAMES))
+_FULL_MONTH = _words(_MONTH_NAMES)
+_WEEKDAY_WORD = _words(_WEEKDAY_NAMES, *(name[:3] for name in _WEEKDAY_NAMES))
+_FULL_WEEKDAY = _words(_WEEKDAY_NAMES)
+# letter: (flexible, fixed-width), lubridate's own field patterns.
+_ORDER_FIELDS: dict[str, tuple[str, str]] = {
+    "Y": (r"[0-9]{4}(?![0-9])", r"[0-9]{4}"),
+    "y": (r"(?:[0-9]{4}|[0-9]{2})(?![0-9])", r"[0-9]{4}|[0-9]{2}"),
+    "m": (rf"1[0-2]|0?[1-9](?![0-9])|{_MONTH_WORD}", rf"1[0-2]|0[1-9]|{_MONTH_WORD}"),
+    "b": (_MONTH_WORD, _MONTH_WORD),
+    "B": (_FULL_MONTH, _FULL_MONTH),
+    "d": (r"(?:[012]?[1-9]|3[01]|[12]0)(?![0-9])", r"[012][1-9]|3[01]|[12]0"),
+    "H": (r"(?:2[0-4]|[01]?[0-9])(?![0-9])", r"2[0-4]|[01][0-9]"),
+    "I": (r"(?:1[0-2]|0?[1-9])(?![0-9])", r"1[0-2]|0[1-9]"),
+    "M": (r"[0-5]?[0-9](?![0-9])", r"[0-5][0-9]"),
+    "S": (r"(?:[0-5]?[0-9]\.[0-9]+|[0-6]?[0-9])(?![0-9])", r"[0-5][0-9]\.[0-9]*|[0-6][0-9]"),
+    "p": (r"(?:am|pm)(?![a-z])", r"(?:am|pm)(?![a-z])"),
+    "z": (
+        r"z(?![a-z])|[-+][0-9]{4}(?![0-9])|[-+][0-9]{2}:[0-9]{2}(?![0-9])|[-+][0-9]{2}(?![0-9])",
+        r"z(?![a-z])|[-+][0-9]{4}|[-+][0-9]{2}:[0-9]{2}|[-+][0-9]{2}",
+    ),
+    "a": (_WEEKDAY_WORD, _WEEKDAY_WORD),
+    "A": (_FULL_WEEKDAY, _FULL_WEEKDAY),
+}
+_LETTER_ALIASES = {"h": "H", "s": "S"}
+# After O: OS, Om, Op, Ob, OB, and the offset forms Oz, OO, Oo, Ou.
+_O_LETTERS = {"S": "S", "m": "m", "p": "p", "b": "b", "B": "B", "z": "z", "O": "z", "o": "z", "u": "z"}
+# T, R, and r are clocks with or without AM/PM.
+_CLOCK_LETTERS = {
+    "T": (("I", "M", "S", "p"), ("H", "M", "S")),
+    "R": (("I", "M", "p"), ("H", "M")),
+    "r": (("I", "p"), ("H",)),
+}
+_DATE_FIELDS = frozenset("Yymd")
+
+
+def _order_letters(order: str) -> list[str]:
+    """User-level tokens of *order*: letters, with O pairs joined."""
+    if not isinstance(order, str):
+        raise TypeError("parse_date_time() orders must be strings")
+    letters = re.sub("[^A-Za-z]", "", order)
+    tokens: list[str] = []
+    index = 0
+    while index < len(letters):
+        letter = letters[index]
+        if letter == "O" and index + 1 < len(letters) and letters[index + 1] in _O_LETTERS:
+            tokens.append(_O_LETTERS[letters[index + 1]])
+            index += 2
+            continue
+        letter = _LETTER_ALIASES.get(letter, letter)
+        if letter not in _ORDER_FIELDS and letter not in _CLOCK_LETTERS:
+            raise ValueError(
+                f"parse_date_time() does not support the order letter {letter!r} in {order!r}; "
+                "supported: y Y m b B d H I M S p z a A T R r"
+            )
+        tokens.append(letter)
+        index += 1
+    if not tokens:
+        raise ValueError(f"parse_date_time() order {order!r} has no fields")
+    if not {"y", "Y"} & set(tokens):
+        raise ValueError(
+            f"parse_date_time() order {order!r} has no year; use parse_time() for times of day"
+        )
+    return tokens
+
+
+def _clock_variants(tokens: list[str]) -> list[tuple[str, ...]]:
+    variants: list[tuple[str, ...]] = [()]
+    for token in tokens:
+        choices = _CLOCK_LETTERS.get(token, ((token,),))
+        variants = [variant + choice for variant in variants for choice in choices]
+    return variants
+
+
+def _expand_orders(orders: tuple[str, ...], truncated: int) -> tuple[tuple[str, ...], ...]:
+    """Field sequences to try, in lubridate's order: orders, then their truncations."""
+    letters = [_order_letters(order) for order in orders]
+    expanded: list[tuple[str, ...]] = []
+    for tokens in letters:
+        expanded.extend(_clock_variants(tokens))
+    for tokens in letters:
+        for length in range(max(1, len(tokens) - truncated), len(tokens)):
+            if {"y", "Y"} & set(tokens[:length]):
+                expanded.extend(_clock_variants(tokens[:length]))
+    return tuple(dict.fromkeys(expanded))
+
+
+@lru_cache(maxsize=None)
+def _order_regex(fields: tuple[str, ...], tail: str = "[^0-9]*") -> re.Pattern:
+    gap = "[^0-9]*?"
+    flexible = gap.join(f"(?P<f{i}>{_ORDER_FIELDS[f][0]})" for i, f in enumerate(fields))
+    fixed = gap.join(f"(?P<e{i}>{_ORDER_FIELDS[f][1]})" for i, f in enumerate(fields))
+    return re.compile(rf"[^0-9]*?\b(?:{flexible}|{fixed}){tail}\Z", re.IGNORECASE)
+
+
+def _field_code(field: str, piece: str) -> str:
+    if field in "Yy":
+        return "%Y" if len(piece) == 4 else "%y"
+    if field == "m":
+        return "%m" if piece[0].isdigit() else "%b"
+    if field == "S":
+        return "%OS" if "." in piece else "%S"
+    return {"z": "%z", "a": "%a", "A": "%A"}.get(field, "%" + field)
+
+
+def _order_candidate(
+    text: str, fields: tuple[str, ...], cutoff: int | None, zone: ZoneInfo
+) -> tuple[str, datetime | None, bool] | None:
+    """``(format, value, own)`` when *text* matches *fields*, else None.
+
+    The value is None when the text has the shape but no real datetime
+    (31 February, a two-digit year without a cutoff, a skipped DST clock).
+    lubridate's ``%Op`` may be missing at the end of the text, so a final
+    ``p`` matches text that stops (or has only spaces) where AM/PM would be.
+    Such text reads with a format other text guessed but guesses none of its
+    own (*own* is False), and the format ends before the AM/PM.
+    """
+    match = _order_regex(fields).match(text)
+    own = True
+    if match is None and fields[-1] == "p" and len(fields) > 1:
+        fields, own = fields[:-1], False
+        match = _order_regex(fields, r"\s*").match(text)
+    if match is None:
+        return None
+    side = "f" if match.group("f0") is not None else "e"
+    skeleton: list[str] = []
+    values: dict[str, str] = {}
+    last = 0
+    for index, field in enumerate(fields):
+        start, end = match.span(f"{side}{index}")
+        piece = text[start:end]
+        if field != "p" or index + 1 < len(fields):
+            skeleton += [text[last:start], _field_code(field, piece)]
+        values[field] = piece
+        last = end
+    if fields[-1] != "p" and own:
+        skeleton.append(text[last:])
+    form = "".join(skeleton)
+    try:
+        return form, _order_value(values, cutoff, zone), own
+    except (_Bad, ValueError, OverflowError):
+        return form, None, own
+
+
+def _order_value(values: dict[str, str], cutoff: int | None, zone: ZoneInfo) -> datetime:
+    year = _expand_year(values.get("Y") or values["y"], cutoff)
+    month_text = values.get("m") or values.get("b") or values.get("B") or "1"
+    month = int(month_text) if month_text.isdigit() else _month_number(month_text)
+    calendar = datetime(year, month, int(values.get("d", "1")))
+    hour = int(values.get("H") or values.get("I") or "0")
+    if "p" in values and hour <= 12:
+        hour = hour % 12 + (12 if values["p"].lower() == "pm" else 0)
+    second_text = values.get("S", "0")
+    second, _, fraction = second_text.partition(".")
+    seconds, micro = int(second), int((fraction + "000000")[:6])
+    if seconds > 60 or (seconds == 60 and micro):
+        raise _Bad()
+    parsed = calendar + timedelta(
+        hours=hour, minutes=int(values.get("M", "0")), seconds=seconds, microseconds=micro
+    )
+    offset = values.get("z")
+    if offset:
+        if offset.upper() == "Z":
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        else:
+            digits = offset[1:].replace(":", "")
+            hours, minutes = int(digits[:2]), int(digits[2:] or "0")
+            if hours > 23 or minutes > 59:
+                raise _Bad()
+            sign = 1 if offset[0] == "+" else -1
+            parsed = parsed.replace(tzinfo=timezone(sign * timedelta(hours=hours, minutes=minutes)))
+    return _in_zone(parsed, zone)
+
+
+def _exact_value(text: str, formats: tuple[str, ...], cutoff: int | None, zone: ZoneInfo) -> datetime:
+    """The first of *formats* (strptime codes) that reads *text*, as lubridate's ``exact=TRUE``."""
+    token = text.strip()
+    for fmt in formats:
+        two_digit = "%y" in fmt and "%Y" not in fmt
+        if two_digit and cutoff is None:
+            continue
+        try:
+            parsed = datetime.strptime(token, fmt)
+        except ValueError:
+            continue
+        if two_digit:
+            year = parsed.year % 100
+            parsed = parsed.replace(year=(2000 if year <= cutoff else 1900) + year)
+        try:
+            return _in_zone(parsed, zone)
+        except (_Bad, OverflowError):
+            continue
+    raise _Bad()
+
+
+# ── parse_time ──────────────────────────────────────────────────────────
+# readr reads a time format left to right with no backtracking. The empty
+# format is its default, "%AT": hours of one or two digits, a colon, two
+# minute digits, optional seconds (a colon is optional before them), and an
+# optional AM/PM. %S and the default drop a fraction of a second; %OS keeps it.
+
+# code: (step, argument). Digits take (fewest, most); skips take how many
+# non-digits they need: exactly one (1), any (0), or one or more (-1).
+_TIME_ITEMS = {
+    "H": ("hour", 23), "I": ("hour12", 12), "M": ("minute", None), "S": ("second", False),
+    "p": ("ampm", None), "Y": ("digits", (4, 4)), "y": ("digits", (2, 2)), "m": ("digits", (1, 2)),
+    "d": ("digits", (1, 2)), "e": ("digits", (1, 2)), "b": ("month", 3), "B": ("month", 9),
+    "z": ("offset", None), "Z": ("zone", None), ".": ("skip", 1), "*": ("skip", 0),
+    "+": ("skip", -1),
+}
+_TIME_SHORTCUTS = {"R": "%H:%M", "D": "%m/%d/%y", "F": "%Y-%m-%d"}
+
+
+@lru_cache(maxsize=None)
+def _time_items(fmt: str) -> tuple[tuple[str, Any], ...]:
+    """*fmt* as parse steps; the empty format and %AT are readr's default."""
+    if not isinstance(fmt, str):
+        raise TypeError("parse_time() format must be a string")
+    if fmt == "":
+        return (("auto", True),)
+    items: list[tuple[str, Any]] = []
+    index = 0
+    while index < len(fmt):
+        char = fmt[index]
+        if char != "%":
+            items.append(("space", None) if char.isspace() else ("literal", char))
+            index += 1
+            continue
+        code = fmt[index + 1:index + 3]
+        if code in {"AT", "OS"}:
+            items.append(("auto", True) if code == "AT" else ("second", True))
+            index += 3
+            continue
+        code = code[:1]
+        if code == "T":  # readr's %T is the default clock without AM/PM
+            items.append(("auto", False))
+        elif code in _TIME_SHORTCUTS:
+            items.extend(_time_items(_TIME_SHORTCUTS[code]))
+        elif code == "%":
+            items.append(("literal", "%"))
+        elif code in _TIME_ITEMS:
+            items.append(_TIME_ITEMS[code])
+        else:
+            raise ValueError(f"parse_time() does not support %{code} in {fmt!r}")
+        index += 2
+    return tuple(items)
+
+
+_SECONDS_TEXT = re.compile(r"([0-9]*)(?:\.([0-9]*))?")
+_OFFSET_TEXT = re.compile(r"Z|[-+][0-9]{2}(?::?[0-9]{2})?")
+_ZONE_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9_/+-]*")
+
+
+def _seconds_text(text: str, at: int) -> re.Match | None:
+    """Seconds as readr reads a number there: ``5``, ``05.25``, or ``.5``."""
+    match = _SECONDS_TEXT.match(text, at)
+    if match is None or not (match.group(1) or match.group(2)):
+        return None
+    return match
+
+
+def _time_of_day(text: str, items: tuple[tuple[str, Any], ...]) -> time:
+    text = text.strip()
+    hour = minute = second = micro = 0
+    ampm = None
+    at = 0
+
+    def digits(low: int, high: int) -> int:
+        nonlocal at
+        end = at
+        while end < len(text) and end - at < high and text[end].isascii() and text[end].isdigit():
+            end += 1
+        if end - at < low:
+            raise _Bad()
+        value, at = int(text[at:end]), end
+        return value
+
+    def seconds(keep: bool) -> tuple[int, int]:
+        nonlocal at
+        match = _seconds_text(text, at)
+        if match is None:
+            raise _Bad()
+        at = match.end()
+        fraction = (match.group(2) or "") if keep else ""
+        return int(match.group(1) or "0"), int((fraction + "000000")[:6])
+
+    def meridiem() -> str:
+        nonlocal at
+        word = text[at:at + 2].upper()
+        if word not in {"AM", "PM"}:
+            raise _Bad()
+        at += 2
+        return word
+
+    for kind, arg in items:
+        if kind == "auto":
+            hour = digits(1, 2)
+            if text[at:at + 1] != ":":
+                raise _Bad()
+            at += 1
+            minute = digits(2, 2)
+            if text[at:at + 1] == ":":
+                at += 1
+            if _seconds_text(text, at):
+                second, micro = seconds(False)
+            if arg:
+                while text[at:at + 1].isspace():
+                    at += 1
+                if text[at:at + 2].upper() in {"AM", "PM"}:
+                    ampm = meridiem()
+        elif kind == "hour":
+            hour = digits(1, 2)
+            if hour > arg:
+                raise _Bad()
+        elif kind == "hour12":
+            hour = digits(1, 2)
+            if not 1 <= hour <= 12:
+                raise _Bad()
+        elif kind == "minute":
+            minute = digits(2, 2)
+        elif kind == "second":
+            second, micro = seconds(arg)
+        elif kind == "ampm":
+            ampm = meridiem()
+        elif kind == "digits":
+            digits(*arg)
+        elif kind == "month":
+            match = re.match(r"[A-Za-z]+", text[at:])
+            word = match.group().lower() if match else ""
+            names = {name[:3] for name in _MONTH_NAMES} if arg == 3 else set(_MONTH_NAMES)
+            if word not in names:
+                raise _Bad()
+            at += len(word)
+        elif kind == "offset":
+            match = _OFFSET_TEXT.match(text, at)
+            if match is None:
+                raise _Bad()
+            at = match.end()
+        elif kind == "zone":
+            match = _ZONE_TEXT.match(text, at)
+            if match is None:
+                raise _Bad()
+            at = match.end()
+        elif kind == "skip":
+            end = at
+            while end < len(text) and not text[end].isdigit() and (arg != 1 or end == at):
+                end += 1
+            if end - at < (1 if arg else 0):
+                raise _Bad()
+            at = end
+        elif kind == "space":
+            while text[at:at + 1].isspace():
+                at += 1
+        elif text[at:at + 1] == arg:
+            at += 1
+        else:
+            raise _Bad()
+    if at != len(text):
+        raise _Bad()
+    if ampm == "PM" and hour != 12:
+        hour += 12
+    elif ampm == "AM" and hour == 12:
+        hour = 0
+    if minute > 59 or second >= 60:
+        raise _Bad()
+    # readr allows 24:00 and later (an hms past one day); a time of day does not.
+    if hour > 23:
+        raise _Bad()
+    return time(hour, minute, second, micro)
 
 
 def _convert_one(
@@ -772,6 +1186,12 @@ def _convert_one(
             if not isinstance(value, str):
                 raise _Bad()
             return _with_format(value, fmt or "", cutoff, as_date=False), False
+        if kind == "parse_time":
+            if isinstance(value, time):
+                return value, False
+            if not isinstance(value, str):
+                raise _Bad()
+            return _time_of_day(value, _time_items(fmt or "")), False
         if kind in _ORDERS:
             return _ordered_date(value, kind, cutoff), False
         if kind in _DATETIME_ORDERS:
@@ -799,6 +1219,8 @@ def convert_batch(
     truncated: int = 0,
     true_text: str = "true",
     false_text: str = "false",
+    orders: tuple[str, ...] = (),
+    exact: bool = False,
 ) -> tuple[list[Any], list[dict[str, Any]]]:
     """Convert *values*. Failures become ``None`` and a problem row.
 
@@ -808,6 +1230,15 @@ def convert_batch(
     """
     converted: list[Any] = []
     problems: list[dict[str, Any]] = []
+    if kind == "parse_date_time":
+        # Orders are ranked over the whole column, so they run as one batch.
+        options = {"tz": tz, "truncated": truncated, "cutoff": cutoff, "orders": orders, "exact": exact}
+        out, failed = _date_time_orders(_orders_series(values), options)
+        rows = failed.arg_true().to_list()
+        return out.to_list(), [
+            {"row": row + 1, "column": column, "original": _original(values[row]), "expected": expected}
+            for row in rows
+        ]
     for index, value in enumerate(values, start=1):
         result, failed = _convert_one(
             value,
@@ -853,6 +1284,8 @@ def _options(name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
         "encoding": kwargs.get("encoding", "utf-8"),
         "tz": kwargs.get("tz", "UTC"),
         "truncated": kwargs.get("truncated", 0),
+        "orders": tuple(kwargs.get("orders", ())),
+        "exact": kwargs.get("exact", False),
         "true_text": kwargs.get("true", "true"),
         "false_text": kwargs.get("false", "false"),
     }
@@ -873,6 +1306,8 @@ def _apply(values: list[Any], name: str, options: dict[str, Any], column: str):
         truncated=options["truncated"],
         true_text=options["true_text"],
         false_text=options["false_text"],
+        orders=options["orders"],
+        exact=options["exact"],
     )
     if options["strict"] and problems:
         raise ConversionError.from_values(
@@ -905,7 +1340,8 @@ _COMPLETE_KINDS = frozenset(
 )
 _DATE_KINDS = frozenset({"date", "ymd", "mdy", "dmy", "ym", "parse_date"})
 _SHAPE_KINDS = frozenset(
-    {*_DATE_KINDS, "datetime", "parse_datetime", "parse_number", *_DATETIME_ORDERS}
+    {*_DATE_KINDS, "datetime", "parse_datetime", "parse_number", *_DATETIME_ORDERS,
+     "parse_time", "parse_date_time"}
 )
 _FAST_KINDS = _COMPLETE_KINDS | _SHAPE_KINDS
 _NUMBER_KINDS = frozenset({"double", "parse_double", "parse_number"})
@@ -949,7 +1385,9 @@ def _out_dtype(kind: str, options: dict[str, Any]) -> Any:
         return pl.Boolean
     if kind in _DATE_KINDS:
         return pl.Date
-    if kind in _DATETIME_ORDERS:
+    if kind == "parse_time":
+        return pl.Time
+    if kind in _ZONED_KINDS:
         return pl.Datetime("us", options["tz"])
     return pl.Datetime("us")
 
@@ -1062,14 +1500,30 @@ def _fast_text(
         else:
             value = text.str.to_date(options["fmt"], strict=False)
         return value, text.str.contains(shape)
+    if kind == "parse_time":
+        if options["fmt"]:
+            return None
+        # readr's default with two-digit minutes and seconds and no AM/PM.
+        shape = r"^(?P<H>[0-9]{1,2}):(?P<M>[0-9]{2})(?::(?P<S>[0-9]{2})(?:\.[0-9]*)?)?$"
+        parts = text.str.extract_groups(shape)
+        hour, minute, second = (
+            parts.struct.field(field).cast(pl.Int64, strict=False) for field in "HMS"
+        )
+        second = second.fill_null(0)
+        valid = (hour < 24) & (minute < 60) & (second < 60)
+        value = pl.when(valid).then(pl.time(hour, minute, second))
+        return value, text.str.contains(shape)
     if kind in _DATETIME_ORDERS:
         order, clock = kind.split("_")
-        seconds = r":(?P<S>[0-9]{2})" if clock == "hms" else ""
-        shape = rf"^{_date_shape(_ORDERS[order])}[ T]{_CLOCK}{seconds}$"
+        clock_shape = {
+            "hms": rf"{_CLOCK}:(?P<S>[0-9]{{2}})", "hm": _CLOCK, "h": r"(?P<H>[0-9]{2})",
+        }[clock]
+        shape = rf"^{_date_shape(_ORDERS[order])}[ T]{clock_shape}$"
         parts = text.str.extract_groups(shape)
         stamp = pl.concat_str([
             _iso_date(parts, _ORDERS[order]), pl.lit(" "),
-            parts.struct.field("H"), pl.lit(":"), parts.struct.field("M"), pl.lit(":"),
+            parts.struct.field("H"), pl.lit(":"),
+            parts.struct.field("M") if clock != "h" else pl.lit("00"), pl.lit(":"),
             parts.struct.field("S") if clock == "hms" else pl.lit("00"),
         ])
         # Repeated clocks take the later occurrence and skipped clocks fail,
@@ -1145,6 +1599,10 @@ def _typed_values(series: pl.Series, kind: str) -> tuple[pl.Expr, pl.Expr] | Non
         if isinstance(dtype, pl.Datetime):
             return v.dt.date(), pl.lit(False)
         return None
+    if kind == "parse_time":
+        if dtype == pl.Time:
+            return v, pl.lit(False)
+        return None
     if kind in {"datetime", "parse_datetime"}:
         if dtype == pl.Date:
             return v.cast(pl.Datetime("us")), pl.lit(False)
@@ -1167,7 +1625,9 @@ _CLOCK_FORMATS = {
     "ymd_hms": ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y.%m.%d %H:%M:%S"),
     "ymd_hm": ("%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M", "%Y.%m.%d %H:%M"),
     "mdy_hms": ("%m/%d/%Y %H:%M:%S", "%m-%d-%Y %H:%M:%S", "%m.%d.%Y %H:%M:%S"),
+    "mdy_hm": ("%m/%d/%Y %H:%M", "%m-%d-%Y %H:%M", "%m.%d.%Y %H:%M"),
     "dmy_hms": ("%d/%m/%Y %H:%M:%S", "%d-%m-%Y %H:%M:%S", "%d.%m.%Y %H:%M:%S"),
+    "dmy_hm": ("%d/%m/%Y %H:%M", "%d-%m-%Y %H:%M", "%d.%m.%Y %H:%M"),
 }
 
 
@@ -1253,6 +1713,21 @@ def _uniform_clocks(
     return _uniform_fixed(replaced, formats, clock=True, tz=tz)
 
 
+def _uniform_times(series: pl.Series) -> tuple[pl.Series, pl.Series] | None:
+    """``13:05:09`` or ``13:05`` throughout, as readr's default time format reads them."""
+    for fmt, width in (("%H:%M:%S", 8), ("%H:%M", 5)):
+        checked = series.to_frame("v").select(
+            value=pl.col("v").str.to_time(fmt, strict=False),
+            settled=pl.col("v").is_null() | (
+                (pl.col("v").str.len_bytes() == width)
+                & pl.col("v").str.to_time(fmt, strict=False).is_not_null()
+            ),
+        )
+        if _every_row(checked):
+            return checked["value"], _no_failures(series.len())
+    return None
+
+
 def _uniform_number(series: pl.Series, options: dict[str, Any]) -> tuple[pl.Series, pl.Series] | None:
     """``$1,234.50`` and ``$5.50`` when grouping is a comma and the decimal is a point."""
     if options["decimal_mark"] != "." or options["grouping_mark"] != ",":
@@ -1295,9 +1770,16 @@ def _uniform_fast(
             return None
         # An explicit format is literal: no ``T`` retry, unlike the guessed orders.
         return _uniform_fixed(series, (fmt,), clock=True, tz=None)
-    if kind not in _CLOCK_FORMATS:
-        return None
+    if kind == "parse_time" and not options["fmt"]:
+        return _uniform_times(series)
     if kind in _DATETIME_ORDERS and options["truncated"]:
+        return None
+    if kind in _DATETIME_ORDERS and kind.endswith("_h"):
+        # Polars needs minutes with an hour: read "2024-01-07 13" as 13:00.
+        return _uniform_clocks(
+            series + ":00", _CLOCK_FORMATS[kind + "m"], tz=options["tz"]
+        )
+    if kind not in _CLOCK_FORMATS:
         return None
     tz = options["tz"] if kind in _DATETIME_ORDERS else None
     found = _uniform_clocks(series, _CLOCK_FORMATS[kind], tz=tz)
@@ -1350,9 +1832,270 @@ def _cast_first(
     return value.cast(out_dtype).alias(series.name), _no_failures(series.len())
 
 
+# ── parse_date_time over a column ───────────────────────────────────────
+# lubridate trains on the column: every format its orders guess is tried
+# on a sample (all values below 100, else rows at prime positions), ranked
+# by field count and then by how many sample values it reads, and each value
+# takes the first ranked format that reads it. Values none of them read are
+# trained again on their own, until a round reads nothing.
+
+
+def _first_primes(count: int) -> tuple[int, ...]:
+    primes: list[int] = []
+    candidate = 2
+    while len(primes) < count:
+        if all(candidate % prime for prime in primes if prime * prime <= candidate):
+            primes.append(candidate)
+        candidate += 1
+    return tuple(primes)
+
+
+# lubridate's .primes: 1 and the first 500 primes, the last being 3571.
+_TRAIN_POSITIONS = (1, *_first_primes(500))
+
+
+def _train_positions(length: int) -> list[int]:
+    """0-based positions lubridate trains on among *length* values."""
+    if length < 100:
+        return list(range(length))
+    if length < 3571:
+        return [position - 1 for position in _TRAIN_POSITIONS if position <= length]
+    step = length // 3571
+    return [position * step - 1 for position in _TRAIN_POSITIONS]
+
+
+# Fields Polars reads natively when zero-padded: date fields joined by one
+# of - / ., clock fields by a colon, and the date and clock by a space or T.
+_NATIVE_ORDER_FIELDS = {
+    "Y": ("%Y", "[0-9]{4}"), "y": ("%Y", "[0-9]{4}"), "m": ("%m", "[0-9]{2}"),
+    "d": ("%d", "[0-9]{2}"), "H": ("%H", "[0-9]{2}"), "M": ("%M", "[0-9]{2}"),
+    "S": ("%S", "[0-9]{2}"),
+}
+# Fields that need letters, which zero-padded digits never have.
+_WORD_FIELDS = frozenset("pbBaA")
+_CANDIDATE_SCHEMA = {
+    "row": pl.Int64, "form": pl.String, "score": pl.Int64, "order": pl.Int64, "own": pl.Boolean,
+    "value": pl.Datetime("us", "UTC"),
+}
+
+
+def _native_layout(fields: tuple[str, ...]) -> tuple[str, str, str] | None:
+    """``(shape, format, suffix)`` for zero-padded *fields*, or None.
+
+    The shape matches the text; after separators become ``-``, ``:``, and a
+    space, the text plus *suffix* parses with the strptime *format*.
+    """
+    clock = [field for field in fields if field not in _DATE_FIELDS]
+    if not set(fields) <= set(_NATIVE_ORDER_FIELDS) or clock != ["H", "M", "S"][:len(clock)]:
+        return None
+    shape, fmt = "^", ""
+    for position, field in enumerate(fields):
+        code, digits = _NATIVE_ORDER_FIELDS[field]
+        if position:
+            before = fields[position - 1] in _DATE_FIELDS
+            if before and field in _DATE_FIELDS:
+                shape, fmt = shape + "[-/.]", fmt + "-"
+            elif not before and field not in _DATE_FIELDS:
+                shape, fmt = shape + ":", fmt + ":"
+            else:
+                shape, fmt = shape + "[ T]", fmt + " "
+        shape, fmt = shape + digits, fmt + code
+    suffix = ""
+    for field, code in (("m", "%m"), ("d", "%d")):
+        if field not in fields:
+            suffix, fmt = suffix + "-01", fmt + "-" + code
+    if clock == ["H"]:
+        suffix, fmt = suffix + ":00", fmt + ":%M"
+    return shape + "$", fmt, suffix
+
+
+def _native_orders(
+    text: pl.Series, expanded: tuple[tuple[str, ...], ...], tz: str
+) -> tuple[pl.DataFrame, pl.Series] | None:
+    """Candidates Polars reads, and the rows it settles; None when it cannot."""
+    layouts = []
+    for index, fields in enumerate(expanded):
+        if _WORD_FIELDS & set(fields):
+            continue  # never matches zero-padded digits
+        layout = _native_layout(fields)
+        if layout is None:
+            return None
+        layouts.append((index, fields, *layout))
+    if not layouts:
+        return None
+    t = pl.col("text")
+    # One spelling of every separator; T only ever separates date and clock.
+    plain = t.str.replace_all("[/.]", "-").str.replace("T", " ", literal=True)
+    frame = text.to_frame("text").with_row_index("row").with_columns(pl.col("row").cast(pl.Int64))
+    found, unsure = [], pl.repeat(False, text.len(), dtype=pl.Boolean, eager=True)
+    for index, fields, shape, fmt, suffix in layouts:
+        value = (plain + pl.lit(suffix)).str.to_datetime(fmt, time_unit="us", strict=False)
+        value = value.dt.replace_time_zone(tz, ambiguous="latest", non_existent="null")
+        # lubridate's format keeps the text's own separators, which sit at
+        # fixed places since every field has a fixed width.
+        form, at = [], 0
+        for position, field in enumerate(fields):
+            if position:
+                form.append(t.str.slice(at, 1))
+                at += 1
+            form.append(pl.lit(_NATIVE_ORDER_FIELDS[field][0]))
+            at += 4 if field in "Yy" else 2
+        rows = frame.with_columns(matched=t.str.contains(shape).fill_null(False)).with_columns(
+            value=pl.when("matched").then(value)
+        )
+        unsure = unsure | (rows["matched"] & rows["value"].is_null())
+        found.append(
+            rows.filter(pl.col("value").is_not_null()).select(
+                "row", pl.concat_str(form).alias("form"),
+                pl.lit(len(fields), dtype=pl.Int64).alias("score"),
+                pl.lit(index, dtype=pl.Int64).alias("order"), pl.lit(True).alias("own"),
+                pl.col("value").dt.convert_time_zone("UTC"),
+            )
+        )
+    candidates = pl.concat(found)
+    settled = pl.repeat(False, text.len(), dtype=pl.Boolean, eager=True).scatter(
+        candidates["row"].unique(), True
+    ) & ~unsure
+    return candidates.filter(settled.gather(candidates["row"])), settled
+
+
+def _orders_per_value(
+    text: pl.Series, rows: pl.Series, expanded: tuple[tuple[str, ...], ...], options: dict[str, Any]
+) -> pl.DataFrame:
+    zone = ZoneInfo(options["tz"])
+    found: dict[str, list[Any]] = {name: [] for name in _CANDIDATE_SCHEMA}
+    for row, value in zip(rows.to_list(), text.gather(rows).to_list()):
+        for index, fields in enumerate(expanded):
+            candidate = _order_candidate(value, fields, options["cutoff"], zone)
+            if candidate is None or candidate[1] is None:
+                continue
+            found["row"].append(row)
+            found["form"].append(candidate[0])
+            found["score"].append(len(fields))
+            found["order"].append(index)
+            found["own"].append(candidate[2])
+            found["value"].append(candidate[1].astimezone(timezone.utc).replace(tzinfo=None))
+    frame = pl.DataFrame(found, schema={**_CANDIDATE_SCHEMA, "value": pl.Datetime("us")})
+    return frame.with_columns(pl.col("value").dt.replace_time_zone("UTC"))
+
+
+def _rank_orders(candidates: pl.DataFrame, rows: pl.Series) -> pl.DataFrame:
+    """``row`` and ``value`` for the rows lubridate's training reads."""
+    chosen = []
+    remaining = rows
+    while remaining.len():
+        train = remaining.gather(_train_positions(remaining.len()))
+        formats = (
+            candidates.filter(pl.col("row").is_in(train.implode()))
+            .group_by("form")
+            .agg(
+                pl.col("score").max(), pl.col("row").n_unique().alias("count"),
+                pl.col("order").min(), pl.col("row").filter("own").min().alias("first"),
+            )
+            .filter(pl.col("first").is_not_null())  # guessed from some sample text
+            .sort(["score", "count", "order", "first"], descending=[True, True, False, False])
+            .with_row_index("rank")
+            .select("form", "rank")
+        )
+        if formats.height == 0:
+            break
+        picked = (
+            candidates.filter(pl.col("row").is_in(remaining.implode()))
+            .join(formats, on="form")
+            .group_by("row")
+            .agg(pl.col("value").sort_by("rank").first())
+        )
+        if picked.height == 0:
+            break
+        chosen.append(picked)
+        remaining = remaining.filter(~remaining.is_in(picked["row"].implode()))
+    if not chosen:
+        return pl.DataFrame(schema={"row": pl.Int64, "value": pl.Datetime("us", "UTC")})
+    return pl.concat(chosen)
+
+
+def _orders_text(series: pl.Series) -> pl.Series:
+    """Text lubridate parses: numbers as digits, with a leading zero to even length."""
+    dtype = series.dtype
+    v = pl.col("v")
+    if dtype == pl.String:
+        return series
+    if dtype.is_numeric():
+        number = v.cast(pl.Float64)
+        whole = number.is_finite() & (number == number.floor())
+        text = pl.when(whole).then(number.cast(pl.Int64, strict=False).cast(pl.String)).otherwise(
+            pl.when(number.is_finite()).then(v.cast(pl.String))
+        )
+        if bool(series.to_frame("v").select((number > 1900).any()).item()):
+            text = pl.when(text.str.len_chars() % 2 == 1).then(pl.lit("0") + text).otherwise(text)
+    elif dtype == pl.Date:
+        text = v.dt.to_string("%Y-%m-%d")
+    elif isinstance(dtype, pl.Datetime):
+        text = v.dt.to_string(_DATETIME_TEXT)
+    else:
+        text = v.cast(pl.String, strict=False)
+    return series.to_frame("v").select(text.alias(series.name)).to_series()
+
+
+def _orders_series(values: list[Any]) -> pl.Series:
+    """A list from the per-value path as a column for :func:`_date_time_orders`."""
+    if all(value is None or isinstance(value, str) for value in values):
+        return pl.Series(values, dtype=pl.String)
+    try:
+        return pl.Series(values, strict=False)
+    except (TypeError, ValueError, OverflowError, pl.exceptions.PolarsError):
+        return pl.Series([None if value is None else str(value) for value in values], dtype=pl.String)
+
+
+def _date_time_orders(series: pl.Series, options: dict[str, Any]) -> tuple[pl.Series, pl.Series]:
+    """``(converted, failed)`` for :func:`parse_date_time`."""
+    dtype = pl.Datetime("us", options["tz"])
+    if isinstance(series.dtype, pl.Datetime) and series.dtype.time_zone:
+        series = series.dt.replace_time_zone(None)
+    text = _orders_text(series)
+    present = text.is_not_null()
+    # lubridate never parses empty text, and the sample skips it.
+    rows = (present & (text != "")).arg_true().cast(pl.Int64)
+    if options["exact"]:
+        zone = ZoneInfo(options["tz"])
+        parsed: list[Any] = [None] * text.len()
+        for row, value in zip(rows.to_list(), text.gather(rows).to_list()):
+            try:
+                parsed[row] = _exact_value(value, options["orders"], options["cutoff"], zone)
+            except _Bad:
+                pass
+        utc = [None if value is None else value.astimezone(timezone.utc).replace(tzinfo=None) for value in parsed]
+        out = pl.Series(utc, dtype=pl.Datetime("us")).dt.replace_time_zone("UTC")
+    else:
+        expanded = _expand_orders(options["orders"], options["truncated"])
+        native = _native_orders(text, expanded, options["tz"]) if rows.len() else None
+        if native is None:
+            candidates = _orders_per_value(text, rows, expanded, options)
+        else:
+            candidates, settled = native
+            rest = rows.filter(~settled.gather(rows))
+            if rest.len():
+                candidates = pl.concat([candidates, _orders_per_value(text, rest, expanded, options)])
+        if (
+            candidates.height == rows.len() and candidates["row"].n_unique() == rows.len()
+            and candidates["own"].all()
+        ):
+            # One reading of every value: the ranking cannot change it.
+            chosen = candidates.select("row", "value")
+        else:
+            chosen = _rank_orders(candidates, rows)
+        out = pl.repeat(None, text.len(), dtype=pl.Datetime("us", "UTC"), eager=True)
+        if chosen.height:
+            out = out.scatter(chosen["row"], chosen["value"])
+    out = out.dt.convert_time_zone(options["tz"]).cast(dtype).alias(series.name)
+    return out, (present & out.is_null()).alias("failed")
+
+
 def _fast_convert(series: pl.Series, options: dict[str, Any]) -> tuple[pl.Series, pl.Series] | None:
     """``(converted, failed)`` computed natively, or None for the per-value path."""
     kind = options["kind"]
+    if kind == "parse_date_time":
+        return _date_time_orders(series, options)
     if kind not in _FAST_KINDS or options["encoding"].lower().replace("_", "-") not in {"utf-8", "utf8"}:
         return None
     out_dtype = _out_dtype(kind, options)
@@ -1444,7 +2187,7 @@ def compile_polars(
     """Compile a conversion to a Polars expression."""
     options = _options(name, kwargs)
     dtype = (
-        pl.Datetime("us", options["tz"]) if name in _DATETIME_ORDERS
+        pl.Datetime("us", options["tz"]) if name in _ZONED_KINDS
         else _DTYPES[options["kind"]]
     )
 
@@ -1499,8 +2242,8 @@ def _pandas_fast(
             {"row": int(row) + 1, "column": column, "original": original, "expected": options["expected"]}
             for row, original in zip(rows.to_list(), originals.gather(rows).to_list())
         )
-    if kind in _DATE_KINDS:
-        # Dates stay Python date objects in an object column, as before.
+    if kind in _DATE_KINDS or kind == "parse_time":
+        # Dates and times stay Python objects in an object column, as before.
         return pd.Series(converted.to_list(), index=source.index, dtype="object")
     if kind in _INTEGER_KINDS:
         target: Any = "Int64"
@@ -1567,7 +2310,7 @@ def eval_pandas(
         return pd.Series(converted, index=source.index, dtype="string")
     if kind in {"datetime", "parse_datetime"}:
         return pd.Series(pd.to_datetime(converted), index=source.index).dt.as_unit("us")
-    if kind in _DATETIME_ORDERS:
+    if kind in _ZONED_KINDS:
         return pd.Series(
             converted, index=source.index, dtype=pd.DatetimeTZDtype("us", options["tz"])
         )
@@ -1607,6 +2350,8 @@ def _node_options(name: str, kwargs: dict[str, Any]) -> dict[str, Any] | None:
         "encoding": _literal(name, "encoding", kwargs, "utf-8"),
         "tz": _literal(name, "tz", kwargs, "UTC"),
         "truncated": _literal(name, "truncated", kwargs, 0),
+        "orders": tuple(_literal(name, "orders", kwargs, ())),
+        "exact": _literal(name, "exact", kwargs, False),
     }
 
 
@@ -1657,6 +2402,8 @@ def _failure_expr(
             encoding=options["encoding"],
             tz=options["tz"],
             truncated=options["truncated"],
+            orders=options["orders"],
+            exact=options["exact"],
         )
         original: list[str | None] = [None] * len(values)
         for row in problems:
@@ -1749,7 +2496,7 @@ def parse_columns_eagerly(
             return None
         value, failed = fast
         dtype = (
-            pl.Datetime("us", options["tz"]) if name in _DATETIME_ORDERS
+            pl.Datetime("us", options["tz"]) if name in _ZONED_KINDS
             else _DTYPES[options["kind"]]
         )
         converted[output] = value.cast(dtype).alias(output)
@@ -2134,3 +2881,126 @@ def dmy_hms(
 ) -> Expr:
     """Parse day-month-year hours:minutes:seconds; see :func:`ymd_hms`."""
     return _parse_clock("dmy_hms", x, tz, truncated, cutoff, strict)
+
+
+def ymd_h(
+    x: Any, *, tz: str = "UTC", truncated: int = 0,
+    cutoff: int | None = None, strict: bool = False,
+) -> Expr:
+    """Parse year-month-day hours; see :func:`ymd_hms`.
+
+    ``"2024-02-29 13"`` and ``"2024022913"`` read 13:00. ``truncated=1``
+    permits a date alone. Input with minutes fails.
+    """
+    return _parse_clock("ymd_h", x, tz, truncated, cutoff, strict)
+
+
+def mdy_hm(
+    x: Any, *, tz: str = "UTC", truncated: int = 0,
+    cutoff: int | None = None, strict: bool = False,
+) -> Expr:
+    """Parse month-day-year hours:minutes; see :func:`ymd_hm`."""
+    return _parse_clock("mdy_hm", x, tz, truncated, cutoff, strict)
+
+
+def mdy_h(
+    x: Any, *, tz: str = "UTC", truncated: int = 0,
+    cutoff: int | None = None, strict: bool = False,
+) -> Expr:
+    """Parse month-day-year hours; see :func:`ymd_h`."""
+    return _parse_clock("mdy_h", x, tz, truncated, cutoff, strict)
+
+
+def dmy_hm(
+    x: Any, *, tz: str = "UTC", truncated: int = 0,
+    cutoff: int | None = None, strict: bool = False,
+) -> Expr:
+    """Parse day-month-year hours:minutes; see :func:`ymd_hm`."""
+    return _parse_clock("dmy_hm", x, tz, truncated, cutoff, strict)
+
+
+def dmy_h(
+    x: Any, *, tz: str = "UTC", truncated: int = 0,
+    cutoff: int | None = None, strict: bool = False,
+) -> Expr:
+    """Parse day-month-year hours; see :func:`ymd_h`."""
+    return _parse_clock("dmy_h", x, tz, truncated, cutoff, strict)
+
+
+def parse_date_time(
+    x: Any,
+    orders: str | list[str] | tuple[str, ...],
+    *,
+    tz: str = "UTC",
+    truncated: int = 0,
+    exact: bool = False,
+    cutoff: int | None = None,
+    strict: bool = False,
+) -> Expr:
+    """Parse datetimes in any of several *orders*, as lubridate's ``parse_date_time``.
+
+    An order lists fields: ``y``/``Y`` year, ``m`` month (number or name),
+    ``b``/``B`` month name, ``d`` day, ``H`` hour, ``I`` hour 1-12 with
+    ``p`` AM/PM, ``M`` minute, ``S`` second (with any fraction), ``z`` an
+    offset (``Z``, ``+0530``, ``+05:30``, ``-05``), ``a``/``A`` a weekday
+    name, and ``T``/``R``/``r`` for ``H:M:S``/``H:M``/``H`` with or without
+    AM/PM. Separators and ``%`` are ignored: ``"ymd HMS"``,
+    ``"Ymd_HMS"``, and ``"%Y-%m-%d %H:%M:%S"`` are the same order. Fields
+    may be separated by any non-digits or written compactly
+    (``"20240229123456"``), and text before or after them is ignored.
+
+    Orders are ranked as lubridate's training ranks them: more fields first,
+    then the format that reads more of the column, then the listed order.
+    So ``["mdy", "dmy"]`` reads an ambiguous ``"01/02/2024"`` the way most
+    of the column reads. *truncated* also accepts up to that many trailing
+    fields missing. ``exact=True`` takes *orders* as strptime formats and
+    uses the first that reads each value.
+
+    The result is a datetime in *tz*. Text with an offset (``z``) keeps its
+    instant; other text is a clock in *tz*. Two-digit years need *cutoff*,
+    as in :func:`ymd`. Failures become missing and are listed by
+    :func:`problems`, unless ``strict=True``.
+    """
+    if isinstance(orders, str):
+        orders = (orders,)
+    if not isinstance(orders, (list, tuple)) or not orders:
+        raise TypeError("parse_date_time() orders must be a string or a list of strings")
+    orders = tuple(orders)
+    _bool("parse_date_time() exact", exact)
+    if not all(isinstance(order, str) and order for order in orders):
+        raise TypeError("parse_date_time() orders must be non-empty strings")
+    if isinstance(truncated, bool) or not isinstance(truncated, int) or truncated < 0:
+        raise ValueError("parse_date_time() truncated must be a non-negative integer")
+    if not exact:
+        _expand_orders(orders, truncated)  # unknown letters fail here, not at collect
+    if not isinstance(tz, str) or not tz:
+        raise TypeError("parse_date_time() tz must be a timezone name")
+    ZoneInfo(tz)
+    return _parse(
+        "parse_date_time", x,
+        suffix={
+            "orders": orders, "tz": tz, "truncated": truncated, "exact": exact,
+            "cutoff": cutoff, "strict": strict,
+        },
+        marks=None,
+    )
+
+
+def parse_time(x: Any, format: str = "", *, strict: bool = False) -> Expr:
+    """Parse times of day, as readr's ``parse_time``; the result is a Polars ``Time``.
+
+    The default format reads ``"13:05"``, ``"1:05:09"``, ``"1:05 pm"``, and
+    ``"01:05:09.25"`` (readr drops the fraction here). A *format* uses
+    readr's codes: ``%H`` (0-23), ``%I`` (1-12) with ``%p``, ``%M`` (two
+    digits), ``%S`` (drops a fraction), ``%OS`` (keeps it), ``%T``,
+    ``%R``, ``%AT`` (the default), and ``%.``, ``%+``, ``%*`` to skip
+    non-digits. Date and zone codes (``%Y``, ``%m``, ``%d``, ``%b``,
+    ``%z``, ``%Z``) must match but are ignored. A space matches any
+    whitespace, including none.
+
+    A time of 24:00 or later, which readr keeps as a duration past one day,
+    is a failure. Failures become missing and are listed by
+    :func:`problems`, unless ``strict=True``.
+    """
+    _time_items(format)  # unknown codes fail here, not at collect
+    return _parse("parse_time", x, suffix={"format": format, "strict": strict}, marks=None)

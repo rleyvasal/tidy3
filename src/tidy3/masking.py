@@ -193,9 +193,11 @@ _FIRST_COLUMN_ARG = frozenset(
         "ymd", "mdy", "dmy", "ym", "year", "month", "day",
         "floor_date", "ceiling_date", "days_in_month", "add_with_rollback",
         "months", "years", "excel_numeric_to_date",
-        "round_date", "isoyear", "leap_year",
         "parse_double", "parse_integer", "parse_logical", "parse_date",
         "parse_datetime", "parse_number",
+        "parse_time", "parse_date_time",
+        "ymd_hms", "ymd_hm", "ymd_h", "mdy_hms", "mdy_hm", "mdy_h",
+        "dmy_hms", "dmy_hm", "dmy_h",
         "order_by", "with_order",
         "str_detect", "str_starts", "str_ends", "str_count", "str_length",
         "str_sub", "str_trunc", "str_replace", "str_replace_all", "str_remove",
@@ -217,7 +219,6 @@ _ALL_COLUMN_ARGS = frozenset(
         "coalesce", "if_else", "near", "na_if", "n_distinct", "between",
         "consecutive_id", "when_any", "when_all", "str_c",
         "pmin", "pmax", "row_sums", "row_means",
-        "make_date", "make_datetime",
     }
 )
 

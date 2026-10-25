@@ -120,6 +120,8 @@ from tidy3.convert import (
     problems,
     stop_for_problems,
 )
+from tidy3.convert import parse_time
+from tidy3.dates import dmy_h, dmy_hm, mdy_h, mdy_hm, parse_date_time, ymd_h
 from tidy3.dates import (
     add_with_rollback,
     ceiling_date,
@@ -152,7 +154,6 @@ from tidy3.dates import (
     ymd_hms,
 )
 from tidy3.dates import day as day
-from tidy3.dates import isoyear, leap_year, make_date, make_datetime, round_date
 from tidy3.join_spec import (
     JoinCondition,
     JoinSpec,
@@ -663,6 +664,13 @@ __all__ = [
     "ymd_hm",
     "mdy_hms",
     "dmy_hms",
+    "ymd_h",
+    "mdy_hm",
+    "mdy_h",
+    "dmy_hm",
+    "dmy_h",
+    "parse_date_time",
+    "parse_time",
     "year",
     "month",
     "day",
@@ -684,11 +692,6 @@ __all__ = [
     "add_with_rollback",
     "today",
     "now",
-    "round_date",
-    "make_date",
-    "make_datetime",
-    "isoyear",
-    "leap_year",
     "select",
     "separate",
     "separate_longer_delim",
