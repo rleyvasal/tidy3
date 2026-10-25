@@ -83,12 +83,12 @@ def tabyl(
         snapshot = counted._compute()
         data = snapshot.collect()
         total = data["n"].sum()
-        expressions = [(pl.col("n") / pl.lit(total)).alias("percent")]
+        expressions = [(pl.col("n") / _per_row(pl.lit(total))).alias("percent")]
         if data.select(missing.any()).item():
             valid_total = data.filter(~missing)["n"].sum()
             expressions.append(
                 pl.when(missing).then(None)
-                .otherwise(pl.col("n") / pl.lit(valid_total)).alias("valid_percent")
+                .otherwise(pl.col("n") / _per_row(pl.lit(valid_total))).alias("valid_percent")
             )
         return snapshot._with_lf(data.lazy().with_columns(expressions), rowwise=False)
 
@@ -309,24 +309,18 @@ def adorn_percentages(denominator: str = "row", *, na_rm: bool = True, cols: Any
                 return values.sum()
             return pl.when(values.is_null().any()).then(None).otherwise(values.sum())
 
-        def per_row(total: pl.Expr) -> pl.Expr:
-            # Polars divides by a single value as multiplication by its
-            # reciprocal (3 / 5 gives 0.6000000000000001). Repeating the
-            # total on every row keeps true division, as R computes it.
-            return total + pl.int_range(pl.len()).cast(pl.Float64) * 0.0
-
         if denominator == "row":
             row_sum = pl.sum_horizontal([value(column, na_rm) for column in selected], ignore_nulls=na_rm)
             divided = [(pl.col(column) / row_sum).alias(column) for column in selected]
             if include_totals:
                 divided.append(pl.lit(1.0).alias(totals_column))
         elif denominator == "col":
-            divided = [(pl.col(column) / per_row(column_sum(column, na_rm))).alias(column) for column in selected]
+            divided = [(pl.col(column) / _per_row(column_sum(column, na_rm))).alias(column) for column in selected]
             if include_totals:
-                total = per_row(column_sum(totals_column, False))
+                total = _per_row(column_sum(totals_column, False))
                 divided.append((pl.col(totals_column) / total).alias(totals_column))
         else:
-            grand = per_row(pl.sum_horizontal([column_sum(column, True) for column in selected]))
+            grand = _per_row(pl.sum_horizontal([column_sum(column, True) for column in selected]))
             divided = [(pl.col(column) / grand).alias(column) for column in selected]
             if include_totals:
                 divided.append((pl.col(totals_column) / grand).alias(totals_column))
@@ -334,6 +328,15 @@ def adorn_percentages(denominator: str = "row", *, na_rm: bool = True, cols: Any
         return tf._with_lf(lf, rowwise=False, totals=tf._totals)
 
     return Verb(_apply, "adorn_percentages")
+
+
+def _per_row(total: pl.Expr) -> pl.Expr:
+    """*total* repeated on every row, so dividing by it is exact.
+
+    Polars divides by a single value as multiplication by its reciprocal
+    (3 / 5 gives 0.6000000000000001); R divides each value, giving 0.6.
+    """
+    return total + pl.int_range(pl.len()).cast(pl.Float64) * 0.0
 
 
 def _adorn_text(column: str, dtype: Any) -> pl.Expr:

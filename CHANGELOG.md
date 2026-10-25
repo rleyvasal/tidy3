@@ -24,6 +24,7 @@ under **Changed**.
 ### Fixed
 
 - `parse_time()` on Polars 1.x: an invalid clock such as `24:00` or `13:60` raised "Invalid time components" instead of becoming missing with a problem recorded.
+- `tabyl()`'s `percent` and `valid_percent` divide exactly, as R does: 3 of 5 is 0.6, not 0.6000000000000001.
 
 ## 0.9.0 — 2026-10-25
 
