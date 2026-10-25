@@ -286,6 +286,10 @@ decisions, not the next missing Python data-cleaning helpers.
 5. **Date/time completeness:** time-of-day parsing, remaining common orders,
    `round_date`, constructors, then a deliberate calendar-period versus
    elapsed-duration and interval design.
+
+   **Follow-up: rounding and constructors added in the working tree.**
+   `round_date`, `make_date`, `make_datetime`, `isoyear`, and `leap_year`,
+   checked against lubridate 1.9.5, with the differences in the reference.
 6. **Remaining portability:** string case/ranking helpers, quantiles,
    advanced pivot arguments, and typed list-column mapping. Use Python's
    existing collection tools where a new purrr wrapper adds little value.
