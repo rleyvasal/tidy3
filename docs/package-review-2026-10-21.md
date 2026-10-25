@@ -297,6 +297,9 @@ decisions, not the next missing Python data-cleaning helpers.
    checked against lubridate 1.9.5 and readr 2.2.0. Two-digit years still
    need `cutoff`, orders need a year, and negative truncation, custom
    `select_formats`, and week or day-of-year letters remain unsupported.
+
+   **Follow-up:** the span design was approved on 2026-10-25 in
+   [design-time-spans.md](design-time-spans.md).
 6. **Remaining portability:** string case/ranking helpers, quantiles,
    advanced pivot arguments, and typed list-column mapping. Use Python's
    existing collection tools where a new purrr wrapper adds little value.
