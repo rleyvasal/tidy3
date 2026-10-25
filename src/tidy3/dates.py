@@ -21,6 +21,7 @@ import pandas as pd
 import polars as pl
 
 from tidy3.convert import dmy, dmy_hms, mdy, mdy_hms, ym, ymd, ymd_hm, ymd_hms
+from tidy3.convert import dmy_h, dmy_hm, mdy_h, mdy_hm, parse_date_time, ymd_h
 from tidy3.expr import Expr, _func, col
 
 __all__ = [
@@ -55,6 +56,12 @@ __all__ = [
     "ymd_hm",
     "mdy_hms",
     "dmy_hms",
+    "ymd_h",
+    "mdy_hm",
+    "mdy_h",
+    "dmy_hm",
+    "dmy_h",
+    "parse_date_time",
 ]
 
 FUNCTIONS = frozenset(

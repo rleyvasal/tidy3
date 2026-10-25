@@ -1750,6 +1750,116 @@ def _datetime_parsers():
     return result
 
 
+def _seconds_of_day(values) -> pl.Series:
+    return pl.Series(
+        [None if v is None else v.hour * 3600 + v.minute * 60 + v.second + v.microsecond / 1e6 for v in values],
+        dtype=pl.Float64,
+    )
+
+
+def _date_time_orders():
+    result = {}
+    calendars = {"ymd": "2024-02-29", "mdy": "02/29/2024", "dmy": "29/02/2024"}
+    named = {"ymd": "2024 February 29", "mdy": "February 29th 2024", "dmy": "29th February 2024"}
+    compact = {"ymd": "20240229", "mdy": "02292024", "dmy": "29022024"}
+    impossible = {"ymd": "2023-02-29", "mdy": "02/29/2023", "dmy": "29/02/2023"}
+    bare = {"ymd": "1999-01-02", "mdy": "01/02/1999", "dmy": "02/01/1999"}
+    for order, cal in calendars.items():
+        for clock in ("h", "hm"):
+            name = f"{order}_{clock}"
+            parser = getattr(tidy3, name)
+            time = (["13", "1 PM", "12 AM", "24", "13:05"] if clock == "h"
+                    else ["13:05", "1:05 PM", "12:05 AM", "24:00", "13:05:09"])
+            digits = "13" if clock == "h" else "1305"
+            values = [f"{cal} {time[0]}", f"{named[order]} {time[0]}", compact[order] + digits,
+                      f"{cal}T{time[0]}", f"{cal} {time[1]}", f"{cal} {time[2]}", f"{cal} {time[3]}",
+                      f"{impossible[order]} {time[0]}", f"{cal} {time[4]}", bare[order], "bad", None]
+            for zone in ("UTC", "America/New_York", "Asia/Kolkata"):
+                result[f"{name}_{zone}"] = _datetime_epochs(values, parser, tz=zone)
+            for truncated in range(1, len(clock) + 1):
+                result[f"{name}_truncated_{truncated}"] = _datetime_epochs(values, parser, truncated=truncated)
+    long_sparse = ["2024-01-15"] * 150
+    for position in (1, 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73,
+                     79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149):
+        long_sparse[position - 1] = "garbage"
+    long_majority = ["05/06/2024" if i % 10 == 0 else "06/14/2024" if i % 10 == 5 else "13/06/2024"
+                     for i in range(1, 301)]
+    specs = {
+        "single": (["2024-02-29 12:34:56", "2024/2/29 1:2:3", "20240229123456", "on 2024-02-29 12:34:56",
+                    "2024-02-29 12:34:56.125", "Thursday 2024-02-29 12:34:56", "2024-02-29T12:34:56Z",
+                    "2024-02-29 12:34:56+05:30", "x2024-02-29 12:34:56", "2024-02-30 12:00:00",
+                    "2024-02-29 24:00:00", "2024-02-29 12:60:00", "2024-02-29 12:34", "2024_02_29 12.34.56",
+                    "bad", "", None], "ymd HMS", {}),
+        "single_ny": (["2024-02-29 12:34:56", "2024-07-04 08:00:00", "2024-02-29T12:34:56Z", None],
+                      "Ymd HMS", {"tz": "America/New_York"}),
+        "mixed": (["02/29/2024", "29/02/2024", "2024-02-29", "Feb 29, 2024", "29 February 2024", "2024 Feb 29",
+                   "2024 Sept 29", "2024 FEB 29", "13/01/2024", "01/02/2024", "29/02/2024 10:00", "2024-02", None],
+                  ["mdy", "dmy", "ymd", "dmy HM"], {}),
+        "majority_dmy": (["01/02/2024", "13/01/2024", "14/01/2024"], ["mdy", "dmy"], {}),
+        "majority_mdy": (["01/02/2024", "01/13/2024", "01/14/2024"], ["dmy", "mdy"], {}),
+        "separators": (["01/02/2024", "13-01-2024", "14-01-2024", "02/13/2024"], ["mdy", "dmy"], {}),
+        "truncated": (["2024-02-29 1:02:03", "2024-02-29 13:02", "2024-02-29 13", "2024-02-29", "2024-02"],
+                      "ymd HMS", {"truncated": 3}),
+        "ampm": (["2024-02-29 1:02:03 PM", "2024-02-29 01:02:03PM", "2024-02-29 12:02:03 AM",
+                  "2024-02-29 1:02:03", "2024-02-29 01:02:03.5 pm", "2024-02-29 13:02:03 PM"], "ymd IMS p", {}),
+        "ampm_24": (["2024-02-29 1:02:03 PM", "2024-02-29 13:02:03", "2024-02-29 13:02:03 PM",
+                     "2024-02-29 12:00:00 AM"], "ymd HMS p", {}),
+        "clocks": (["2024-02-29 1:02:03 PM", "2024-02-29 13:02:03", "2024-02-29 13:02"], ["ymd T", "ymd R"], {}),
+        "offsets": (["2024-02-29 12:34:56Z", "2024-02-29 12:34:56+05:30", "2024-02-29 12:34:56+0530",
+                     "2024-02-29 12:34:56-05", "2024-02-29 12:34:56"], "ymd HMS z", {"tz": "America/New_York"}),
+        "dst": (["2024-03-10 02:30:00", "2024-11-03 01:30:00", "2024-03-10 03:30:00"], "ymd HMS",
+                {"tz": "America/New_York"}),
+        "names": (["Feb 29 2024", "February 29 2024", "02 29 2024"], "bdY", {}),
+        "time_first": (["12:34:56 2024-02-29", "12:34 29/02/2024"], ["HMS ymd", "HM dmy"], {}),
+        # lubridate reads two-digit years with a cutoff of 68.
+        "two_digit": (["24-02-29", "02/29/24", "29.02.69", "2024-02-29"], ["ymd", "mdy", "dmy"], {"cutoff": 68}),
+        "long_sparse": (long_sparse, "ymd", {}),
+        "long_majority": (long_majority, ["mdy", "dmy"], {}),
+        "exact": (["2024-02-29 12:34:56", "29/02/2024", "bad"], ["%Y-%m-%d %H:%M:%S", "%d/%m/%Y"], {"exact": True}),
+    }
+    for name, (values, orders, kwargs) in specs.items():
+        result[f"parse_date_time_{name}"] = _datetime_epochs(
+            values, lambda x, **kw: tidy3.parse_date_time(x, orders, **kw), **kwargs
+        )
+    result["parse_date_time_numeric"] = _datetime_epochs(
+        [20240229, 2024022913], lambda x: tidy3.parse_date_time(x, ["ymd", "ymd H"])
+    )
+    default = ["12:34", "12:34:56", "1:02", "01:02:03.25", "12:34 PM", "12:34pm", "12:00 AM", "1:02:03 am",
+               " 12:34 ", "23:60", "23:59:60", "12", "1234", "12.34", "abc", "", "NA", None, "12:34:56.125",
+               "0:00 AM", "-1:00", "12:34 X", "T12:34", "12:34:56Z", "100:00", "12:3", "12:345", "12:034",
+               "12:34:056", "12:34.5", "1:02:03PM", "12:34   PM", "12:34 a.m.", "24:00", "13:00 PM"]
+    result["parse_time_default"] = _seconds_of_day(
+        (tidy({"x": default}) >> mutate(t=tidy3.parse_time("x"))).collect()["t"]
+    )
+    formats = [
+        ("%Hh%M", ["12h34", "07.05", "1205", "bad"]),
+        ("%H.%M", ["12h34", "07.05", "1205"]),
+        ("%H%M", ["12h34", "1205", "0705"]),
+        ("%I:%M:%S %p", ["7:05:03 PM", "12:00:00 am", "13:00:00 PM", "7:05:03"]),
+        ("%H:%M", ["7:05", "07:05:03", "7:5", "24:00", "23:59", "0:00"]),
+        ("%H:%M:%OS", ["07:05:03.5", "7:5:3", "07:05:3.25", "07:05:03"]),
+        ("%H:%M:%S", ["07:05:03.5", "07:05:003", "07:05:3"]),
+        ("%T", ["07:05:03", "07:05"]),
+        ("%R", ["07:05", "07:05:03"]),
+        ("%I:%M %p", ["7:05 pm", "07:05PM", "0:05 AM", "7:05", "12:05 am"]),
+        ("%H:%M %p", ["7:05 pm", "7:05"]),
+        ("%Y-%m-%dT%H:%M", ["2024-01-01T07:05", "07:05"]),
+        ("%H:%M %Z", ["07:05 UTC", "07:05:03 Z"]),
+        ("%H%.%M", ["07h05", "07-05", "07 05", "0705"]),
+        ("%H%*%M", ["07h05", "07--05", "0705", "07abc05"]),
+        ("%H%+%M", ["07h05", "07--05", "0705"]),
+        ("%H %M", ["0705", " 0705", "07 05"]),
+        ("%H:%M:%S%z", ["12:34:56+01", "12:34:56"]),
+        ("%H:%M:%S %z", ["12:34:56 +0100", "12:34:56 Z"]),
+        ("%b %H:%M", ["Jan 12:34", "January 12:34", "jan 12:34"]),
+    ]
+    result["parse_time_formats"] = [
+        _seconds_of_day((tidy({"x": values}) >> mutate(t=tidy3.parse_time("x", fmt))).collect()["t"])
+        for fmt, values in formats
+    ]
+    return result
+
+
 def _datetime_truncation():
     result = {}
     for name, calendar in [("ymd_hms", "1999-01-02"), ("ymd_hm", "1999-01-02"), ("mdy_hms", "01/02/1999"), ("dmy_hms", "02/01/1999")]:
@@ -2327,6 +2437,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "formatted_offsets": _formatted_offsets,
     "calendar_rounding": _calendar_rounding,
     "datetime_parsers": _datetime_parsers,
+    "date_time_orders": _date_time_orders,
     "datetime_truncation": _datetime_truncation,
     "datetime_dst": _datetime_dst,
     "date_components": _date_components,

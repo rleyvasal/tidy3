@@ -373,6 +373,119 @@ result <- switch(
       result
     }
   },
+  date_time_orders = {
+    if (!requireNamespace("lubridate", quietly=TRUE) || !requireNamespace("readr", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate or readr is not installed")
+    } else {
+      q <- function(x) suppressMessages(suppressWarnings(x))
+      result <- list()
+      # Hour and hour-minute orders: separators, names, compact digits,
+      # AM/PM, 24:00, impossible dates, extra fields, and time zones.
+      calendars <- c(ymd="2024-02-29", mdy="02/29/2024", dmy="29/02/2024")
+      named <- c(ymd="2024 February 29", mdy="February 29th 2024", dmy="29th February 2024")
+      compact <- c(ymd="20240229", mdy="02292024", dmy="29022024")
+      impossible <- c(ymd="2023-02-29", mdy="02/29/2023", dmy="29/02/2023")
+      # A year ending in 99 cannot be read as a two-digit year and an hour.
+      bare <- c(ymd="1999-01-02", mdy="01/02/1999", dmy="02/01/1999")
+      for (order in names(calendars)) for (clock in c("h", "hm")) {
+        name <- paste(order, clock, sep="_")
+        parser <- getExportedValue("lubridate", name)
+        time <- if (clock == "h") c("13", "1 PM", "12 AM", "24", "13:05") else c("13:05", "1:05 PM", "12:05 AM", "24:00", "13:05:09")
+        digits <- if (clock == "h") "13" else "1305"
+        cal <- calendars[[order]]
+        x <- c(paste(cal, time[1]), paste(named[[order]], time[1]), paste0(compact[[order]], digits),
+               paste0(cal, "T", time[1]), paste(cal, time[2]), paste(cal, time[3]), paste(cal, time[4]),
+               paste(impossible[[order]], time[1]), paste(cal, time[5]), bare[[order]], "bad", NA_character_)
+        for (zone in c("UTC", "America/New_York", "Asia/Kolkata")) {
+          result[[paste(name, zone, sep="_")]] <- as.numeric(q(parser(x, tz=zone)))
+        }
+        for (truncated in seq_len(nchar(clock))) {
+          result[[paste(name, "truncated", truncated, sep="_")]] <- as.numeric(q(parser(x, truncated=truncated)))
+        }
+      }
+      # parse_date_time: one order, mixed orders, training on the column,
+      # truncation, AM/PM, offsets, daylight saving, names, and exact formats.
+      long_sparse <- rep("2024-01-15", 150)
+      long_sparse[c(1, 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73,
+                    79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149)] <- "garbage"
+      i <- 1:300
+      long_majority <- ifelse(i %% 10 == 0, "05/06/2024", ifelse(i %% 10 == 5, "06/14/2024", "13/06/2024"))
+      specs <- list(
+        single=list(x=c("2024-02-29 12:34:56", "2024/2/29 1:2:3", "20240229123456", "on 2024-02-29 12:34:56",
+                        "2024-02-29 12:34:56.125", "Thursday 2024-02-29 12:34:56", "2024-02-29T12:34:56Z",
+                        "2024-02-29 12:34:56+05:30", "x2024-02-29 12:34:56", "2024-02-30 12:00:00",
+                        "2024-02-29 24:00:00", "2024-02-29 12:60:00", "2024-02-29 12:34", "2024_02_29 12.34.56",
+                        "bad", "", NA), orders="ymd HMS"),
+        single_ny=list(x=c("2024-02-29 12:34:56", "2024-07-04 08:00:00", "2024-02-29T12:34:56Z", NA),
+                       orders="Ymd HMS", tz="America/New_York"),
+        mixed=list(x=c("02/29/2024", "29/02/2024", "2024-02-29", "Feb 29, 2024", "29 February 2024", "2024 Feb 29",
+                       "2024 Sept 29", "2024 FEB 29", "13/01/2024", "01/02/2024", "29/02/2024 10:00", "2024-02", NA),
+                   orders=c("mdy", "dmy", "ymd", "dmy HM")),
+        majority_dmy=list(x=c("01/02/2024", "13/01/2024", "14/01/2024"), orders=c("mdy", "dmy")),
+        majority_mdy=list(x=c("01/02/2024", "01/13/2024", "01/14/2024"), orders=c("dmy", "mdy")),
+        separators=list(x=c("01/02/2024", "13-01-2024", "14-01-2024", "02/13/2024"), orders=c("mdy", "dmy")),
+        truncated=list(x=c("2024-02-29 1:02:03", "2024-02-29 13:02", "2024-02-29 13", "2024-02-29", "2024-02"),
+                       orders="ymd HMS", truncated=3),
+        ampm=list(x=c("2024-02-29 1:02:03 PM", "2024-02-29 01:02:03PM", "2024-02-29 12:02:03 AM",
+                      "2024-02-29 1:02:03", "2024-02-29 01:02:03.5 pm", "2024-02-29 13:02:03 PM"), orders="ymd IMS p"),
+        ampm_24=list(x=c("2024-02-29 1:02:03 PM", "2024-02-29 13:02:03", "2024-02-29 13:02:03 PM",
+                         "2024-02-29 12:00:00 AM"), orders="ymd HMS p"),
+        clocks=list(x=c("2024-02-29 1:02:03 PM", "2024-02-29 13:02:03", "2024-02-29 13:02"), orders=c("ymd T", "ymd R")),
+        offsets=list(x=c("2024-02-29 12:34:56Z", "2024-02-29 12:34:56+05:30", "2024-02-29 12:34:56+0530",
+                         "2024-02-29 12:34:56-05", "2024-02-29 12:34:56"), orders="ymd HMS z", tz="America/New_York"),
+        dst=list(x=c("2024-03-10 02:30:00", "2024-11-03 01:30:00", "2024-03-10 03:30:00"), orders="ymd HMS",
+                 tz="America/New_York"),
+        names=list(x=c("Feb 29 2024", "February 29 2024", "02 29 2024"), orders="bdY"),
+        time_first=list(x=c("12:34:56 2024-02-29", "12:34 29/02/2024"), orders=c("HMS ymd", "HM dmy")),
+        two_digit=list(x=c("24-02-29", "02/29/24", "29.02.69", "2024-02-29"), orders=c("ymd", "mdy", "dmy")),
+        long_sparse=list(x=long_sparse, orders="ymd"),
+        long_majority=list(x=long_majority, orders=c("mdy", "dmy")),
+        exact=list(x=c("2024-02-29 12:34:56", "29/02/2024", "bad"), orders=c("%Y-%m-%d %H:%M:%S", "%d/%m/%Y"),
+                   exact=TRUE)
+      )
+      for (name in names(specs)) {
+        spec <- specs[[name]]
+        parsed <- q(lubridate::parse_date_time(spec$x, spec$orders, tz=if (is.null(spec$tz)) "UTC" else spec$tz,
+                                               truncated=if (is.null(spec$truncated)) 0 else spec$truncated,
+                                               exact=isTRUE(spec$exact)))
+        result[[paste0("parse_date_time_", name)]] <- as.numeric(parsed)
+      }
+      result[["parse_date_time_numeric"]] <- as.numeric(q(lubridate::parse_date_time(c(20240229, 2024022913), c("ymd", "ymd H"))))
+      # parse_time: readr's default format and explicit formats. tidy3
+      # returns a time of day, so readr's durations of a day or more are
+      # missing there.
+      seconds <- function(x) { v <- as.numeric(x); ifelse(v >= 86400, NA, v) }
+      result[["parse_time_default"]] <- seconds(q(readr::parse_time(c(
+        "12:34", "12:34:56", "1:02", "01:02:03.25", "12:34 PM", "12:34pm", "12:00 AM", "1:02:03 am", " 12:34 ",
+        "23:60", "23:59:60", "12", "1234", "12.34", "abc", "", "NA", NA, "12:34:56.125", "0:00 AM", "-1:00",
+        "12:34 X", "T12:34", "12:34:56Z", "100:00", "12:3", "12:345", "12:034", "12:34:056", "12:34.5",
+        "1:02:03PM", "12:34   PM", "12:34 a.m.", "24:00", "13:00 PM"))))
+      formats <- list(
+        list("%Hh%M", c("12h34", "07.05", "1205", "bad")),
+        list("%H.%M", c("12h34", "07.05", "1205")),
+        list("%H%M", c("12h34", "1205", "0705")),
+        list("%I:%M:%S %p", c("7:05:03 PM", "12:00:00 am", "13:00:00 PM", "7:05:03")),
+        list("%H:%M", c("7:05", "07:05:03", "7:5", "24:00", "23:59", "0:00")),
+        list("%H:%M:%OS", c("07:05:03.5", "7:5:3", "07:05:3.25", "07:05:03")),
+        list("%H:%M:%S", c("07:05:03.5", "07:05:003", "07:05:3")),
+        list("%T", c("07:05:03", "07:05")),
+        list("%R", c("07:05", "07:05:03")),
+        list("%I:%M %p", c("7:05 pm", "07:05PM", "0:05 AM", "7:05", "12:05 am")),
+        list("%H:%M %p", c("7:05 pm", "7:05")),
+        list("%Y-%m-%dT%H:%M", c("2024-01-01T07:05", "07:05")),
+        list("%H:%M %Z", c("07:05 UTC", "07:05:03 Z")),
+        list("%H%.%M", c("07h05", "07-05", "07 05", "0705")),
+        list("%H%*%M", c("07h05", "07--05", "0705", "07abc05")),
+        list("%H%+%M", c("07h05", "07--05", "0705")),
+        list("%H %M", c("0705", " 0705", "07 05")),
+        list("%H:%M:%S%z", c("12:34:56+01", "12:34:56")),
+        list("%H:%M:%S %z", c("12:34:56 +0100", "12:34:56 Z")),
+        list("%b %H:%M", c("Jan 12:34", "January 12:34", "jan 12:34"))
+      )
+      result[["parse_time_formats"]] <- lapply(formats, function(f) seconds(q(readr::parse_time(f[[2]], f[[1]]))))
+      result
+    }
+  },
   datetime_truncation = {
     if (!requireNamespace("lubridate", quietly=TRUE)) {
       list(skip=TRUE, reason="lubridate is not installed")
