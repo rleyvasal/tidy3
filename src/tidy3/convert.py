@@ -1511,6 +1511,9 @@ def _fast_text(
         )
         second = second.fill_null(0)
         valid = (hour < 24) & (minute < 60) & (second < 60)
+        # Polars 1.x builds the time for every row before when() keeps the
+        # valid ones, and raises on 24:00; give the other rows midnight.
+        hour, minute, second = (pl.when(valid).then(part).otherwise(0) for part in (hour, minute, second))
         value = pl.when(valid).then(pl.time(hour, minute, second))
         return value, text.str.contains(shape)
     if kind in _DATETIME_ORDERS:
