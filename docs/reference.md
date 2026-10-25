@@ -783,11 +783,17 @@ These are checked against forcats 1.0.1
 
 Use factor expressions in `mutate`, `transmute`, or `across` before sorting,
 grouping, or plotting. The result is a Polars Enum, so its level order
-survives collection and plot3 handoff. **A Polars
-mutation containing a factor expression computes a snapshot**, including the
-source frame, to discover levels. Later verbs build a lazy plan on that
-snapshot. This path uses Python callbacks and is intended for preparing
-categories for tables and plots. Other mutations stay lazy.
+survives collection and plot3 handoff. Every factor expression reads the
+data once to discover its levels. **A single call on a text column runs in
+Polars**: it reads only the columns it uses, and the frame stays lazy. That
+covers every helper without groups, as well as `fct_relevel`, `fct_reorder`
+(with a tidy3 aggregation), `fct_infreq`, and `fct_rev` in grouped
+mutations; `as_factor` also covers numeric and logical columns, and
+`fct_reorder2` covers `last2` and `first2`. **Other factor mutations compute a
+snapshot**, including the source frame, and later verbs build a lazy plan on
+that snapshot: nested calls, factor (Enum) inputs, grouped value changes,
+callables, and float columns holding NaN. That path uses Python callbacks.
+Other mutations stay lazy.
 
 A list, pandas categorical/Series, or Polars Series runs immediately and
 returns a pandas categorical. Character input starts with levels sorted in
