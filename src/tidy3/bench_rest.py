@@ -1127,3 +1127,26 @@ def attach(add, Case) -> None:
     _write_case("write_csv", "write_csv", pl.read_csv)
     _write_case("write_parquet", "write_parquet", pl.read_parquet)
     _write_case("write_ipc", "write_ipc", pl.read_ipc)
+
+    # ── round_date, make_date, make_datetime, isoyear, leap_year ─────────
+    def _col(name, functions, build, native):
+        add(api._column(name, "dates", functions, build, native))
+
+    def _round_month(df):
+        below = pl.col("day_d").dt.truncate("1mo")
+        above = below.dt.offset_by("1mo")
+        return pl.when((above - pl.col("day_d")) <= (pl.col("day_d") - below)).then(above).otherwise(below)
+
+    _col("round_date", ["round_date"], lambda t, df: t.round_date("day_d", "month"), _round_month)
+    _col(
+        "make_date", ["make_date"],
+        lambda t, df: t.make_date(t.col("id") % 400 + 1800, t.col("id") % 12 + 1, t.col("id") % 28 + 1),
+        lambda df: pl.date(pl.col("id") % 400 + 1800, pl.col("id") % 12 + 1, pl.col("id") % 28 + 1),
+    )
+    _col(
+        "make_datetime", ["make_datetime"],
+        lambda t, df: t.make_datetime(2024, 1, t.col("id") % 28 + 1, t.col("id") % 24, 30, 15.5),
+        lambda df: pl.datetime(2024, 1, pl.col("id") % 28 + 1, pl.col("id") % 24, 30, 15, 500_000, time_zone="UTC"),
+    )
+    _col("isoyear", ["isoyear"], lambda t, df: t.isoyear("day_d"), lambda df: pl.col("day_d").dt.iso_year().cast(pl.Int64))
+    _col("leap_year", ["leap_year"], lambda t, df: t.leap_year("day_d"), lambda df: pl.col("day_d").dt.is_leap_year())

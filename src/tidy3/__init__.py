@@ -154,6 +154,7 @@ from tidy3.dates import (
     ymd_hms,
 )
 from tidy3.dates import day as day
+from tidy3.dates import isoyear, leap_year, make_date, make_datetime, round_date
 from tidy3.join_spec import (
     JoinCondition,
     JoinSpec,
@@ -692,6 +693,11 @@ __all__ = [
     "add_with_rollback",
     "today",
     "now",
+    "round_date",
+    "make_date",
+    "make_datetime",
+    "isoyear",
+    "leap_year",
     "select",
     "separate",
     "separate_longer_delim",

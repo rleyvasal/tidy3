@@ -115,7 +115,7 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 | Helpers | `is_na`, `is_nan`, `is_finite`, `is_infinite`, `abs`, `floor`, `ceiling`, `round`, `pmin`, `pmax`, `row_sums`, `row_means` |
 | Convert | `as_numeric`/`as_double`, `as_integer`, `as_character`/`as_string`, `as_logical`, `as_date`, `as_datetime`, `ConversionError` |
 | Parse | `parse_double`, `parse_integer`, `parse_logical`, `parse_date`, `parse_datetime`, `parse_time`, `parse_number`, `locale`, `problems`, `stop_for_problems` |
-| Dates | `ymd`, `mdy`, `dmy`, `ym`, `ymd_hms`, `ymd_hm`, `ymd_h`, `mdy_hms`, `mdy_hm`, `mdy_h`, `dmy_hms`, `dmy_hm`, `dmy_h`, `parse_date_time`, `with_tz`, `force_tz`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `days_in_month`, `months`, `years`, `add_with_rollback`, `today`, `now`, `excel_numeric_to_date` |
+| Dates | `ymd`, `mdy`, `dmy`, `ym`, `ymd_hms`, `ymd_hm`, `ymd_h`, `mdy_hms`, `mdy_hm`, `mdy_h`, `dmy_hms`, `dmy_hm`, `dmy_h`, `parse_date_time`, `with_tz`, `force_tz`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `isoyear`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `round_date`, `days_in_month`, `leap_year`, `make_date`, `make_datetime`, `months`, `years`, `add_with_rollback`, `today`, `now`, `excel_numeric_to_date` |
 | Factors | `as_factor`, `fct_relevel`, `fct_reorder`, `fct_reorder2` (`last2`, `first2`), `fct_infreq`, `fct_inorder`, `fct_rev`, `fct_recode`, `fct_collapse`, `fct_lump_n`, `fct_lump_prop`, `fct_lump_min`, `fct_drop`, `fct_expand`, `fct_na_value_to_level`, `fct_na_level_to_value` |
 | Cleaning | `clean_names`, `make_clean_names`, `set_names`, `get_dupes`, `remove_empty`, `remove_constant`, `row_to_names`, `find_header`, `compare_df_cols`, `compare_df_cols_same`, `describe_class` |
 | Reporting | `tabyl` (one-variable frequencies and two-variable count tables), `adorn_totals`, `adorn_percentages` |
@@ -724,6 +724,53 @@ transitions. Both occurrences of a repeated hour stay distinct. Flooring
 the fraction. Ceiling the first 01:30 of an autumn fallback to an hour
 lands on the second 01:00, the next hour. lubridate's `ceiling_date` lands
 on 02:00 for that one hour; the other units match it.
+
+```python
+cars >> mutate(
+    built=make_date(2000 + col("cyl"), col("cyl"), 31),
+    leap=leap_year(2000 + col("cyl")),
+    tested=make_datetime(2024, 3, 10, col("cyl") - 2, 30, tz="America/New_York"),
+    month=round_date(make_date(2024, 2, col("cyl") * 2), "month"),
+    iso=isoyear(make_date(2016 + col("cyl"), 1, 1)),
+) >> select("model", "cyl", "built", "leap", "tested", "month", "iso") >> head(3)
+```
+
+`round_date` rounds to the nearer of `floor_date` and the next boundary,
+with the same units and `week_start`. Distance is elapsed time, and a tie
+goes to the later boundary, as in lubridate: Wednesday noon rounds to the
+next Sunday, and 15 February 2010 rounds to 1 March (14 days either way).
+On the 23-hour spring-forward day in New York, 12:00 is 11 hours after
+midnight and 12 hours before the next one, so it rounds down; 12:30 is a
+tie and rounds up. A date on a boundary stays there, unlike `ceiling_date`.
+Two choices differ from lubridate. The default unit is `day`, as for
+`floor_date`; lubridate's is `second`. The first 01:30 of an autumn
+fallback is a tie between 01:00 EDT and the next hour, 01:00 EST, so it
+rounds up to 01:00 EST; lubridate takes 02:00 EST as the next hour (see
+`ceiling_date` above) and rounds down to 01:00 EDT. Sub-day units leave a
+date unchanged, where lubridate returns a datetime.
+
+`make_date(year, month, day)` and `make_datetime(year, month, day, hour,
+min, sec, tz="UTC")` build values from columns (a name or `col()`) and
+numbers, with lubridate's defaults of 1970-01-01 00:00:00. A missing part
+gives a missing result. `make_date` returns missing for a date that does
+not exist (30 February, month 13, day 0) and drops fractions toward zero,
+so year 2023.7 is 2023. `make_datetime` rolls out-of-range parts over
+instead, as lubridate does: 31 February 2023 is 3 March, hour 25 is 01:00
+the next day, minute -61 is 22:59 the previous day, and month 13 is January
+of the next year. `sec` keeps fractions to the microsecond. In `tz`, a clock
+that daylight saving skips lands on the transition (02:30 on 10 March 2024
+in New York is 03:00 EDT), and a repeated clock takes the later occurrence
+(01:30 on 3 November 2024 is EST). lubridate raises on a fractional year,
+month, day, hour, or minute; tidy3 raises for a number and returns missing
+for a value in a column. An infinite `sec` is missing, where lubridate
+returns an infinite time. Both run in Polars without reading the rows; a
+`tz` other than UTC resolves skipped and repeated clocks one batch at a
+time.
+
+`isoyear` is the ISO 8601 year that `isoweek` counts in: 1 January 2021 is
+in week 53 of 2020. `leap_year` takes dates, datetimes, or numeric years.
+As in lubridate, it cuts a fractional year toward zero (2000.5 is a leap
+year), and 1900 is not a leap year while 2000 is.
 
 `date + months(1)` and `add_with_rollback` roll an impossible day back to
 the last real day of the destination month. 31 January 2010 plus one month
