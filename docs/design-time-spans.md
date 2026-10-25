@@ -1,7 +1,7 @@
 # Design: durations, periods, and intervals
 
-Status: **proposal, awaiting approval.** No code is written until the open
-questions at the end are decided. This note closes the last part of item 5
+Status: **approved 2026-10-25.** The open questions were decided as
+recommended; see [Decisions](#5-decisions). This note closes the last part of item 5
 in the [2026-10-21 package review](package-review-2026-10-21.md): "a
 deliberate calendar-period versus elapsed-duration and interval design."
 
@@ -156,7 +156,7 @@ lubridate's.
 | `2024-02-10 02:30 EST` + one month | `2024-03-10 01:30 EST` | `NA` | `2024-03-10 03:00 EDT` |
 
 The 01:30 EST result is an hour *before* the requested clock time and
-matches neither R operator. Phase 1 fixes it (see open question 3).
+matches neither R operator. Phase 1 fixes it (decision 3).
 
 ### Polars
 
@@ -190,7 +190,7 @@ checks when a Date meets a duration; and the anchored `time_length`.
 
 ### Durations
 
-| Item | Proposal |
+| Item | Design |
 |---|---|
 | Constructors | `dseconds`, `dminutes`, `dhours`, `ddays`, `dweeks`, `dmonths`, `dyears`, `duration(num, units)`, `as_duration(x)` |
 | Arguments | Integer, float, or column. Fractions are allowed, as in R. Missing counts give missing durations. |
@@ -211,17 +211,17 @@ cars >> filter(dseconds(col("qsec")) < dseconds(17))
 
 ### Periods
 
-| Item | Proposal |
+| Item | Design |
 |---|---|
 | Constructors | Existing `months`, `years`; new `weeks`, `days`, `hours`, `minutes`, `seconds`, `period(**units)`, and `as_period` |
 | Arguments | Integers or columns only; `days(1.5)` raises, as in R |
 | Python object | `Period` with slots `years, months, days, hours, minutes, seconds` (weeks become 7 days, as R prints `7d`). `+`, `-`, and `* int` combine slots; no normalization, so `hours(25)` stays 25 hours. |
-| Column dtype | None in Phase 1; see open question 4 |
+| Column dtype | None in Phase 1; a struct column in Phase 3 (decision 4) |
 | Arithmetic order | One step: all months (`12 * years + months`) with rollback, then days on the calendar, then hours/minutes/seconds on the local clock. Then the local clock is placed back in the zone. |
 | `date + days(1)` | Date. A period with clock units gives a naive datetime, as R gives a UTC `POSIXct`. |
 | `datetime + days(1)` across the spring change | `2024-03-10 12:00 EDT` (23 real hours), matching R |
 | `datetime + hours(1)` at 01:30 on 10 March | missing, matching R |
-| Skipped clock | Missing, matching lubridate's `+` (open question 3) |
+| Skipped clock | Missing, matching lubridate's `+` (decision 3) |
 | Repeated clock | Keep the input's UTC offset when it is valid for the result; otherwise the earlier occurrence (see section 4) |
 | `period + duration` | Raises, as R does |
 
@@ -238,10 +238,10 @@ stays a single `offset_by`, as it is today.
 
 ### Intervals
 
-| Item | Proposal |
+| Item | Design |
 |---|---|
 | Constructor | `interval(start, end)`; no `%--%` operator in Python |
-| Column dtype | `pl.Struct({"start": T, "end": T})`, where `T` is the inputs' common dtype. A Date stays a Date (open question 5); a zoned start keeps its zone and the end is converted to it, as R does. |
+| Column dtype | `pl.Struct({"start": T, "end": T})`, where `T` is the inputs' common dtype. A Date stays a Date (decision 5); a zoned start keeps its zone and the end is converted to it, as R does. |
 | Recognition | The frame records interval columns by name, as it records factor levels, so a user's unrelated `{start, end}` struct is not treated as one |
 | Missing | Either end missing makes the whole struct missing, so `is_na(col("season"))` works |
 | Accessors | `int_start`, `int_end`, `int_length` (a Duration; R gives seconds), `int_flip`, `int_shift(i, period_or_duration)`, `int_standardize` |
@@ -300,7 +300,7 @@ raw >> filter(within(col("date_egg"), interval(date(2008, 11, 1), date(2008, 11,
 | Repeated clock after period arithmetic | Always the earlier repeat; `x + seconds(0)` can change the instant | Keep the input's offset when still valid, else earlier | Adding zero must be a no-op. `force_tz` already preserves an already resolved repeat. |
 | `date - date` | `difftime` with automatic units | `Duration` column | Python and Polars have no `difftime`; a duration converts to any unit with `time_length`. |
 | `int_length` | Seconds as a double | `Duration` | Typed result; `time_length(i, "second")` gives the number. |
-| Interval ends from Dates | Converted to UTC datetimes | Stay Dates (open question 5) | No invented time zone; dates compare and print as dates. |
+| Interval ends from Dates | Converted to UTC datetimes | Stay Dates (decision 5) | No invented time zone; dates compare and print as dates. |
 | `interval / months(1)` | `1.016667`, unlike `time_length`'s `1` | Raises; points to `time_length` | Two answers for one question invite errors. `//` keeps the whole-unit idiom. |
 | `sum(days(1:3))` | `0` | Not available until period columns exist; then field-wise sums | R's result is a slot artefact, not a design. |
 | Date + duration, mixed vector | Per vector: all whole days stay Date | Decided by the literal, or always datetime for a duration column | A lazy plan must know its dtype before reading rows. |
@@ -310,46 +310,45 @@ Every other case should match lubridate, including the anchored and
 asymmetric `time_length` for reversed intervals, 365.25-day `dyears`, and
 `NA` for periods landing in a skipped clock.
 
-## 5. Open questions
+## 5. Decisions
 
-1. **Keep rollback for `+ months(1)`?**
-   *Recommend:* keep rollback as the only `+` behaviour; add lubridate's
-   `roll_to_first=True` to `add_with_rollback`, and no NA mode.
-   *Trade-off:* scripts ported from R that rely on `NA` to drop 31sts behave
-   differently; an `invalid="NA"` option could come later without breaking
-   anything.
-2. **What does `date - date` return?**
-   *Recommend:* a `Duration` column, unchanged from Polars.
-   *Trade-off:* R prints `30 days` and `as.numeric` gives 30; tidy3 users
-   write `time_length(d, "day")`. A difftime-like class would add a dtype
-   Polars does not have.
-3. **Skipped clock after adding months to a zoned datetime.**
-   *Recommend:* missing for `+` with any period, matching lubridate's `+`;
-   `add_with_rollback` gives the transition (03:00 EDT), matching `%m+%`.
-   Both replace today's 01:30 EST.
-   *Trade-off:* `x + months(1)` and `add_with_rollback(x, months(1))` would
-   differ for zoned datetimes only. The alternative is the transition for
-   both, which never loses data but departs from lubridate's `+`.
-4. **Period columns.**
-   *Recommend:* Phase 1 keeps periods as operands only. Phase 3 adds a
-   struct column (`years, months, days, hours, minutes, seconds`) for
-   `as_period(interval)` and `period(col(...))`.
-   *Trade-off:* until then `as.period` results cannot be stored; the struct
-   needs its own printing and pandas conversion.
-5. **Interval ends for Dates.**
-   *Recommend:* keep Date ends.
-   *Trade-off:* `int_start` returns a Date, not R's UTC datetime, and
-   `int_length` of a Date interval is whole days only.
-6. **Intervals on pandas collection.**
-   *Recommend:* Arrow struct dtype for interval columns even without
-   `arrow_backed=True`.
-   *Trade-off:* one column type differs from the default NumPy-backed
-   conversion; the alternative is an `object` column of dicts, which
-   pandas cannot compute on, or splitting into `name_start`/`name_end`,
-   which round-trips poorly.
-7. **Repeated clocks.**
-   *Recommend:* preserve the input's offset, otherwise earlier.
-   *Trade-off:* a few autumn results differ from lubridate (its
+All seven questions were decided on 2026-10-25, each as recommended. The
+trade-off of each is kept as its rationale.
+
+1. **`+ months(1)` keeps rollback.** Rollback stays the only `+`
+   behaviour; `add_with_rollback` gains lubridate's `roll_to_first=True`.
+   There is no NA mode.
+   *Trade-off accepted:* scripts ported from R that rely on `NA` to drop
+   31sts behave differently; an `invalid="NA"` option could come later
+   without breaking anything.
+2. **`date - date` returns a `Duration` column**, unchanged from Polars.
+   *Trade-off accepted:* R prints `30 days` and `as.numeric` gives 30;
+   tidy3 users write `time_length(d, "day")`. A difftime-like class would
+   add a dtype Polars does not have.
+3. **Skipped clock after adding a period to a zoned datetime:** missing
+   for `+` with any period, matching lubridate's `+`; `add_with_rollback`
+   gives the transition (03:00 EDT), matching `%m+%`. Both replace today's
+   01:30 EST.
+   *Trade-off accepted:* `x + months(1)` and `add_with_rollback(x,
+   months(1))` differ for zoned datetimes only. The alternative, the
+   transition for both, never loses data but departs from lubridate's `+`.
+4. **Period columns wait for Phase 3.** Phase 1 keeps periods as operands
+   only. Phase 3 adds a struct column (`years, months, days, hours,
+   minutes, seconds`) for `as_period(interval)` and `period(col(...))`.
+   *Trade-off accepted:* until then `as.period` results cannot be stored;
+   the struct needs its own printing and pandas conversion.
+5. **Interval ends built from Dates stay Dates.**
+   *Trade-off accepted:* `int_start` returns a Date, not R's UTC datetime,
+   and `int_length` of a Date interval is whole days only.
+6. **Interval columns collect to pandas as an Arrow struct dtype**, even
+   without `arrow_backed=True`.
+   *Trade-off accepted:* one column type differs from the default
+   NumPy-backed conversion. The alternatives were an `object` column of
+   dicts, which pandas cannot compute on, or splitting into
+   `name_start`/`name_end`, which round-trips poorly.
+7. **A repeated clock keeps the input's offset**, otherwise the earlier
+   occurrence, so `x + seconds(0)` is `x`.
+   *Trade-off accepted:* a few autumn results differ from lubridate (its
    `x + seconds(0)` moves the instant); matching R exactly is simpler to
    test but breaks `x + 0 == x`.
 
@@ -359,7 +358,7 @@ asymmetric `time_length` for reversed intervals, 365.25-day `dyears`, and
 |---|---|---|
 | 1 | Duration constructors, `as_duration`, `time_length`/`as_numeric` for durations; `days`, `weeks`, `hours`, `minutes`, `seconds`, `period()`; widened `Period`; clock-time arithmetic and zone resolution; fix the skipped-hour month result; `add_with_rollback(roll_to_first=)` | Extends `compile_period_bin` and `shift_pandas`; no new dtypes |
 | 2 | `interval`, accessors, `within`, `int_overlaps`, `int_shift`, `int_flip`, `int_standardize`, `time_length` for intervals, `//` with periods, interval metadata and pandas collection | The struct column and metadata land together |
-| 3 | Period columns, `as_period`, `period_to_seconds`, `seconds_to_period` | Only after open question 4 is decided |
+| 3 | Period columns, `as_period`, `period_to_seconds`, `seconds_to_period` | Struct column as decided (decision 4) |
 
 Each phase updates `docs/reference.md`, `CHANGELOG.md`, the "Where these
 differ from R on purpose" list, and the `bench_api` classification.
