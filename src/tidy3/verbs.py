@@ -154,6 +154,7 @@ class Verb:
                         problems=getattr(other, "_problems", None),
                         data_reads=getattr(other, "_data_reads", ()),
                         totals=getattr(other, "_totals", None),
+                        tabyl=getattr(other, "_tabyl", None),
                     )
                 except (AttributeError, TypeError) as e:
                     raise TypeError(

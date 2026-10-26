@@ -279,10 +279,11 @@ decisions, not the next missing Python data-cleaning helpers.
 4. **Common reporting:** `tabyl`, totals, and percentages. Keep numerical
    counts/percentages usable before adding formatted presentation strings.
 
-   **Follow-up: added in the working tree.** `tabyl` (one and two
-   variables), `adorn_totals`, and numeric `adorn_percentages`. Formatted
-   strings (`adorn_pct_formatting`, `adorn_ns`) and three-variable tables
-   remain.
+   **Follow-up: added in the working tree.** `tabyl` (one, two, and three
+   variables), `adorn_totals`, numeric `adorn_percentages`, and the
+   formatting steps `adorn_pct_formatting` and `adorn_ns`, whose text
+   output comes last. A three-variable tabyl is a dict of tables that the
+   `adorn_*` verbs map over. All are checked against janitor 2.2.1.
 5. **Date/time completeness:** time-of-day parsing, remaining common orders,
    `round_date`, constructors, then a deliberate calendar-period versus
    elapsed-duration and interval design.

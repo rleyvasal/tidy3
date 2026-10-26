@@ -1229,7 +1229,7 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
             ]
             return node
 
-        if verb in _SLICE_BY_VERBS or verb in {"adorn_totals", "adorn_percentages"}:
+        if verb in _SLICE_BY_VERBS or verb in {"adorn_totals", "adorn_percentages", "adorn_pct_formatting", "adorn_ns"}:
             node.args = [self.visit(a) for a in node.args]
             node.keywords = [
                 self._mask_keyword(kw, default="selector") for kw in node.keywords
