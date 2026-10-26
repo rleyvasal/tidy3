@@ -433,3 +433,18 @@ def test_group_callbacks_match_across_part_strategies(groups):
     assert [p.collect()["x"].to_list() for p in parts] == [
         [i for i, k in enumerate(keys) if k == g] for g in range(groups)
     ]
+
+
+def test_slice_tail_keeps_groups_shorter_than_n():
+    import tidy3 as t3
+
+    data = t3.tidy({"g": [2, 1, 2, None, 1, 2, 1], "x": [5, 4, 3, 2, 1, 6, 7]})
+    grouped = data >> t3.group_by("g")
+    # The one-row group (missing key) and the three-row groups all keep
+    # their last rows; a group shorter than n keeps every row.
+    assert (grouped >> t3.slice_tail(n=2)).collect()["x"].to_list() == [3, 2, 1, 6, 7]
+    assert (grouped >> t3.slice_tail(n=5)).collect()["x"].to_list() == [5, 4, 3, 2, 1, 6, 7]
+    assert (grouped >> t3.slice_tail(n=1)).collect()["x"].to_list() == [2, 6, 7]
+    assert (grouped >> t3.slice_head(n=1)).collect()["x"].to_list() == [5, 4, 2]
+    assert (data >> t3.slice_tail(n=20)).collect().height == 7
+    assert (data >> t3.slice_tail(n=2)).collect()["x"].to_list() == [6, 7]

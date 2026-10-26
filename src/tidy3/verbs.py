@@ -1871,13 +1871,31 @@ def slice_head(
 
     def _apply(tf):
         groups, transient = _operation_groups(tf, by, "slice_head")
-        target = _windowed(_slice_target(n, prop), groups)
-        predicate = _slice_local_index(groups) < target
-        return tf._with_lf(
-            tf._lf.filter(predicate), groups=None if transient else tf._groups
-        )
+        lf = _slice_end(tf._lf, groups, n, prop, first=True)
+        if lf is None:
+            target = _windowed(_slice_target(n, prop), groups)
+            lf = tf._lf.filter(_slice_local_index(groups) < target)
+        return tf._with_lf(lf, groups=None if transient else tf._groups)
 
     return Verb(_apply, "slice_head")
+
+
+def _slice_end(lf: pl.LazyFrame, groups: list[str] | None, n: int | None, prop: float | None, *, first: bool) -> pl.LazyFrame | None:
+    """The first or last *n* rows as a slice, or one row per group as a
+    ``unique``, when either says the same as the row-number filter: a
+    whole count, not a proportion or a count from the other end.
+
+    A slice lets Polars stop early; ``unique`` on the keys costs half the
+    filter over ``int_range().over(groups)`` and keeps the rows' order.
+    Nulls and NaNs are one group each in both forms.
+    """
+    if prop is not None or n is None or n < 0:
+        return None
+    if not groups:
+        return lf.head(n) if first else lf.tail(n)
+    if n == 1:
+        return lf.unique(subset=groups, keep="first" if first else "last", maintain_order=True)
+    return None
 
 
 def slice_tail(
@@ -1887,13 +1905,16 @@ def slice_tail(
 
     def _apply(tf):
         groups, transient = _operation_groups(tf, by, "slice_tail")
-        target = _windowed(_slice_target(n, prop), groups)
-        predicate = _slice_local_index(groups) >= (
-            _slice_group_len(groups) - target
-        )
-        return tf._with_lf(
-            tf._lf.filter(predicate), groups=None if transient else tf._groups
-        )
+        lf = _slice_end(tf._lf, groups, n, prop, first=False)
+        if lf is None:
+            target = _windowed(_slice_target(n, prop), groups)
+            # Signed: a group shorter than n keeps all its rows, where the
+            # unsigned length minus n would wrap and keep none.
+            lf = tf._lf.filter(
+                _slice_local_index(groups)
+                >= (_slice_group_len(groups).cast(pl.Int64) - target)
+            )
+        return tf._with_lf(lf, groups=None if transient else tf._groups)
 
     return Verb(_apply, "slice_tail")
 
@@ -4326,7 +4347,7 @@ def _pl_guard_no_rows(
         return True
 
     sentinel = violations.select(pl.len().alias(count_name)).select(
-        *[pl.lit(None).cast(dtype).alias(name) for name, dtype in schema.items()],
+        *[pl.lit(None, dtype=dtype).alias(name) for name, dtype in schema.items()],
         pl.col(count_name)
         .map_elements(validate, return_dtype=pl.Boolean, skip_nulls=False)
         .alias(marker),
@@ -4347,26 +4368,6 @@ def _pl_row_inputs(tf: Any, right: Any, operation: str):
     if extra:
         raise ValueError(f"{operation}(): y has columns absent from x: {extra}")
     return y, x_columns, y_columns
-
-
-def _pl_match_y(
-    y: pl.LazyFrame,
-    x: pl.LazyFrame,
-    keys: list[str],
-    columns: list[str],
-) -> tuple[pl.LazyFrame, str]:
-    marker = _temp_column(columns, "__tidy3_match")
-    x_keys = x.select(keys).unique().with_columns(pl.lit(True).alias(marker))
-    return (
-        y.join(
-            x_keys,
-            on=keys,
-            how="left",
-            nulls_equal=True,
-            maintain_order="left",
-        ),
-        marker,
-    )
 
 
 def _rows_operation(
@@ -4397,27 +4398,41 @@ def _rows_operation(
                 f"{operation}(): y keys must be unique",
             )
 
+        # Every join hashes y, the small side, and probes x: the y rows
+        # with a match are read off the main join (update, patch, upsert)
+        # or an inner join of x's keys against y's row ids (insert,
+        # delete), never from a unique() over x's keys.
+        occupied = [*x_columns, *y_columns]
+        right_id = _temp_column(occupied, "__tidy3_y_row")
+        y = y.with_row_index(right_id)
+        y_ids = y.select(right_id)
+        guards: list[tuple[pl.LazyFrame, str]] = []
+
+        def matched_in_x() -> pl.LazyFrame:
+            return (
+                tf._lf.select(keys)
+                .join(y.select(right_id, *keys), on=keys, how="inner", nulls_equal=True)
+                .select(right_id)
+                .unique()
+            )
+
+        def missing_from_x(matched: pl.LazyFrame) -> pl.LazyFrame:
+            return y_ids.join(matched, on=right_id, how="anti")
+
         if operation == "rows_append":
             additions = y
-        else:
-            checked, marker = _pl_match_y(y, tf._lf, keys, [*x_columns, *y_columns])
-            is_match = pl.col(marker).fill_null(False)
-            if operation == "rows_insert":
-                if conflict == "error":
-                    checked = _pl_assert_rows(
-                        checked,
-                        (~is_match).all(),
-                        "rows_insert(): y contains keys that already exist in x",
-                    )
-                additions = checked.filter(~is_match).drop(marker)
-            elif operation in {"rows_update", "rows_patch", "rows_delete"}:
-                if unmatched == "error":
-                    checked = _pl_assert_rows(
-                        checked,
-                        is_match.all(),
-                        f"{operation}(): y contains keys absent from x",
-                    )
-                y = checked.filter(is_match).drop(marker)
+        elif operation == "rows_insert":
+            matched = matched_in_x()
+            if conflict == "error":
+                guards.append((matched, "rows_insert(): y contains keys that already exist in x"))
+            additions = y.join(matched, on=right_id, how="anti", maintain_order="left")
+        elif operation == "rows_delete" and unmatched == "error":
+            guards.append((missing_from_x(matched_in_x()), f"{operation}(): y contains keys absent from x"))
+
+        def guarded(lf: pl.LazyFrame) -> pl.LazyFrame:
+            for violations, message in guards:
+                lf = _pl_guard_no_rows(lf, violations, message)
+            return lf
 
         def aligned(frame: pl.LazyFrame, frame_columns: list[str]) -> pl.LazyFrame:
             return frame.select(
@@ -4432,7 +4447,7 @@ def _rows_operation(
         if operation in {"rows_append", "rows_insert"}:
             additions = aligned(additions, y_columns)
             lf = pl.concat([tf._lf, additions], how="vertical_relaxed")
-            return tf._with_lf(lf, groups=tf._groups)
+            return tf._with_lf(guarded(lf), groups=tf._groups)
         if operation == "rows_delete":
             lf = tf._lf.join(
                 y.select(keys),
@@ -4441,11 +4456,10 @@ def _rows_operation(
                 nulls_equal=True,
                 maintain_order="left",
             )
-            return tf._with_lf(lf, groups=tf._groups)
+            return tf._with_lf(guarded(lf), groups=tf._groups)
 
         update_columns = [column for column in y_columns if column not in keys]
-        occupied = [*x_columns, *y_columns]
-        marker = _temp_column(occupied, "__tidy3_update_match")
+        marker = _temp_column([*occupied, right_id], "__tidy3_update_match")
         rename_map: dict[str, str] = {}
         for column in update_columns:
             incoming = _temp_column([*occupied, *rename_map.values()], f"__tidy3_y_{column}")
@@ -4474,16 +4488,15 @@ def _rows_operation(
                     .alias(column)
                 )
         updated = joined.select(expressions)
+        # The y rows the main join reached; Polars computes the join once.
+        matched = joined.select(right_id).filter(pl.col(right_id).is_not_null()).unique()
         if operation == "rows_upsert":
-            checked, match_marker = _pl_match_y(
-                y, tf._lf, keys, [*x_columns, *y_columns, marker]
-            )
-            additions = checked.filter(
-                ~pl.col(match_marker).fill_null(False)
-            ).drop(match_marker)
+            additions = y.join(matched, on=right_id, how="anti", maintain_order="left")
             additions = aligned(additions, y_columns)
             updated = pl.concat([updated, additions], how="vertical_relaxed")
-        return tf._with_lf(updated, groups=tf._groups)
+        elif unmatched == "error":
+            guards.append((missing_from_x(matched), f"{operation}(): y contains keys absent from x"))
+        return tf._with_lf(guarded(updated), groups=tf._groups)
 
     return Verb(_apply, operation)
 

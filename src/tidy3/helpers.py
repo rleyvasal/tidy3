@@ -368,6 +368,18 @@ _ROUND_KEEP_DIGITS = 15
 
 
 def _round_expr(value: pl.Expr, digits: int) -> pl.Expr:
+    from tidy3.expr import input_dtype
+
+    known = input_dtype(value)
+    if known is not None and known.is_integer() and digits >= 0:
+        # Whole numbers stay as they are: no batch to run.
+        return value
+    if digits == 0 and known is not None and known.is_float():
+        # Nothing is scaled, so Polars' ties-to-even is R's round(x):
+        # checked against the candidate comparison on halves, huge
+        # values, subnormals, infinities, and signed zero.
+        return value.round(0, mode="half_to_even")
+
     def batch(series: pl.Series) -> pl.Series:
         if series.dtype.is_integer() and digits >= 0:
             return series
