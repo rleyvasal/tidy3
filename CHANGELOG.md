@@ -4,7 +4,9 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.11.0 — 2026-10-26
+
+Durations and periods, stringr's case helpers, pivot prototypes and name repair, report counts and percentage text, and the public API's slowest functions brought within about twice raw Polars.
 
 ### Added
 
