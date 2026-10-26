@@ -561,7 +561,232 @@ def complete(
     return Verb(_apply, "complete")
 
 
-def _pivot_longer_core(
+_NAME_REPAIRS = ("check_unique", "minimal", "unique", "universal")
+
+
+def _check_names_repair(names_repair: Any) -> None:
+    if not callable(names_repair) and names_repair not in _NAME_REPAIRS:
+        choices = ", ".join(repr(choice) for choice in _NAME_REPAIRS)
+        raise ValueError(f"names_repair must be one of {choices}, or a function")
+
+
+def _python_name(name: str) -> str:
+    """vctrs' "universal" name in Python spelling: a valid identifier.
+
+    Characters an identifier cannot hold become ``_`` (vctrs: ``.``), and a
+    name starting with a digit or a keyword gets a leading ``_`` (vctrs:
+    ``..`` or ``.``).
+    """
+    import keyword
+
+    text = "".join(char if ("a" + char).isidentifier() else "_" for char in name)
+    if text and (text[0].isdigit() or keyword.iskeyword(text)):
+        text = "_" + text
+    return text
+
+
+def _repair_names(names: list[str], names_repair: Any, verb: str) -> list[str]:
+    """Output names after tidyr's ``names_repair``, in tidy3's spelling.
+
+    ``"unique"`` numbers duplicated or empty names by position as
+    ``bind_cols()`` does (``x_1``, where vctrs writes ``x...1``), and
+    ``"universal"`` also makes each name a Python identifier. Polars columns
+    need unique names, so a repair that leaves duplicates raises.
+    """
+    from tidy3.verbs import _repair_bind_names
+
+    if callable(names_repair):
+        repaired = [str(name) for name in names_repair(list(names))]
+        if len(repaired) != len(names):
+            raise ValueError(f"{verb}() names_repair must return {len(names)} names, not {len(repaired)}")
+    elif names_repair == "unique":
+        repaired = _repair_bind_names(list(names))
+    elif names_repair == "universal":
+        repaired = _repair_bind_names([_python_name(name) for name in names])
+    else:
+        repaired = list(names)
+    duplicated = sorted({name for name in repaired if repaired.count(name) > 1})
+    if names_repair == "check_unique" and (duplicated or "" in repaired):
+        shown = ", ".join(repr(name) for name in duplicated) or "''"
+        raise ValueError(
+            f"{verb}(): names must be unique and not empty; these are not: {shown}. "
+            'Use names_repair="unique" (or "universal") to repair them.'
+        )
+    if duplicated:
+        shown = ", ".join(repr(name) for name in duplicated)
+        raise ValueError(
+            f"{verb}(): names_repair leaves duplicated names {shown}; Polars "
+            'columns need unique names, so use names_repair="unique".'
+        )
+    return repaired
+
+
+def _renamed(lf: pl.LazyFrame, internal: list[str], names: list[str]) -> pl.LazyFrame:
+    """Select *internal* columns as *names*, which may swap or reuse names."""
+    return lf.select(pl.col(old).alias(new) for old, new in zip(internal, names))
+
+
+_PTYPES = {int: pl.Int64, float: pl.Float64, str: pl.String, bool: pl.Boolean}
+
+
+def _ptype_dtype(ptype: Any, what: str) -> Any:
+    """The Polars type for one ``names_ptypes``/``values_ptypes`` entry."""
+    import datetime
+
+    import pandas as pd
+
+    if ptype in _PTYPES:
+        return _PTYPES[ptype]
+    if ptype is datetime.date:
+        return pl.Date
+    if ptype is datetime.datetime:
+        return pl.Datetime("us")
+    if isinstance(ptype, pd.CategoricalDtype):
+        if ptype.categories is None:
+            raise TypeError(f"{what}: a categorical prototype needs its categories")
+        return pl.Enum([str(level) for level in ptype.categories])
+    if isinstance(ptype, pl.DataType) or (isinstance(ptype, type) and issubclass(ptype, pl.DataType)):
+        return ptype
+    raise TypeError(
+        f"{what} entries must be int, float, str, bool, datetime.date, "
+        f"datetime.datetime, a pandas CategoricalDtype, or a Polars type, not {ptype!r}"
+    )
+
+
+def _cast_to(x: pl.Expr, source: Any, target: Any) -> tuple[pl.Expr, pl.Expr | None] | None:
+    """vctrs' ``vec_cast()`` rules: the cast and its loss check, or None.
+
+    Types convert only without losing information: whole doubles to
+    integers, 0/1 to logicals, text or factors to a factor that has every
+    value as a level. Text does not parse into numbers (use a transform).
+    """
+    if source == target:
+        return x, None
+    if source == pl.Null:
+        return x.cast(target), None
+    present = x.is_not_null()
+    if target.is_float():
+        if source.is_numeric() or source == pl.Boolean:
+            return x.cast(target), None
+        return None
+    if target.is_integer():
+        if source == pl.Boolean:
+            return x.cast(target), None
+        if source.is_integer():
+            return x.cast(target, strict=False), present & x.cast(target, strict=False).is_null()
+        if source.is_float():
+            cast = x.cast(target, strict=False)
+            lost = present & (cast.cast(pl.Float64) != x).fill_null(True)
+            return cast, lost
+        return None
+    if target == pl.Boolean:
+        if source.is_numeric():
+            return x.cast(target), present & ~x.is_in([0, 1])
+        return None
+    if target == pl.String:
+        if source in (pl.Categorical,) or isinstance(source, (pl.Enum, pl.Categorical)):
+            return x.cast(target), None
+        return None
+    if isinstance(target, pl.Enum):
+        if source == pl.String or isinstance(source, (pl.Enum, pl.Categorical)):
+            cast = x.cast(pl.String).cast(target, strict=False)
+            return cast, present & cast.is_null()
+        return None
+    if isinstance(target, pl.Datetime) or target == pl.Datetime:
+        if source == pl.Date or isinstance(source, pl.Datetime):
+            return x.cast(target), None
+        return None
+    return None
+
+
+def _ptype_casts(lf: pl.LazyFrame, ptypes: Any, columns: dict[str, str], what: str) -> pl.LazyFrame:
+    """Cast *columns* (requested name -> internal name) to their prototypes.
+
+    One prototype applies to every column; a dict names the columns.
+    Checking a lossy cast reads the data.
+    """
+    if ptypes is None:
+        return lf
+    if isinstance(ptypes, dict):
+        unknown = [name for name in ptypes if name not in columns]
+        if unknown:
+            raise KeyError(f"{what} names unknown columns: {unknown}")
+        chosen = dict(ptypes)
+    else:
+        chosen = {name: ptypes for name in columns}
+    schema = lf.collect_schema()
+    casts, checks = [], []
+    for name, ptype in chosen.items():
+        internal = columns[name]
+        target = _ptype_dtype(ptype, what)
+        source = schema[internal]
+        found = _cast_to(pl.col(internal), source, target)
+        if found is None:
+            raise TypeError(f"{what}: can't convert `{name}` <{source}> to <{target}>")
+        cast, lost = found
+        casts.append(cast.alias(internal))
+        if lost is not None:
+            checks.append((name, source, target, lost.any().alias(f"__tidy3_lost_{len(checks)}")))
+    if checks:
+        from tidy3.frame import note_data_read
+
+        note_data_read(f"{what} checks that the cast keeps every value")
+        lost_any = lf.select([check for *_, check in checks]).collect().row(0)
+        for (name, source, target, _), lost in zip(checks, lost_any):
+            if lost:
+                raise ValueError(
+                    f"{what}: can't convert `{name}` <{source}> to <{target}> without losing values"
+                )
+    return lf.with_columns(casts) if casts else lf
+
+
+def _transform_exprs(transform: Any, columns: dict[str, str], what: str) -> list[pl.Expr]:
+    """``names_transform``/``values_transform`` on *columns* (name -> internal).
+
+    *transform* is one function for every column or a dict by column name.
+    Python types (``int``, ``float``, ``str``, ``bool``) cast in the engine;
+    other functions run on each value, missing values passing through.
+    """
+    if transform is None:
+        return []
+    mapping = (
+        dict(transform)
+        if isinstance(transform, dict)
+        else {name: transform for name in columns}
+    )
+    unknown = [name for name in mapping if name not in columns]
+    if unknown:
+        raise KeyError(f"{what} names unknown columns: {unknown}")
+    expressions = []
+    for name, fn in mapping.items():
+        x = pl.col(columns[name])
+        if fn in _PTYPES:
+            expressions.append(x.cast(_PTYPES[fn]))
+        else:
+            expressions.append(x.map_elements(fn, skip_nulls=True, return_dtype=None))
+    return expressions
+
+
+def _transform_columns(tf: Any, transform: Any, columns: list[str], what: str) -> Any:
+    """Apply ``names_transform``/``values_transform`` to *columns* of *tf*."""
+    expressions = _transform_exprs(transform, {name: name for name in columns}, what)
+    if not expressions:
+        return tf
+    return tf._with_lf(tf._lf.with_columns(expressions), groups=tf._groups)
+
+
+def _any_present(lf: pl.LazyFrame, columns: list[str]) -> pl.Expr:
+    """Rows where any of *columns* is present: not null, and not NaN (vctrs)."""
+    schema = lf.collect_schema()
+    return pl.any_horizontal(
+        pl.col(name).is_not_null() & pl.col(name).is_not_nan()
+        if _is_float_dtype(schema[name])
+        else pl.col(name).is_not_null()
+        for name in columns
+    )
+
+
+def pivot_longer(
     cols: Any,
     *,
     names_to: str | list[str] | tuple[str, ...] | None = "name",
@@ -569,16 +794,33 @@ def _pivot_longer_core(
     names_prefix: str | None = None,
     names_sep: str | None = None,
     names_pattern: str | None = None,
+    names_ptypes: Any = None,
+    names_transform: Any = None,
+    names_repair: Any = "check_unique",
     values_drop_na: bool = False,
+    values_ptypes: Any = None,
+    values_transform: Any = None,
     cols_vary: str = "fastest",
 ) -> Verb:
-    """Lengthen selected columns, with optional name splitting."""
+    """Lengthen selected columns, with optional name splitting.
+
+    As in tidyr, ``names_transform`` / ``values_transform`` convert the new
+    name and value columns: one function, or a dict by column name, e.g.
+    ``names_transform={"week": int}`` turns ``"1"`` into ``1``. Then
+    ``names_ptypes`` / ``values_ptypes`` check the types: a Python type, a
+    Polars type, or a pandas ``CategoricalDtype``, cast only when no value
+    changes (``pl.Enum(["b", "a"])`` makes a factor with those levels).
+    ``names_repair`` handles output names that clash: ``"check_unique"``
+    (the default) raises, ``"unique"`` numbers them (``name_1``),
+    ``"universal"`` also makes them identifiers, or pass a function.
+    """
     if cols_vary not in {"fastest", "slowest"}:
         raise ValueError("cols_vary must be 'fastest' or 'slowest'")
     if not isinstance(values_to, str) or not values_to:
         raise TypeError("values_to must be a non-empty string")
     if names_sep is not None and names_pattern is not None:
         raise ValueError("supply only one of names_sep or names_pattern")
+    _check_names_repair(names_repair)
     name_columns = (
         []
         if names_to is None
@@ -591,6 +833,8 @@ def _pivot_longer_core(
         raise ValueError(
             "multiple names_to columns require names_sep or names_pattern"
         )
+    if len(set(name_columns)) != len(name_columns):
+        raise ValueError("names_to must not repeat a name")
 
     def _apply(tf):
         pivoted = resolve_selection(tf, [cols])
@@ -598,26 +842,33 @@ def _pivot_longer_core(
             raise ValueError("pivot_longer() selected no columns")
         all_columns = _columns(tf)
         identifiers = [name for name in all_columns if name not in pivoted]
-        output_name_columns = [
-            name for name in name_columns if name != ".value"
+        # Build under private names and rename once at the end, so a new
+        # column may share an identifier's name until names_repair decides.
+        taken = list(all_columns)
+
+        def private(base: str) -> str:
+            name = _temp_name(taken, base)
+            taken.append(name)
+            return name
+
+        variable = private("__tidy3_name")
+        row = private("__tidy3_row")
+        id_columns = [private("__tidy3_id") for _ in identifiers]
+        key_columns = [
+            ".value" if name == ".value" else private("__tidy3_key")
+            for name in name_columns
         ]
-        collisions = set(identifiers) & (
-            ({values_to} if not value_sentinel else set())
-            | set(output_name_columns)
-        )
-        if collisions:
-            raise ValueError(
-                f"pivot_longer() output names collide with existing columns: {sorted(collisions)}"
+        value_column = private("__tidy3_value")
+
+        lf = (
+            tf._lf.rename(dict(zip(identifiers, id_columns)))
+            .with_row_index(row)
+            .unpivot(
+                on=pivoted,
+                index=[*id_columns, row],
+                variable_name=variable,
+                value_name=value_column,
             )
-        variable = _temp_name(all_columns, "__tidy3_name")
-        row = _temp_name([*all_columns, variable], "__tidy3_row")
-
-
-        lf = tf._lf.with_row_index(row).unpivot(
-            on=pivoted,
-            index=[*identifiers, row],
-            variable_name=variable,
-            value_name=values_to,
         )
         # Sort explicitly: unpivot()'s row order changed in Polars 2.
         if cols_vary == "fastest":
@@ -634,12 +885,12 @@ def _pivot_longer_core(
                 rf"^(?:{names_prefix})", ""
             )
         if len(name_columns) == 1:
-            lf = lf.with_columns(name_expression.alias(name_columns[0]))
+            lf = lf.with_columns(name_expression.alias(key_columns[0]))
         elif len(name_columns) > 1:
             if names_pattern:
                 pieces = [
                     name_expression.str.extract(names_pattern, index + 1).alias(name)
-                    for index, name in enumerate(name_columns)
+                    for index, name in enumerate(key_columns)
                 ]
             else:
                 split = name_expression.str.split_exact(
@@ -647,10 +898,15 @@ def _pivot_longer_core(
                 )
                 pieces = [
                     split.struct.field(f"field_{index}").alias(name)
-                    for index, name in enumerate(name_columns)
+                    for index, name in enumerate(key_columns)
                 ]
             lf = lf.with_columns(pieces)
         lf = lf.drop(variable)
+        keys = {
+            name: key
+            for name, key in zip(name_columns, key_columns)
+            if name != ".value"
+        }
         if value_sentinel:
             from tidy3.frame import note_data_read
 
@@ -662,122 +918,36 @@ def _pivot_longer_core(
                 .get_column(".value")
                 .to_list()
             )
-            duplicate_outputs = set(identifiers) & set(value_names)
-            if duplicate_outputs:
-                raise ValueError(
-                    "pivot_longer() .value names collide with identifiers: "
-                    f"{sorted(duplicate_outputs)}"
-                )
-            other_names = [
-                name for name in name_columns if name != ".value"
-            ]
-            index = [*identifiers, row, *other_names]
             lf = lf.pivot(
                 on=".value",
                 on_columns=value_names,
-                index=index,
-                values=values_to,
+                index=[*id_columns, row, *keys.values()],
+                values=value_column,
                 aggregate_function="first",
                 maintain_order=True,
             )
-            if values_drop_na:
-                lf = lf.filter(
-                    pl.any_horizontal(
-                        pl.col(name).is_not_null() for name in value_names
-                    )
-                )
-            ordered = [*identifiers, *other_names, *value_names]
+            values = {name: name for name in value_names}
         else:
-            if values_drop_na:
-                lf = lf.filter(pl.col(values_to).is_not_null())
-                schema = lf.collect_schema()
-                if _is_float_dtype(schema[values_to]):
-                    lf = lf.filter(pl.col(values_to).is_not_nan())
-            ordered = [*identifiers, *name_columns, values_to]
-        lf = lf.drop(row).select(ordered)
+            values = {values_to: value_column}
+        transforms = [
+            *_transform_exprs(names_transform, keys, "names_transform"),
+            *_transform_exprs(values_transform, values, "values_transform"),
+        ]
+        if transforms:
+            lf = lf.with_columns(transforms)
+        lf = _ptype_casts(lf, names_ptypes, keys, "names_ptypes")
+        lf = _ptype_casts(lf, values_ptypes, values, "values_ptypes")
+        if values_drop_na:
+            lf = lf.filter(_any_present(lf, list(values.values())))
+        names = _repair_names(
+            [*identifiers, *keys, *values], names_repair, "pivot_longer"
+        )
+        lf = _renamed(lf, [*id_columns, *keys.values(), *values.values()], names)
         return tf._with_lf(
             lf,
-            groups=_result_groups(tf, ordered),
+            groups=_result_groups(tf, names),
             rowwise=False,
         )
-
-    return Verb(_apply, "pivot_longer")
-
-
-def _transform_columns(tf: Any, transform: Any, columns: list[str], what: str) -> Any:
-    """Apply ``names_transform``/``values_transform`` to *columns*.
-
-    *transform* is one function for every column or a dict by column name.
-    Python types (``int``, ``float``, ``str``, ``bool``) cast in the engine;
-    other functions run on each value, missing values passing through.
-    """
-    if transform is None:
-        return tf
-    mapping = (
-        dict(transform)
-        if isinstance(transform, dict)
-        else {name: transform for name in columns}
-    )
-    unknown = [name for name in mapping if name not in columns]
-    if unknown:
-        raise KeyError(f"{what} names unknown columns: {unknown}")
-    casts = {int: pl.Int64, float: pl.Float64, str: pl.String, bool: pl.Boolean}
-    expressions = []
-    for name, fn in mapping.items():
-        if fn in casts:
-            expressions.append(pl.col(name).cast(casts[fn]))
-        else:
-            expressions.append(
-                pl.col(name).map_elements(fn, skip_nulls=True, return_dtype=None)
-            )
-    return tf._with_lf(tf._lf.with_columns(expressions), groups=tf._groups)
-
-
-def pivot_longer(
-    cols: Any,
-    *,
-    names_to: str | list[str] | tuple[str, ...] | None = "name",
-    values_to: str = "value",
-    names_prefix: str | None = None,
-    names_sep: str | None = None,
-    names_pattern: str | None = None,
-    values_drop_na: bool = False,
-    cols_vary: str = "fastest",
-    names_transform: Any = None,
-    values_transform: Any = None,
-) -> Verb:
-    """Lengthen selected columns, with optional name splitting.
-
-    ``names_transform`` / ``values_transform`` convert the new name and value
-    columns, as in tidyr: one function, or a dict by column name, e.g.
-    ``names_transform={"week": int}`` turns ``"1"`` into ``1``.
-    """
-    core = _pivot_longer_core(
-        cols,
-        names_to=names_to,
-        values_to=values_to,
-        names_prefix=names_prefix,
-        names_sep=names_sep,
-        names_pattern=names_pattern,
-        values_drop_na=values_drop_na,
-        cols_vary=cols_vary,
-    )
-    name_columns = (
-        [] if names_to is None
-        else [names_to] if isinstance(names_to, str)
-        else [name for name in names_to if name is not None and name != ".value"]
-    )
-
-    def _apply(tf):
-        out = core._fn(tf)
-        out = _transform_columns(out, names_transform, name_columns, "names_transform")
-        if values_transform is not None:
-            value_columns = [
-                name for name in _columns(out)
-                if name not in _columns(tf) and name not in name_columns
-            ] or [values_to]
-            out = _transform_columns(out, values_transform, value_columns, "values_transform")
-        return out
 
     return Verb(_apply, "pivot_longer")
 
@@ -815,9 +985,10 @@ def pivot_wider(
     names_sort: bool = False,
     names_vary: str = "fastest",
     names_expand: bool = False,
+    names_repair: Any = "check_unique",
     id_expand: bool = False,
     values_fill: Any = None,
-    values_fn: str | None = None,
+    values_fn: Any = None,
     unused_fn: Any = None,
     names: Iterable[Any] | None = None,
 ) -> Verb:
@@ -829,15 +1000,23 @@ def pivot_wider(
     ``names_expand`` / ``id_expand`` add columns / rows for every possible
     value (unused factor levels too), and ``unused_fn`` summarises columns
     that are not ids, names, or values instead of dropping them.
+    ``names_repair`` handles output names that clash, as in
+    :func:`pivot_longer`. ``values_fill`` is one value, or a dict by
+    ``values_from`` column.
 
     Values that are not uniquely identified become list columns with a
     warning; ``values_fn="list"`` asks for them, ``values_fn="mean"`` (or
-    ``sum``, ``first``, …) summarises duplicates instead.
+    ``sum``, ``first``, …) summarises duplicates instead. ``values_fn`` may
+    also be a function of each cell's values (a Polars Series), such as
+    ``lambda s: s.max() - s.min()``, or a dict of names and functions by
+    ``values_from`` column.
     """
     if names_vary not in {"fastest", "slowest"}:
         raise ValueError("names_vary must be 'fastest' or 'slowest'")
     if not isinstance(names_sep, str):
         raise TypeError("names_sep must be a string")
+    _check_names_repair(names_repair)
+    _values_fns(values_fn)
     plain = (
         names_sep == "_" and names_glue is None and names_vary == "fastest"
         and not names_expand and not id_expand and unused_fn is None
@@ -852,6 +1031,7 @@ def pivot_wider(
             values_fill=values_fill,
             values_fn=values_fn,
             names=names,
+            names_repair=names_repair,
         )
 
     def _apply(tf):
@@ -877,6 +1057,7 @@ def pivot_wider(
             values_fill=values_fill,
             values_fn=values_fn,
             names=[c if len(name_columns) > 1 else c[0] for c in combos],
+            names_repair=None,
         )._fn(tf)
         produced = _columns(out)
         kept_ids = [c for c in produced if c in identifiers]
@@ -884,27 +1065,35 @@ def pivot_wider(
         pairs = [(value, combo) for value in value_columns for combo in combos]
         if len(value_outputs) != len(pairs):
             raise RuntimeError("pivot_wider(): unexpected output columns")
-        new_names = {
-            old: _pivot_label(value, combo, name_columns, value_columns, names_prefix, names_sep, names_glue)
-            for old, (value, combo) in zip(value_outputs, pairs)
-        }
+        labels = [
+            _pivot_label(value, combo, name_columns, value_columns, names_prefix, names_sep, names_glue)
+            for value, combo in pairs
+        ]
         order = list(range(len(pairs)))
         if names_vary == "slowest":
             order.sort(key=lambda i: (combos.index(pairs[i][1]), value_columns.index(pairs[i][0])))
-        ordered = [*kept_ids, *[new_names[value_outputs[i]] for i in order]]
-        out = _rename_select(out, new_names, ordered)
+        out = out._with_lf(
+            out._lf.select([*kept_ids, *[value_outputs[i] for i in order]]), groups=out._groups
+        )
         if id_expand and kept_ids:
-            out = _expand_ids(tf, out, kept_ids, values_fill)
+            if isinstance(values_fill, dict):
+                fills = {value_outputs[i]: values_fill[pairs[i][0]] for i in order if pairs[i][0] in values_fill}
+            else:
+                fills = values_fill
+            out = _expand_ids(tf, out, kept_ids, fills)
+        extra: list[str] = []
         if unused_fn is not None and unused:
+            before = _columns(out)
             out = _summarise_unused(tf, out, kept_ids, unused, unused_fn)
-        return _with_frame_groups(out, _result_groups(tf, _columns(out)), tf._category_levels)
+            extra = [c for c in _columns(out) if c not in before]
+        current = [*kept_ids, *[value_outputs[i] for i in order], *extra]
+        names_out = _repair_names(
+            [*kept_ids, *[labels[i] for i in order], *extra], names_repair, "pivot_wider"
+        )
+        out = out._with_lf(_renamed(out._lf, current, names_out), groups=out._groups)
+        return _with_frame_groups(out, _result_groups(tf, names_out), tf._category_levels)
 
     return Verb(_apply, "pivot_wider")
-
-
-def _rename_select(out: Any, renames: dict[str, str], ordered: list[str]) -> Any:
-    """Rename then reorder columns, natively (lazily on Polars)."""
-    return out._with_lf(out._lf.rename(renames).select(ordered), groups=out._groups)
 
 
 def _with_frame_groups(out: Any, groups: Any, levels: dict[str, list[Any]]) -> Any:
@@ -961,7 +1150,9 @@ def _expand_ids(tf: Any, out: Any, ids: list[str], values_fill: Any) -> Any:
         strict=False,
     ).with_columns(pl.col(name).cast(schema[name], strict=False) for name in ids)
     joined = grid.join(out._lf, on=ids, how="left", nulls_equal=True, maintain_order="left")
-    if values_fill is not None:
+    if isinstance(values_fill, dict):
+        joined = joined.with_columns(pl.col(c).fill_null(values_fill[c]) for c in fill if c in values_fill)
+    elif values_fill is not None:
         joined = joined.with_columns(pl.col(c).fill_null(values_fill) for c in fill)
     return out._with_lf(joined, groups=out._groups)
 
@@ -969,26 +1160,34 @@ def _expand_ids(tf: Any, out: Any, ids: list[str], values_fill: Any) -> Any:
 _POLARS_SUMMARIES = {"first", "last", "min", "max", "sum", "mean", "median", "len", "n_unique", "std", "var"}
 
 
-def _summary_expr(tf: Any, column: str, fn: Any, ids: list[str]) -> pl.Expr:
-    """One ``unused_fn`` summary as a Polars expression.
+def _summary_expr(tf: Any, column: str, fn: Any, ids: list[str], what: str = "unused_fn") -> pl.Expr:
+    """One ``unused_fn`` (or ``values_fn``) summary as a Polars expression.
 
-    Named summaries ("max", "first", …) run natively. A Python function gets
-    each group's values as a Polars Series; its result type comes from the
-    first group, because Polars needs to know it up front.
+    Named summaries ("max", "first", …) and tidy3's own summaries
+    (``mean``, ``n_distinct``, which a notebook's bare ``mean`` names) run
+    natively. Another Python function gets each group's values as a Polars
+    Series; its result type comes from the first group, because Polars needs
+    to know it up front.
     """
     if isinstance(fn, str):
         if fn not in _POLARS_SUMMARIES:
-            raise ValueError(f"unused_fn summary not known: {fn!r}")
+            raise ValueError(f"{what} summary not known: {fn!r}")
         return getattr(pl.col(column), fn)().alias(column)
     if not callable(fn):
-        raise TypeError("unused_fn values must be functions or summary names")
+        raise TypeError(f"{what} values must be functions or summary names")
+    if getattr(fn, "__module__", "").startswith("tidy3."):
+        from tidy3.expr import Expr, col, to_polars
+
+        built = fn(col(column))
+        if isinstance(built, Expr):
+            return to_polars(built).alias(column)
     sample = tf._lf
     if ids:
         first = tf._lf.select(ids).head(1)
         sample = tf._lf.join(first, on=ids, how="semi", nulls_equal=True)
     from tidy3.frame import note_data_read
 
-    note_data_read("unused_fn infers its result type from the data")
+    note_data_read(f"{what} infers its result type from the data")
     values = sample.select(pl.col(column)).collect().to_series()
     dtype = pl.Series([fn(values)]).dtype
     return (
@@ -1050,6 +1249,7 @@ def build_longer_spec(
     names_prefix: str | None = None,
     names_sep: str | None = None,
     names_pattern: str | None = None,
+    names_ptypes: Any = None,
     names_transform: Any = None,
 ) -> Any:
     """The spec ``pivot_longer()`` would use, as a table you can edit (tidyr).
@@ -1057,6 +1257,8 @@ def build_longer_spec(
     One row per pivoted column: ``.name`` (the column), ``.value`` (where its
     values go), and one column per ``names_to`` entry. Pass it to
     :func:`pivot_longer_spec`. Only column names are read, not the data.
+    ``names_transform`` and then ``names_ptypes`` apply as in
+    :func:`pivot_longer`.
     """
     import re
 
@@ -1095,7 +1297,9 @@ def build_longer_spec(
             spec[target] = [r[index] for r in rows]
     out = tidy(pl.DataFrame(spec, schema={k: pl.String for k in spec}))
     extra = [t for t in targets if t != ".value"]
-    return _transform_columns(out, names_transform, extra, "names_transform")
+    out = _transform_columns(out, names_transform, extra, "names_transform")
+    lf = _ptype_casts(out._lf, names_ptypes, {name: name for name in extra}, "names_ptypes")
+    return out._with_lf(lf, groups=out._groups)
 
 
 def _spec_parts(table: Any) -> tuple[list[str], list[str], list[tuple]]:
@@ -1108,42 +1312,56 @@ def _spec_parts(table: Any) -> tuple[list[str], list[str], list[tuple]]:
 def pivot_longer_spec(
     spec: Any,
     *,
-    values_drop_na: bool = False,
     cols_vary: str = "fastest",
+    names_repair: Any = "check_unique",
+    values_drop_na: bool = False,
+    values_ptypes: Any = None,
     values_transform: Any = None,
 ) -> Verb:
     """Lengthen with a spec from :func:`build_longer_spec` (tidyr).
 
     Edit the spec first to rename or regroup: every ``.name`` column moves
     into rows, keyed by the spec's other columns, with values in ``.value``.
+    ``names_repair``, ``values_ptypes``, and ``values_transform`` work as in
+    :func:`pivot_longer`.
     """
     if cols_vary not in {"fastest", "slowest"}:
         raise ValueError("cols_vary must be 'fastest' or 'slowest'")
+    _check_names_repair(names_repair)
     table = _spec_frame(spec)
     keys, values, combos = _spec_parts(table)
     lookup = {(r[".value"], tuple(r[k] for k in keys)): r[".name"] for r in table.iter_rows(named=True)}
 
     def _apply(tf):
-        from tidy3.frame import tidy
-
         columns = _columns(tf)
         missing = [name for name in table[".name"].to_list() if name not in columns]
         if missing:
             raise KeyError(f"spec names columns the data does not have: {missing}")
         ids = [c for c in columns if c not in set(table[".name"].to_list())]
-        row = _temp_name(columns, "__tidy3_row")
-        order = _temp_name([*columns, row], "__tidy3_combo")
+        # Private names until names_repair decides, as in pivot_longer().
+        taken = list(columns)
+
+        def private(base: str) -> str:
+            name = _temp_name(taken, base)
+            taken.append(name)
+            return name
+
+        row = private("__tidy3_row")
+        order = private("__tidy3_combo")
+        id_columns = [private("__tidy3_id") for _ in ids]
+        key_columns = [private("__tidy3_key") for _ in keys]
+        value_columns = {value: private("__tidy3_value") for value in values}
         base = tf._lf.with_row_index(row)
         pieces = []
         for position, combo in enumerate(combos):
             pieces.append(
                 base.select(
                     pl.col(row),
-                    *[pl.col(i) for i in ids],
-                    *[pl.lit(v).alias(k) for k, v in zip(keys, combo)],
+                    *[pl.col(i).alias(p) for i, p in zip(ids, id_columns)],
+                    *[pl.lit(v).alias(k) for k, v in zip(key_columns, combo)],
                     *[
-                        (pl.col(lookup[(value, combo)]) if (value, combo) in lookup else pl.lit(None)).alias(value)
-                        for value in values
+                        (pl.col(lookup[(value, combo)]) if (value, combo) in lookup else pl.lit(None)).alias(internal)
+                        for value, internal in value_columns.items()
                     ],
                     pl.lit(position).alias(order),
                 )
@@ -1151,10 +1369,15 @@ def pivot_longer_spec(
         lf = pl.concat(pieces, how="diagonal_relaxed").sort(
             [row, order] if cols_vary == "fastest" else [order, row], maintain_order=True
         )
+        transforms = _transform_exprs(values_transform, value_columns, "values_transform")
+        if transforms:
+            lf = lf.with_columns(transforms)
+        lf = _ptype_casts(lf, values_ptypes, value_columns, "values_ptypes")
         if values_drop_na:
-            lf = lf.filter(~pl.all_horizontal(pl.col(v).is_null() for v in values))
-        result = tf._with_lf(lf.select([*ids, *keys, *values]), groups=None)
-        return _transform_columns(result, values_transform, values, "values_transform")
+            lf = lf.filter(_any_present(lf, list(value_columns.values())))
+        names = _repair_names([*ids, *keys, *values], names_repair, "pivot_longer_spec")
+        lf = _renamed(lf, [*id_columns, *key_columns, *value_columns.values()], names)
+        return tf._with_lf(lf, groups=None)
 
     return Verb(_apply, "pivot_longer_spec")
 
@@ -1213,17 +1436,22 @@ def build_wider_spec(
 def pivot_wider_spec(
     spec: Any,
     *,
+    names_repair: Any = "check_unique",
     id_cols: Any = None,
     id_expand: bool = False,
     values_fill: Any = None,
-    values_fn: str | None = None,
+    values_fn: Any = None,
     unused_fn: Any = None,
 ) -> Verb:
     """Widen with a spec from :func:`build_wider_spec` (tidyr).
 
     Each spec row is one output column: ``.name`` takes the ``.value``
     column's values where the data's name columns equal the spec's.
+    ``names_repair``, ``values_fill``, and ``values_fn`` work as in
+    :func:`pivot_wider`.
     """
+    _check_names_repair(names_repair)
+    _values_fns(values_fn)
     table = _spec_frame(spec)
     keys, values, combos = _spec_parts(table)
 
@@ -1247,30 +1475,40 @@ def pivot_wider_spec(
             values_fill=values_fill,
             values_fn=values_fn,
             names=[c if len(keys) > 1 else c[0] for c in combos],
+            names_repair=None,
         )._fn(tf)
         produced = _columns(out)
         kept_ids = [c for c in produced if c in identifiers]
         outputs = [c for c in produced if c not in identifiers]
-        by_pair = dict(zip([(v, c) for v in values for c in combos], outputs))
-        renames, ordered = {}, list(kept_ids)
+        pairs = [(v, c) for v in values for c in combos]
+        by_pair = dict(zip(pairs, outputs))
+        sources, labels = [], []
         for row in table.iter_rows(named=True):
-            source = by_pair[(row[".value"], tuple(row[k] for k in keys))]
-            renames[source] = row[".name"]
-            ordered.append(row[".name"])
-        out = _rename_select(out, renames, ordered)
+            sources.append(by_pair[(row[".value"], tuple(row[k] for k in keys))])
+            labels.append(row[".name"])
+        out = out._with_lf(out._lf.select([*kept_ids, *sources]), groups=out._groups)
         if id_expand and kept_ids:
-            out = _expand_ids(tf, out, kept_ids, values_fill)
+            if isinstance(values_fill, dict):
+                source_values = dict(zip(outputs, (v for v, _ in pairs)))
+                fills = {c: values_fill[source_values[c]] for c in sources if source_values[c] in values_fill}
+            else:
+                fills = values_fill
+            out = _expand_ids(tf, out, kept_ids, fills)
+        extra: list[str] = []
         if unused_fn is not None and unused:
+            before = _columns(out)
             out = _summarise_unused(tf, out, kept_ids, unused, unused_fn)
+            extra = [c for c in _columns(out) if c not in before]
+        names_out = _repair_names([*kept_ids, *labels, *extra], names_repair, "pivot_wider_spec")
+        out = out._with_lf(_renamed(out._lf, [*kept_ids, *sources, *extra], names_out), groups=out._groups)
         return _with_frame_groups(out, None, tf._category_levels)
 
     return Verb(_apply, "pivot_wider_spec")
 
 
-def _warn_not_unique(values: list[str], keys: list[str], temp_id: str | None) -> None:
+def _warn_not_unique(values: list[str], by: list[str]) -> None:
     """tidyr's warning for values that are not uniquely identified."""
     shown = ", ".join(f"`{name}`" for name in values)
-    by = [key for key in keys if key != temp_id]
     warnings.warn(
         f"Values from {shown} are not uniquely identified; output will contain "
         "list-cols.\n"
@@ -1283,6 +1521,23 @@ def _warn_not_unique(values: list[str], keys: list[str], temp_id: str | None) ->
     )
 
 
+def _values_fns(values_fn: Any) -> Any:
+    """Check ``values_fn``: None, a summary name, a function, or a dict of them."""
+    def check(fn: Any) -> None:
+        if fn is None or fn is list or callable(fn):
+            return
+        if fn != "list" and fn not in _POLARS_SUMMARIES:
+            names = ", ".join(sorted(_POLARS_SUMMARIES | {"list"}))
+            raise ValueError(f"values_fn must be a function or one of {names}, not {fn!r}")
+
+    if isinstance(values_fn, dict):
+        for fn in values_fn.values():
+            check(fn)
+    else:
+        check(values_fn)
+    return values_fn
+
+
 def _pivot_wider_core(
     *,
     names_from: Any = "name",
@@ -1291,23 +1546,23 @@ def _pivot_wider_core(
     names_prefix: str = "",
     names_sort: bool = False,
     values_fill: Any = None,
-    values_fn: str | None = None,
+    values_fn: Any = None,
     names: Iterable[Any] | None = None,
+    names_repair: Any = "check_unique",
 ) -> Verb:
     """Widen a name/value pair; discovers output names when not supplied.
 
     Like tidyr, values that are not uniquely identified by the id and name
     columns become list columns with a warning; ``values_fn="list"`` asks for
     list columns without the warning, and ``values_fn="mean"`` (or ``sum``,
-    ``first``, …) summarises duplicates instead.
+    ``first``, …) summarises duplicates instead. ``values_fn`` may also be a
+    function of each cell's values (a Polars Series), or a dict of these by
+    value column; columns it leaves out behave as with no ``values_fn``.
+
+    ``names_repair=None`` is for the callers that rename the value columns
+    themselves: those come back under private names, after the ids.
     """
-    if values_fn is not None and values_fn not in {
-        "first", "last", "sum", "min", "max", "mean", "median", "len", "list"
-    }:
-        raise ValueError(
-            "values_fn must be first, last, sum, min, max, mean, median, len, "
-            "list, or None"
-        )
+    _values_fns(values_fn)
 
     def _apply(tf):
         name_columns = resolve_selection(tf, [names_from])
@@ -1330,22 +1585,39 @@ def _pivot_wider_core(
             ]
         else:
             identifiers = resolve_selection(tf, [id_cols])
-        temp_id = None
-        if not identifiers:
-            temp_id = _temp_name(all_columns, "__tidy3_id")
-            identifiers = [temp_id]
+        if isinstance(values_fn, dict):
+            unknown = [name for name in values_fn if name not in value_columns]
+            if unknown:
+                raise KeyError(f"values_fn names columns that are not values_from: {unknown}")
+            fns = {name: values_fn.get(name) for name in value_columns}
+        else:
+            fns = {name: values_fn for name in value_columns}
+        # Polars' own pivot summaries fill absent cells (a sum of nothing is
+        # 0); tidyr leaves them missing, so summaries run before the pivot.
+        native = values_fn is None or values_fn == "list"
+        unsummarised = [name for name in value_columns if fns[name] is None]
 
+        # Identifiers move to private names while pivoting, so a new column
+        # may share an identifier's name until names_repair decides.
+        taken = list(all_columns)
 
-        lf = tf._lf
+        def private(base: str) -> str:
+            name = _temp_name(taken, base)
+            taken.append(name)
+            return name
+
+        temp_id = private("__tidy3_id") if not identifiers else None
+        id_columns = [temp_id] if temp_id else [private("__tidy3_id") for _ in identifiers]
+        lf = tf._lf.rename(dict(zip(identifiers, id_columns)))
         if temp_id:
             lf = lf.with_columns(pl.lit(0).alias(temp_id))
         # tidyr turns values that are not uniquely identified into lists, so
         # check for duplicates (with the name discovery when there is one).
         duplicates = None
-        if values_fn is None:
-            count = _temp_name(all_columns, "__tidy3_n")
+        if unsummarised:
+            count = private("__tidy3_n")
             duplicates = (
-                lf.group_by([*identifiers, *name_columns])
+                lf.group_by([*id_columns, *name_columns])
                 .agg(pl.len().alias(count))
                 .select((pl.col(count).max() > 1).fill_null(False))
             )
@@ -1383,73 +1655,89 @@ def _pivot_wider_core(
                 )
         if isinstance(duplicates, pl.LazyFrame):
             duplicates = duplicates.collect()
-        as_lists = values_fn == "list" or (
-            duplicates is not None and bool(duplicates.item())
-        )
-        if as_lists and values_fn is None:
-            _warn_not_unique(value_columns, [*identifiers, *name_columns], temp_id)
+        duplicated = duplicates is not None and bool(duplicates.item())
+        if duplicated:
+            _warn_not_unique(unsummarised, [*identifiers, *name_columns])
+        empty_lists = False
+        if native:
+            empty_lists = values_fn == "list" or duplicated
+            aggregate: Any = pl.element() if empty_lists else None
+        else:
+            # Summarise each cell first, then pivot one value per cell.
+            keys = [*identifiers, *name_columns]
+            summaries = []
+            for name in value_columns:
+                fn = fns[name]
+                if fn is None:
+                    summaries.append(pl.col(name) if duplicated else pl.col(name).first())
+                elif fn == "list" or fn is list:
+                    summaries.append(pl.col(name))
+                else:
+                    summaries.append(_summary_expr(tf, name, fn, keys, "values_fn"))
+            lf = lf.group_by([*id_columns, *name_columns], maintain_order=True).agg(summaries)
+            aggregate = "first"
         out = lf.pivot(
             on=name_argument,
             on_columns=on_columns,
-            index=identifiers,
+            index=id_columns,
             values=value_argument,
-            aggregate_function=pl.element() if as_lists else values_fn,
+            aggregate_function=aggregate,
             maintain_order=True,
         )
-        if temp_id:
-            out = out.drop(temp_id)
-            identifiers = []
         output_columns = out.collect_schema().names()
         actual_values = [
-            name for name in output_columns if name not in identifiers
+            name for name in output_columns if name not in id_columns
         ]
-        generated = (
-            [
-                f"{value}_{'_'.join(map(str, combination))}"
-                for value in value_columns
-                for combination in combinations
-            ]
-            if len(value_columns) > 1
-            else [
-                "_".join(map(str, combination))
-                for combination in combinations
-            ]
-        )
-        rename = {
-            old: f"{names_prefix}{new}"
-            for old, new in zip(actual_values, generated)
-        }
-        if rename:
-            out = out.rename(rename)
-        if as_lists:
+        if empty_lists:
             # Combinations with no rows come back as [] — make them missing.
             out = out.with_columns(
                 pl.when(pl.col(name).list.len() > 0).then(pl.col(name)).alias(name)
-                for name in (
-                    rename.get(column, column)
-                    for column in output_columns
-                    if column not in identifiers
-                )
+                for name in actual_values
             )
+        # Value columns come out value-major: every combination of the first
+        # value column, then the next.
+        sources = [value for value in value_columns for _ in combinations]
         if values_fill is not None:
-            value_outputs = [rename.get(name, name) for name in output_columns if name not in identifiers]
-            if isinstance(values_fill, dict):
-                expressions = [
-                    pl.col(name).fill_null(values_fill.get(name)).alias(name)
-                    for name in value_outputs
-                    if name in values_fill
-                ]
-            else:
-                expressions = [
-                    pl.col(name).fill_null(values_fill).alias(name)
-                    for name in value_outputs
-                ]
+            fills = (
+                values_fill
+                if isinstance(values_fill, dict)
+                else {name: values_fill for name in value_columns}
+            )
+            expressions = [
+                pl.col(name).fill_null(fills[source]).alias(name)
+                for name, source in zip(actual_values, sources)
+                if source in fills
+            ]
             if expressions:
                 out = out.with_columns(expressions)
-        ordered = out.collect_schema().names()
+        if temp_id:
+            out = out.drop(temp_id)
+            id_columns, identifiers = [], []
+        if names_repair is None:
+            values = [private("__tidy3_value") for _ in actual_values]
+            names_out = [*identifiers, *values]
+        else:
+            generated = (
+                [
+                    f"{value}_{'_'.join(map(str, combination))}"
+                    for value in value_columns
+                    for combination in combinations
+                ]
+                if len(value_columns) > 1
+                else [
+                    "_".join(map(str, combination))
+                    for combination in combinations
+                ]
+            )
+            names_out = _repair_names(
+                [*identifiers, *(f"{names_prefix}{name}" for name in generated)],
+                names_repair,
+                "pivot_wider",
+            )
+        out = _renamed(out, [*id_columns, *actual_values], names_out)
         return tf._with_lf(
             out,
-            groups=_result_groups(tf, ordered),
+            groups=_result_groups(tf, names_out),
             rowwise=False,
         )
 

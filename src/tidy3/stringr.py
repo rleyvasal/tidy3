@@ -36,11 +36,12 @@ __all__ = [
     "str_replace", "str_replace_all", "str_remove", "str_remove_all",
     "str_replace_na",
     "str_to_upper", "str_to_lower", "str_to_title", "str_to_sentence",
+    "str_to_snake", "str_to_camel", "str_to_kebab",
     "str_trim", "str_squish", "str_pad", "str_dup", "str_wrap",
     "str_extract", "str_extract_all", "str_match", "str_match_all",
     "str_split", "str_split_1", "str_split_fixed", "str_split_i",
     "str_c", "str_flatten", "str_flatten_comma", "str_glue", "str_glue_data",
-    "str_sort", "str_order", "str_unique", "str_escape", "str_conv", "str_view",
+    "str_sort", "str_order", "str_rank", "str_unique", "str_escape", "str_conv", "str_view",
 ]
 
 
@@ -521,6 +522,28 @@ def str_to_sentence(string: Any) -> Any:
     return _str("str_to_sentence", string)
 
 
+def str_to_snake(string: Any) -> Any:
+    """snake_case: words in lower case joined by ``_`` (stringr 1.6)."""
+    return _str("str_to_snake", string)
+
+
+def str_to_kebab(string: Any) -> Any:
+    """kebab-case: words in lower case joined by ``-`` (stringr 1.6)."""
+    return _str("str_to_kebab", string)
+
+
+def str_to_camel(string: Any, first_upper: bool = False) -> Any:
+    """camelCase, or PascalCase with ``first_upper=True`` (stringr 1.6).
+
+    Words are split as stringr does: at any run of characters that are not
+    letters or digits, between a lower- and an upper-case letter, between
+    letters and digits, and before the last capital of a run followed by a
+    lower-case letter, so ``"HTTPServer"`` is ``http`` and ``server``.
+    """
+    _check_bool("str_to_camel", "first_upper", first_upper)
+    return _str("str_to_camel", string, first_upper=first_upper)
+
+
 def str_trim(string: Any, side: str = "both") -> Any:
     """Remove whitespace from the start, end, or both sides."""
     _check_side("str_trim", side, ("both", "left", "right"))
@@ -796,6 +819,16 @@ def str_sort(
     return [values[i] for i in _order(values, decreasing, na_last, numeric)]
 
 
+def str_rank(string: Any, numeric: bool = False) -> Any:
+    """Rank of each string in sorted order, ties sharing the smallest rank.
+
+    Missing stays missing. ``numeric=True`` ranks ``"x9"`` before ``"x10"``.
+    Strings compare by code point, as :func:`str_sort` does.
+    """
+    _check_bool("str_rank", "numeric", numeric)
+    return _str("str_rank", string, numeric=numeric)
+
+
 def str_unique(string: Any, ignore_case: bool = False) -> list:
     """Distinct strings, in first-seen order."""
     if not _is_vector(string):
@@ -886,6 +919,81 @@ def _split_row(value: str, kw: dict, n: int | None) -> list[str]:
     if _plain(kw):
         return value.split(kw["pattern"], -1 if n is None else n - 1)
     return _re_split(_compiled(kw), value, n)
+
+
+def _natural_ranks(values: list) -> list:
+    """1-based ranks by :func:`_natural_key`, ties sharing the smallest."""
+    keys = [None if v is None else tuple(_natural_key(v)) for v in values]
+    counts: dict[tuple, int] = {}
+    for key in keys:
+        if key is not None:
+            counts[key] = counts.get(key, 0) + 1
+    first, position = {}, 1
+    for key in sorted(counts):
+        first[key] = position
+        position += counts[key]
+    return [None if key is None else first[key] for key in keys]
+
+
+def _letter(category: str) -> bool:
+    return category[0] == "L"
+
+
+def _number(category: str) -> bool:
+    return category[0] == "N"
+
+
+def _breaks(cats: list[str], i: int) -> bool:
+    """A word break between two letters or numbers at ``i - 1`` and ``i``."""
+    before, cat = cats[i - 1], cats[i]
+    return (
+        (before == "Ll" and cat == "Lu")
+        or (_letter(before) and _number(cat))
+        or (_number(before) and _letter(cat))
+        or (before == "Lu" and cat == "Lu" and i + 1 < len(cats) and cats[i + 1] == "Ll")
+    )
+
+
+def _words(value: str) -> str:
+    """stringr's ``to_words()``: lower-case words separated by one space.
+
+    stringr breaks at runs of characters that are neither letters nor
+    numbers and at four look-around positions. Python's ``re`` has no
+    Unicode categories, so this walks the categories directly.
+    """
+    cats = [unicodedata.category(char) for char in value]
+    out: list[str] = []
+    gap = False
+    for i, char in enumerate(value):
+        if not (_letter(cats[i]) or _number(cats[i])):
+            gap = True
+            continue
+        if out and (gap or _breaks(cats, i)):
+            out.append(" ")
+        gap = False
+        out.append(char)
+    return "".join(out).lower()
+
+
+def _ideograph(char: str) -> bool:
+    return unicodedata.name(char, "").startswith(
+        ("CJK UNIFIED IDEOGRAPH", "CJK COMPATIBILITY IDEOGRAPH", "HIRAGANA", "KATAKANA")
+    )
+
+
+def _title_word(word: str) -> str:
+    """Title case for one lower-case word, as the Polars path does it."""
+    return "".join(
+        char.title()
+        if i == 0 or (unicodedata.category(char) == "Ll" and _ideograph(word[i - 1]))
+        else char
+        for i, char in enumerate(word)
+    )
+
+
+def _camel(value: str, first_upper: bool) -> str:
+    camel = "".join(_title_word(word) for word in _words(value).split(" "))
+    return camel if first_upper else camel[:1].lower() + camel[1:]
 
 
 def _map_distinct(series: pl.Series, fn: Any, dtype: Any) -> pl.Series:
@@ -1100,6 +1208,37 @@ def _pl_flatten(x: pl.Expr, kw: dict) -> pl.Expr:
     return joined
 
 
+# stringr's to_words() breakpoints. Rust regex has no look-around, so each
+# zero-width break becomes a two-character match with a space put back in
+# between. No two rules fire at the same position, a rule's match never
+# overlaps its next one, and an inserted space joins no new pair, so one
+# pass per rule finds every break stringr finds.
+_WORD_BREAKS = (
+    r"(\p{Ll})(\p{Lu})",
+    r"(\p{L})(\p{N})",
+    r"(\p{N})(\p{L})",
+    r"(\p{Lu})(\p{Lu}\p{Ll})",
+)
+
+
+def _pl_words(x: pl.Expr) -> pl.Expr:
+    x = x.str.replace_all(r"[^\p{L}\p{N}]+", " ")
+    for rule in _WORD_BREAKS:
+        x = x.str.replace_all(rule, "${1} ${2}")
+    return x.str.to_lowercase().str.strip_chars(" ")
+
+
+def _pl_title_words(words: pl.Expr) -> pl.Expr:
+    """Each word of :func:`_pl_words` in title case.
+
+    stringr title-cases with ICU word breaks, which also start a word where
+    Han or kana text meets a letter (``"日本text"`` is ``"日本Text"``).
+    Polars counts those as one word, so mark the break while title-casing.
+    """
+    marked = words.str.replace_all(r"([\p{Han}\p{Hiragana}\p{Katakana}])(\p{Ll})", "${1}\x00${2}")
+    return marked.str.to_titlecase().str.replace_all("\x00", "", literal=True)
+
+
 def compile_polars(name: str, args: tuple, kw: dict) -> pl.Expr:
     """Polars expression for the ``str_*`` node *name*.
 
@@ -1223,6 +1362,21 @@ def compile_polars(name: str, args: tuple, kw: dict) -> pl.Expr:
         return pl.concat_str(
             [x.str.slice(0, 1).str.to_uppercase(), x.str.slice(1).str.to_lowercase()]
         )
+    if name in {"str_to_snake", "str_to_kebab"}:
+        sep = "_" if name == "str_to_snake" else "-"
+        return _pl_words(x).str.replace_all(" ", sep, literal=True)
+    if name == "str_to_camel":
+        camel = _pl_title_words(_pl_words(x)).str.replace_all(" ", "", literal=True)
+        if kw["first_upper"]:
+            return camel
+        return pl.concat_str([camel.str.slice(0, 1).str.to_lowercase(), camel.str.slice(1)])
+    if name == "str_rank":
+        if kw["numeric"]:
+            return x.map_batches(
+                lambda series: pl.Series(series.name, _natural_ranks(series.to_list()), dtype=pl.UInt32),
+                return_dtype=pl.UInt32,
+            )
+        return x.rank(method="min")
     if name == "str_trim":
         return {
             "both": x.str.strip_chars(),
@@ -1433,6 +1587,24 @@ def eval_pandas(
         return _to_str(x.str.title())
     if name == "str_to_sentence":
         return _to_str(_map(x, lambda v: v[:1].upper() + v[1:].lower()))
+    if name in {"str_to_snake", "str_to_kebab"}:
+        sep = "_" if name == "str_to_snake" else "-"
+        return _to_str(_map(x, lambda v: _words(v).replace(" ", sep)))
+    if name == "str_to_camel":
+        return _to_str(_map(x, lambda v: _camel(v, kw["first_upper"])))
+    if name == "str_rank":
+        if mode == "agg":
+            raise ValueError("str_rank() is not valid inside summarise()")
+
+        def rank(values: Any) -> Any:
+            if kw["numeric"]:
+                ranks = _natural_ranks([None if _missing(v) else v for v in values])
+                return pd.Series(ranks, index=values.index, dtype="Int64")
+            return values.rank(method="min", na_option="keep").astype("Int64")
+
+        if groups:
+            return _grouped(x, df, groups).transform(rank).astype("Int64")
+        return rank(x)
     if name == "str_trim":
         side = {"both": "strip", "left": "lstrip", "right": "rstrip"}[kw["side"]]
         return _to_str(getattr(x.str, side)())

@@ -586,6 +586,14 @@ def _sub(column: str, start: int, end: int) -> pl.Expr:
     return value.str.slice(first - 1, size)
 
 
+def _words(column: str) -> pl.Expr:
+    """stringr's word split for the case helpers, in plain Polars."""
+    x = pl.col(column).str.replace_all(r"[^\p{L}\p{N}]+", " ")
+    for rule in (r"(\p{Ll})(\p{Lu})", r"(\p{L})(\p{N})", r"(\p{N})(\p{L})", r"(\p{Lu})(\p{Lu}\p{Ll})"):
+        x = x.str.replace_all(rule, "${1} ${2}")
+    return x.str.to_lowercase().str.strip_chars(" ")
+
+
 def _width(value: str) -> int:
     total = 0
     for char in value:
@@ -969,6 +977,17 @@ def _cases() -> list[Case]:
         lambda t, df: t.str_to_sentence("species"),
         lambda df: pl.concat_str([pl.col("species").str.slice(0, 1).str.to_uppercase(), pl.col("species").str.slice(1).str.to_lowercase()]),
     )
+    col("str_to_snake", "string", ["str_to_snake"], lambda t, df: t.str_to_snake("txt"), lambda df: _words("txt").str.replace_all(" ", "_", literal=True))
+    col("str_to_kebab", "string", ["str_to_kebab"], lambda t, df: t.str_to_kebab("txt"), lambda df: _words("txt").str.replace_all(" ", "-", literal=True))
+    col(
+        "str_to_camel", "string", ["str_to_camel"],
+        lambda t, df: t.str_to_camel("txt"),
+        lambda df: pl.concat_str([
+            _words("txt").str.to_titlecase().str.replace_all(" ", "", literal=True).str.slice(0, 1).str.to_lowercase(),
+            _words("txt").str.to_titlecase().str.replace_all(" ", "", literal=True).str.slice(1),
+        ]),
+    )
+    col("str_rank", "string", ["str_rank"], lambda t, df: t.str_rank("species"), lambda df: pl.col("species").rank(method="min"))
     col("str_trim", "string", ["str_trim"], lambda t, df: t.str_trim("padded"), lambda df: pl.col("padded").str.strip_chars())
     col("str_squish", "string", ["str_squish"], lambda t, df: t.str_squish("padded"), lambda df: pl.col("padded").str.strip_chars().str.replace_all(r"\s+", " "))
     col("str_pad", "string", ["str_pad"], lambda t, df: t.str_pad("species", 12), lambda df: pl.col("species").str.pad_start(12, " "))

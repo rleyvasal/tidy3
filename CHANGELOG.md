@@ -9,6 +9,10 @@ under **Changed**.
 ### Added
 
 - Durations and periods, phase 1 of the [time-span design](docs/design-time-spans.md). Exact durations: `dseconds`, `dminutes`, `dhours`, `ddays`, `dweeks`, `dmonths`, `dyears`, `duration(num, units)`, and `as_duration`, with lubridate's lengths (a year is 365.25 days, a month a twelfth of that). They take numbers or columns and make `Duration("us")` columns; `time_length(d, unit)` and `as_numeric(d, unit)` give fractional lengths, divided exactly. Calendar and clock periods: `weeks`, `days`, `hours`, `minutes`, `seconds`, and `period()` join `months` and `years`, unnormalized (`hours(25)` stays 25 hours) and with column counts. Adding a period moves months (rolled back at month ends), then days, then the local clock, so `days(1)` keeps 12:00 across a daylight-saving change and `hours(1)` from 01:30 on a spring-forward day is missing, as in lubridate. A date plus whole days stays a date; a fraction of a day, a clock period, or a duration column gives a datetime instead of Polars' silent truncation. Durations compare with periods by average length (`ddays(1) == days(1)`), and adding one to the other raises. `add_with_rollback` gains `roll_to_first=`. `to_polars_code` exports duration literals and `dt.total_*` lengths. Checked against lubridate 1.9.5 in the R oracle tests (constructors, leap days, both 2024 New York changes, Lord Howe's half-hour change, month ends, column counts), with raw Polars benchmark cases. Differences from lubridate are listed in the reference.
+- stringr 1.6's `str_to_snake()`, `str_to_kebab()`, and `str_to_camel()` (`first_upper=True` for PascalCase) split words as stringr does: at punctuation and spaces, between lower- and upper-case letters, between letters and digits, and before the last capital of a run (`"HTTPServer"` is `http_server`). `str_rank()` ranks strings with ties sharing the lowest rank, within groups in `mutate()`, with `numeric=True` for natural order. All run as native Polars expressions except `str_rank(numeric=True)`, which ranks each batch in Python. Checked against stringr 1.6.0, with raw Polars benchmark cases. Like `str_sort()`, `str_rank()` compares code points rather than stringi collation.
+- tidyr's `names_ptypes` and `values_ptypes` for `pivot_longer()`, `values_ptypes` for `pivot_longer_spec()`, and `names_ptypes` for `build_longer_spec()`. Prototypes are Python types, Polars types such as `pl.Enum([...])`, or a pandas `CategoricalDtype`, and cast only without losing values, as vctrs does.
+- `names_repair` for `pivot_longer()`, `pivot_wider()`, and both spec pivots, with `"check_unique"` (the default), `"minimal"`, `"unique"`, `"universal"`, or a function. A new column may now share an identifier's name when the repair renames one of them. Repaired names use tidy3's Python spelling (`x_1` for vctrs' `x...1`, `a_b` for `a.b`).
+- `pivot_wider(values_fn=...)` and `pivot_wider_spec(values_fn=...)` take a function of each cell's values (a Polars Series), tidy3's own summaries such as `mean`, or a dict by `values_from` column. Columns the dict leaves out keep the default list-column behaviour. The options are checked against tidyr 1.3.2 in the R oracle tests.
 
 ### Changed
 
@@ -19,6 +23,10 @@ under **Changed**.
   | Polars | 1.42.1 | 1.42.1 | unchanged |
   | pandas | 2.0 | 2.1.4 | 2.0.x builds a `datetime64[ns, UTC]` Series where tidy3 asks for `us`, and raises a NumPy 1.25 deprecation warning inside `fct_relevel()`. 2.1.0–2.1.3 pass the tests but do not cap NumPy below 2, so pip pairs them with NumPy 2 and pandas fails to import |
   | pyarrow | 14.0 | 15.0 | 14.x does not cap NumPy below 2 and fails to import with it, which is what pip installs alongside pandas 3. With pandas 2.2 or newer it also raises pandas's BlockManager deprecation warning on every conversion to pandas |
+
+- A `pivot_wider()` cell with no rows stays missing under `values_fn="sum"` or `"len"`, as in tidyr; it used to be 0.
+- A dict `values_fill` in `pivot_wider()` is keyed by `values_from` column, as in tidyr, instead of by output column.
+- `pivot_longer()` applies `values_transform` before `values_drop_na`, as tidyr does, and `values_drop_na` with `.value` or a spec also drops NaN, as vctrs counts it missing.
 
 ### Fixed
 

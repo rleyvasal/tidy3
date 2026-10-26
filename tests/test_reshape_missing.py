@@ -513,3 +513,133 @@ def test_wider_spec_with_no_rows_is_typed_and_pivots_to_ids():
     assert spec.collect().schema == pl.Schema({".name": pl.String, ".value": pl.String, "k": pl.String})
     out = (tidy(empty) >> t.pivot_wider_spec(spec, id_cols="id")).collect()
     assert out.schema == pl.Schema({"id": pl.Int64}) and out.height == 0
+
+
+def test_pivot_longer_ptypes_cast_without_losing_values():
+    weeks = tidy({"id": [1, 2], "week_1": [5, 6], "week_2": [7, 8]})
+    out = weeks >> pivot_longer(
+        starts_with("week_"), names_to="week", names_prefix="week_",
+        names_transform={"week": int}, names_ptypes={"week": float}, values_ptypes=float,
+    )
+    schema = out.collect().schema
+    assert schema["week"] == pl.Float64 and schema["value"] == pl.Float64
+    levels = weeks >> pivot_longer(
+        starts_with("week_"), names_to="week", names_prefix="week_",
+        names_ptypes={"week": pd.CategoricalDtype(["2", "1"])},
+    )
+    assert list(as_pandas(levels)["week"].cat.categories) == ["2", "1"]
+    whole = tidy({"id": [1], "a": [1.0], "b": [2.0]}) >> pivot_longer(["a", "b"], values_ptypes=int)
+    assert whole.collect().schema["value"] == pl.Int64
+
+    with pytest.raises(TypeError, match="can't convert `week` <String> to <Int64>"):
+        weeks >> pivot_longer(starts_with("week_"), names_to="week", names_ptypes={"week": int})
+    with pytest.raises(ValueError, match="without losing values"):
+        tidy({"id": [1], "a": [1.5], "b": [2.0]}) >> pivot_longer(["a", "b"], values_ptypes=int)
+    with pytest.raises(ValueError, match="without losing values"):
+        weeks >> pivot_longer(
+            starts_with("week_"), names_to="week", names_prefix="week_",
+            names_ptypes={"week": pl.Enum(["1"])},
+        )
+    with pytest.raises(KeyError, match="unknown columns"):
+        weeks >> pivot_longer(starts_with("week_"), names_ptypes={"week": str})
+    with pytest.raises(TypeError, match="Polars type"):
+        weeks >> pivot_longer(starts_with("week_"), names_ptypes=list)
+
+
+def test_pivot_longer_names_repair_and_groups():
+    clash = tidy({"name": [1, 2], "g": ["a", "b"], "x": [1, 2], "y": [3, 4]}) >> group_by("g")
+    with pytest.raises(ValueError, match="names must be unique.*'name'"):
+        clash >> pivot_longer(["x", "y"])
+    out = clash >> pivot_longer(["x", "y"], names_repair="unique")
+    assert out.collect().columns == ["name_1", "g", "name_3", "value"]
+    assert out._groups == ["g"]
+    spaced = clash >> pivot_longer(["x", "y"], names_to="the key", values_to="1st", names_repair="universal")
+    assert spaced.collect().columns == ["name", "g", "the_key", "_1st"]
+    upper = clash >> pivot_longer(["x", "y"], names_to="key", names_repair=lambda n: [v.upper() for v in n])
+    assert upper.collect().columns == ["NAME", "G", "KEY", "VALUE"]
+    # A function that leaves duplicates cannot become a Polars frame.
+    with pytest.raises(ValueError, match="Polars"):
+        clash >> pivot_longer(["x", "y"], names_repair="minimal")
+    with pytest.raises(ValueError, match="names_repair must be one of"):
+        pivot_longer(["x"], names_repair="nope")
+    with pytest.raises(ValueError, match="repeat"):
+        pivot_longer(["x"], names_to=["a", "a"], names_sep="_")
+
+
+def test_pivot_wider_names_repair():
+    keyed = tidy({"a": [1, 2], "k": ["a", "b"], "v": [1, 2]})
+    with pytest.raises(ValueError, match="names must be unique"):
+        keyed >> pivot_wider(names_from="k", values_from="v")
+    assert as_pandas(keyed >> pivot_wider(names_from="k", values_from="v", names_repair="unique")).columns.tolist() == ["a_1", "a_2", "b"]
+    styled = keyed >> pivot_wider(names_from="k", values_from="v", names_glue="x {k}", names_repair="universal")
+    assert as_pandas(styled).columns.tolist() == ["a", "x_a", "x_b"]
+    odd = tidy({"id": [1, 2], "k": ["if", "1x"], "v": [1, 2]})
+    assert as_pandas(odd >> pivot_wider(names_from="k", values_from="v", names_repair="universal")).columns.tolist() == ["id", "_if", "_1x"]
+
+
+def test_pivot_wider_values_fn_functions_and_dicts():
+    import warnings
+
+    dup = tidy({"id": [1, 1, 2], "key": ["a", "a", "b"], "val": [1.0, 3.0, 5.0], "w": [10.0, 20.0, 30.0]})
+    spread = as_pandas(
+        dup >> pivot_wider(names_from="key", values_from="val", id_cols="id", values_fn=lambda s: s.max() - s.min())
+    )
+    assert spread["a"].tolist()[0] == 2.0 and pd.isna(spread["a"].tolist()[1])
+    with pytest.warns(UserWarning, match="Values from `w` are not uniquely identified"):
+        mixed = as_pandas(dup >> pivot_wider(names_from="key", values_from=["val", "w"], values_fn={"val": "sum"}))
+    assert mixed["val_a"].tolist()[0] == 4.0
+    assert list(mixed["w_a"][0]) == [10.0, 20.0]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        listed = as_pandas(dup >> pivot_wider(names_from="key", values_from=["val", "w"], values_fn={"val": "mean", "w": list}))
+    assert listed["val_a"].tolist()[0] == 2.0 and list(listed["w_a"][0]) == [10.0, 20.0]
+    # Absent cells stay missing even for sums and counts (Polars would fill 0).
+    counted = as_pandas(dup >> pivot_wider(names_from="key", values_from="val", id_cols="id", values_fn="len"))
+    assert counted["a"].tolist()[0] == 2 and pd.isna(counted["a"].tolist()[1])
+    filled = as_pandas(dup >> pivot_wider(names_from="key", values_from=["val", "w"], values_fn="sum", values_fill={"w": 0}))
+    assert pd.isna(filled["val_a"].tolist()[1]) and filled["w_a"].tolist()[1] == 0
+    grouped = dup >> group_by("id") >> pivot_wider(names_from="key", values_from="val", id_cols="id", values_fn="n_unique")
+    assert grouped._groups == ["id"]
+    with pytest.raises(KeyError, match="not values_from"):
+        dup >> pivot_wider(names_from="key", values_from="val", values_fn={"w": "sum"})
+    with pytest.raises(ValueError, match="values_fn must be"):
+        pivot_wider(values_fn="average")
+
+
+def test_pivot_wider_spec_names_repair_and_values_fn():
+    from tidy3 import build_wider_spec, pivot_wider_spec
+
+    keyed = tidy({"a": [1, 1, 2], "k": ["a", "a", "b"], "v": [1, 2, 3]})
+    spec = build_wider_spec(keyed, names_from="k", values_from="v")
+    with pytest.raises(ValueError, match="names must be unique"):
+        keyed >> pivot_wider_spec(spec, values_fn="sum")
+    out = as_pandas(keyed >> pivot_wider_spec(spec, values_fn="sum", names_repair="unique"))
+    assert out.columns.tolist() == ["a_1", "a_2", "b"]
+    assert out["a_2"].tolist()[0] == 3
+
+
+def test_pivot_longer_spec_ptypes_and_names_repair():
+    from tidy3 import build_longer_spec, pivot_longer_spec
+
+    weeks = tidy({"id": [1, 2], "week_1": [5.0, 6.0], "week_2": [7.0, 8.0]})
+    spec = build_longer_spec(
+        weeks, starts_with("week_"), names_to="week", names_prefix="week_",
+        names_transform={"week": int}, names_ptypes={"week": float},
+    )
+    assert spec.collect().schema["week"] == pl.Float64
+    out = weeks >> pivot_longer_spec(spec, values_ptypes=int, values_drop_na=True)
+    assert out.collect().schema["value"] == pl.Int64
+    clash = tidy({"name": [1, 2], "x": [1, 2], "y": [3, 4]})
+    plain = build_longer_spec(clash, ["x", "y"])
+    with pytest.raises(ValueError, match="names must be unique"):
+        clash >> pivot_longer_spec(plain)
+    assert as_pandas(clash >> pivot_longer_spec(plain, names_repair="unique")).columns.tolist() == ["name_1", "name_2", "value"]
+
+
+def test_pivot_wider_values_fn_takes_tidy3_summaries():
+    import tidy3
+
+    dup = tidy({"id": [1, 1, 2], "key": ["a", "a", "b"], "val": [1.0, 3.0, 5.0]})
+    for fn, first in ((tidy3.mean, 2.0), (tidy3.sum, 4.0), (tidy3.n_distinct, 2), (len, 2)):
+        out = as_pandas(dup >> pivot_wider(names_from="key", values_from="val", values_fn=fn))
+        assert out["a"].tolist()[0] == first

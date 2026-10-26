@@ -252,6 +252,7 @@ from tidy3.stringr import (
     str_conv,
     str_view,
 )
+from tidy3.stringr import str_rank, str_to_camel, str_to_kebab, str_to_snake
 from tidy3.tidyselect import (
     Selector,
     across,
@@ -820,6 +821,7 @@ __all__ = [
     "str_escape",
     "str_conv",
     "str_view",
+    "str_to_snake", "str_to_camel", "str_to_kebab", "str_rank",
     "__version__",
 ]
 

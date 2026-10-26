@@ -1223,6 +1223,52 @@ add a column / row for every possible value (unused factor levels too), and
 As in tidyr, values that the id and name columns do not uniquely identify
 become list columns with a warning; pass `values_fn="list"` to ask for lists,
 or `values_fn="mean"` (`sum`, `first`, …) to summarise duplicates.
+`values_fn` also takes a function of each cell's values, which arrive as a
+Polars Series, or a dict that picks a summary per `values_from` column; the
+columns it leaves out behave as with no `values_fn`. A cell with no rows
+stays missing, even for `"sum"` and `"len"`. A dict `values_fill` is keyed by
+`values_from` column too:
+
+```python
+cars >> mutate(heavy=col("wt") > 3) >> pivot_wider(
+    id_cols="cyl", names_from="heavy", values_from=["mpg", "hp"],
+    values_fn={"mpg": "mean", "hp": lambda s: s.max() - s.min()},
+    values_fill={"hp": 0}, names_sort=True,
+)
+```
+
+`pivot_longer()` takes tidyr's prototypes: `names_ptypes` and `values_ptypes`
+check the new columns' types after any `names_transform` or
+`values_transform`. A prototype is a Python type (`int`, `float`, `str`,
+`bool`, `datetime.date`), a Polars type such as `pl.Enum([...])` for a factor
+with those levels, or a pandas `CategoricalDtype`, for every column or as a
+dict by column. As in vctrs, a cast must not change a value: whole doubles
+become integers, but text does not parse into numbers (transform it first).
+Every pivot takes `names_repair` for output names that clash. The default
+`"check_unique"` raises; `"unique"` numbers each duplicate by position;
+`"universal"` also makes every name a Python identifier; a function gets
+and returns the list of names:
+
+```python
+import polars as pl
+
+cars >> select("model", "mpg", "hp") >> pivot_longer(
+    ["mpg", "hp"], names_to="measure",
+    names_ptypes={"measure": pl.Enum(["mpg", "hp"])}, values_ptypes=float,
+)
+cars >> select("model", "mpg", "cyl") >> pivot_longer(
+    ["mpg", "cyl"], names_to="model", names_repair="unique",
+)                                              # model_1, model_2, value
+```
+
+tidy3 writes repaired names in Python spelling, as `bind_cols()` does:
+`"unique"` gives `x_1` where vctrs writes `x...1`, and `"universal"` makes
+`a b` into `a_b` and `1x` into `_1x` (vctrs: `a.b` and `..1x`). A Polars
+frame cannot hold two columns with one name, so `"minimal"` or a function
+that leaves duplicates raises. A `values_fn`, `names_ptypes`, or
+`values_ptypes` dict that names a column the pivot does not make raises,
+where tidyr ignores it.
+
 `pivot_longer()` supports the `.value` sentinel, and `separate(convert=True)`
 performs R-style logical/numeric inference. Schema-dependent
 reshape and conversion operations issue a metadata-only query on Polars.
@@ -1583,12 +1629,30 @@ cars
 | Locate | `str_locate` (a `{start, end}` struct), `str_locate_all` (a list of them), `invert_match` |
 | Length and pieces | `str_length`, `str_width`, `str_sub` (1-based, negatives count from the end), `str_sub_all`, `str_trunc`, `word` |
 | Replace | `str_replace`, `str_replace_all` (`\\1` for a capture group; a dict `{pattern: replacement}` applies several), `str_remove`, `str_remove_all`, `str_replace_na` |
-| Case | `str_to_upper`, `str_to_lower`, `str_to_title`, `str_to_sentence` |
+| Case | `str_to_upper`, `str_to_lower`, `str_to_title`, `str_to_sentence`, `str_to_snake`, `str_to_kebab`, `str_to_camel` (`first_upper=True` for PascalCase) |
 | Whitespace and layout | `str_trim`, `str_squish`, `str_pad`, `str_dup`, `str_wrap` |
 | Extract and match | `str_extract` (`group=`), `str_extract_all`, `str_match` (a struct of `match` and each group), `str_match_all` |
 | Split | `str_split` (a list column, `n=`), `str_split_fixed` (exactly `n` pieces), `str_split_i`, `str_split_1` |
 | Combine | `str_c` (row by row, `sep=`), `str_glue` (`{column}` templates), `str_glue_data`, and the aggregates `str_flatten` (`collapse=`, `last=`, `na_rm=`) and `str_flatten_comma` |
+| Rank | `str_rank` (ties share the lowest rank; `numeric=True` ranks `"x9"` before `"x10"`) |
 | Other | `str_escape`, `str_conv` (decode bytes) |
+
+The case helpers split words as stringr 1.6 does: at spaces and
+punctuation, between a lower- and an upper-case letter, between letters and
+digits, and before the last capital of a run, so `"Merc 450SLC"` becomes
+`"merc_450_slc"` and `"HTTPServer"` becomes `"http_server"`. `str_rank()`
+works within groups, like `min_rank()`:
+
+```python
+cars
+>> group_by("cyl")
+>> mutate(
+    key = str_to_snake(model),
+    label = str_to_camel(model, first_upper=True),
+    rank = str_rank(model),
+)
+>> ungroup()
+```
 
 Struct results spread into columns with `unnest_wider()`:
 `mutate(loc = str_locate(x, "an")) >> unnest_wider(loc)` gives `start` and
@@ -1625,6 +1689,14 @@ How this differs from R:
   `str_conv`, `word` with a regex separator, and `str_split` with both a regex
   and `n=` run row by row in Python, so they are slower on large frames.
 - `str_to_title("don't")` gives `"Don'T"` (R: `"Don't"`).
+- `str_rank`, `str_sort`, and `str_order` compare code points, not stringi
+  collation, and take no `locale`: `"B"` ranks before `"a"`, where
+  stringr's English order puts `"a"` first. Lower-case text, digits, and
+  `numeric=True` agree with stringr.
+- `str_to_camel` title-cases each word by Unicode rules. stringr uses ICU
+  word breaks, which also start a word inside one tidy3 word where scripts
+  meet; tidy3 follows that only after Han or kana (`"日本Text"` becomes
+  `"日本Text"`), not for other uncased scripts.
 - There is no `str_sub<-`; build the new string with `str_c()` and
   `str_sub()`. `str_interp` (deprecated in stringr) is not included.
 

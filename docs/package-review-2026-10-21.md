@@ -310,6 +310,31 @@ decisions, not the next missing Python data-cleaning helpers.
    advanced pivot arguments, and typed list-column mapping. Use Python's
    existing collection tools where a new purrr wrapper adds little value.
 
+   **Follow-up: strings and pivots added in the working tree.**
+   `str_to_snake`, `str_to_kebab`, `str_to_camel`, and `str_rank` follow
+   stringr 1.6.0. The word splits are native Polars; `str_rank` compares
+   code points, like `str_sort`. `pivot_longer` takes `names_ptypes`,
+   `values_ptypes`, and `names_repair`. `pivot_wider` takes `names_repair`
+   and a function, tidy3 summary, or per-column dict as `values_fn`. The
+   spec pivots take the same options. Repaired names use the `bind_cols()`
+   Python spelling. Prototypes cast only without loss, as in vctrs. A cell
+   with no rows stays missing under `"sum"` and `"len"`. Checked against
+   tidyr 1.3.2.
+
+   Still open: quantiles, which this pass did not cover, and typed
+   list-column mapping. tidy() turns pandas input into Polars, so the
+   pandas-parity concern above no longer applies. Polars list methods
+   already work inside verbs (`pl.col("items").list.len()`), but no tidy3
+   helper runs a Python function per cell with a declared result type.
+   These purrr pieces earn a place, as expressions inside `mutate`:
+   `map_int`, `map_dbl`, `map_chr`, `map_lgl`, and `map` (the type is what
+   a lazy plan needs up front), `map2_*` and `pmap_*` over several columns,
+   and `pluck` for nested list and struct cells (native `list.get` and
+   `struct.field`, next to `hoist`). `keep`, `discard`, `compact`, `reduce`,
+   `accumulate`, `safely`, `possibly`, `walk`, and `imap` are left to
+   comprehensions, `filter`, `functools.reduce`, and `try`/`except`, inside
+   a `map` when the values are list cells.
+
 Track coverage as **name present**, **argument contract**, **backend parity**,
 **R comparison**, **metadata preservation**, and **execution cost**. A single
 function-count percentage would hide the most consequential gaps found here.
