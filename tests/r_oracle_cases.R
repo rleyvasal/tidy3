@@ -1512,6 +1512,100 @@ result <- switch(
       missing=payload(arrange(missing, f))
     )
   },
+  string_case_rank = {
+    if (!requireNamespace("stringr", quietly=TRUE) || packageVersion("stringr") < "1.6.0") {
+      list(skip=TRUE, reason="stringr 1.6.0 is not installed")
+    } else {
+      x <- c("Mazda RX4 Wag", "Hornet 4 Drive", "Merc 450SLC", "AMC Javelin", "HTTPServer",
+             "camelCaseXML", "x1y2", "  __a-b.C  ", "don't stop", "\u00c9coleNormale", "\u65e5\u672cText", "a  b", "", NA)
+      # Lower-case words, where ICU collation and code-point order agree.
+      ranked <- tibble(
+        g=c(1, 1, 1, 2, 2, 2, 2),
+        s=c("merc", "fiat", NA, "x10", "x9", "honda", "x10")
+      )
+      list(
+        case=tibble(x=x) %>% mutate(
+          snake=stringr::str_to_snake(x),
+          kebab=stringr::str_to_kebab(x),
+          camel=stringr::str_to_camel(x),
+          pascal=stringr::str_to_camel(x, first_upper=TRUE)
+        ),
+        rank=ranked %>% mutate(
+          rank=stringr::str_rank(s),
+          natural=stringr::str_rank(s, numeric=TRUE)
+        ),
+        grouped=ranked %>% group_by(g) %>% mutate(
+          rank=stringr::str_rank(s),
+          natural=stringr::str_rank(s, numeric=TRUE)
+        ) %>% ungroup(),
+        vector=stringr::str_rank(c("b", "a", "c", "a"))
+      )
+    }
+  },
+  pivot_ptypes_repair = {
+    # tidy3 spells vctrs' repaired names in Python: x...1 is x_1, a.b is
+    # a_b, and the ..1x of a leading digit is _1x.
+    py_names <- function(x) {
+      n <- gsub("...", "_", names(x), fixed=TRUE)
+      n <- gsub(".", "_", sub("^\\.\\.?", "_", n), fixed=TRUE)
+      names(x) <- n
+      x
+    }
+    q <- function(x) suppressMessages(suppressWarnings(x))
+    weeks <- tibble(id=1:2, week_1=c(5, 6), week_2=c(7, 8))
+    counts <- tibble(id=1:2, n_1=1:2, n_2=3:4, sd_1=c(0.5, 0.25), sd_2=c(1, 2))
+    clash <- tibble(name=1:2, x=1:2, y=3:4)
+    keyed <- tibble(a=1:2, k=c("a", "b"), v=1:2)
+    odd <- tibble(id=1:2, k=c("a b", "1x"), v=1:2)
+    dup <- tibble(id=c(1, 1, 2), key=c("a", "a", "b"), val=c(1, 3, 5), w=c(10, 20, 30))
+    list(
+      names_double=pivot_longer(
+        weeks, starts_with("week_"), names_to="week", names_prefix="week_",
+        names_transform=list(week=as.integer), names_ptypes=list(week=double())
+      ),
+      names_factor=pivot_longer(
+        weeks, starts_with("week_"), names_to="week", names_prefix="week_",
+        names_ptypes=list(week=factor(levels=c("2", "1")))
+      ),
+      values_double=pivot_longer(counts, c(n_1, n_2), values_ptypes=list(value=double())),
+      values_all=pivot_longer(counts, c(n_1, n_2), values_ptypes=double()),
+      values_dot=pivot_longer(
+        counts, -id, names_to=c(".value", "visit"), names_sep="_",
+        values_ptypes=list(n=double())
+      ),
+      longer_unique=py_names(q(pivot_longer(clash, c(x, y), names_repair="unique"))),
+      longer_universal=py_names(q(pivot_longer(
+        clash, c(x, y), names_to="the key", values_to="the value", names_repair="universal"
+      ))),
+      longer_function=pivot_longer(clash, c(x, y), names_to="key", names_repair=toupper),
+      wider_unique=py_names(q(pivot_wider(keyed, names_from=k, values_from=v, names_repair="unique"))),
+      wider_universal=py_names(q(pivot_wider(odd, names_from=k, values_from=v, names_repair="universal"))),
+      wider_glue=py_names(q(pivot_wider(
+        keyed, names_from=k, values_from=v, names_glue="{k}", names_vary="slowest",
+        names_repair="unique"
+      ))),
+      fn_dict=q(pivot_wider(dup, names_from=key, values_from=c(val, w), values_fn=list(val=sum))),
+      fn_callable=pivot_wider(dup, names_from=key, values_from=val, values_fn=function(x) max(x) - min(x)),
+      fn_length=pivot_wider(dup, names_from=key, values_from=c(val, w), values_fn=length),
+      fn_glue=pivot_wider(
+        dup, names_from=key, values_from=val, values_fn=list(val=mean),
+        names_glue="{key}_avg", values_fill=list(val=0)
+      ),
+      fn_fill=pivot_wider(dup, names_from=key, values_from=c(val, w), values_fn=sum, values_fill=list(w=0)),
+      spec_ptypes=pivot_longer_spec(
+        weeks,
+        build_longer_spec(
+          weeks, starts_with("week_"), names_to="week", names_prefix="week_",
+          names_transform=list(week=as.integer), names_ptypes=list(week=double())
+        ),
+        values_ptypes=list(value=integer())
+      ),
+      spec_longer_unique=py_names(q(pivot_longer_spec(clash, build_longer_spec(clash, c(x, y)), names_repair="unique"))),
+      spec_wider_unique=py_names(q(pivot_wider_spec(
+        keyed, build_wider_spec(keyed, names_from=k, values_from=v), names_repair="unique"
+      )))
+    )
+  },
   string_equal = {
     if (!requireNamespace("stringr", quietly=TRUE)) {
       list(skip=TRUE, reason="stringr is not installed")

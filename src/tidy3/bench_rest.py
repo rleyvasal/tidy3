@@ -755,6 +755,26 @@ def attach(add, Case) -> None:
         _wider,
     )
     verb(
+        "pivot_longer_ptypes", "tidyr", [],
+        lambda df, extra=None: (
+            pipe(df.select("id", "mass", "bill"))
+            >> t.pivot_longer(["mass", "bill"], names_ptypes={"name": pl.Enum(["mass", "bill"])}, values_ptypes=float)
+        ).collect(),
+        lambda df, extra=None: _longer(df).with_columns(pl.col("name").cast(pl.Enum(["mass", "bill"]))),
+    )
+    verb(
+        "pivot_wider_values_fn", "tidyr", [],
+        lambda df, extra=None: (
+            pipe(df.select("g", "species", "mass", "bill"))
+            >> t.pivot_wider(names_from="species", values_from=["mass", "bill"], values_fn={"mass": "mean", "bill": "max"})
+        ).collect(),
+        lambda df, extra=None: (
+            df.group_by("g", "species", maintain_order=True)
+            .agg(pl.col("mass").mean(), pl.col("bill").max())
+            .pivot(on="species", index="g", values=["mass", "bill"])
+        ),
+    )
+    verb(
         "separate", "tidyr", ["separate"],
         lambda df, extra=None: (pipe(df) >> t.separate("csv", ["a", "b"], sep=",", extra="drop", fill="right") >> t.select("id", "a", "b")).collect(),
         lambda df, extra=None: df.select("id", pl.col("csv").str.split_exact(",", 1).struct.rename_fields(["a", "b"])).unnest("csv"),

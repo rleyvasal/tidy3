@@ -2469,6 +2469,92 @@ def _factor_sort():
     }
 
 
+def _string_case_rank():
+    import tidy3 as t3
+
+    x = ["Mazda RX4 Wag", "Hornet 4 Drive", "Merc 450SLC", "AMC Javelin", "HTTPServer",
+         "camelCaseXML", "x1y2", "  __a-b.C  ", "don't stop", "\u00c9coleNormale", "\u65e5\u672cText", "a  b", "", None]
+    ranked = tidy({"g": [1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
+                   "s": ["merc", "fiat", None, "x10", "x9", "honda", "x10"]})
+    ranks = {"rank": t3.str_rank("s"), "natural": t3.str_rank("s", numeric=True)}
+    return {
+        "case": tidy({"x": x}) >> mutate(
+            snake=t3.str_to_snake("x"),
+            kebab=t3.str_to_kebab("x"),
+            camel=t3.str_to_camel("x"),
+            pascal=t3.str_to_camel("x", first_upper=True),
+        ),
+        "rank": ranked >> mutate(**ranks),
+        "grouped": ranked >> group_by("g") >> mutate(**ranks) >> ungroup(),
+        "vector": pl.Series(t3.str_rank(["b", "a", "c", "a"])),
+    }
+
+
+def _pivot_ptypes_repair():
+    import warnings
+
+    weeks = tidy({"id": [1, 2], "week_1": [5.0, 6.0], "week_2": [7.0, 8.0]})
+    counts = tidy({"id": [1, 2], "n_1": [1, 2], "n_2": [3, 4], "sd_1": [0.5, 0.25], "sd_2": [1.0, 2.0]})
+    clash = tidy({"name": [1, 2], "x": [1, 2], "y": [3, 4]})
+    keyed = tidy({"a": [1, 2], "k": ["a", "b"], "v": [1, 2]})
+    odd = tidy({"id": [1, 2], "k": ["a b", "1x"], "v": [1, 2]})
+    dup = tidy({"id": [1.0, 1.0, 2.0], "key": ["a", "a", "b"], "val": [1.0, 3.0, 5.0], "w": [10.0, 20.0, 30.0]})
+    week = {"names_to": "week", "names_prefix": "week_"}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fn_dict = dup >> pivot_wider(names_from="key", values_from=["val", "w"], values_fn={"val": "sum"})
+    return {
+        "names_double": weeks >> pivot_longer(
+            ["week_1", "week_2"], **week, names_transform={"week": int}, names_ptypes={"week": float}
+        ),
+        "names_factor": weeks >> pivot_longer(
+            ["week_1", "week_2"], **week, names_ptypes={"week": pl.Enum(["2", "1"])}
+        ),
+        "values_double": counts >> pivot_longer(["n_1", "n_2"], values_ptypes={"value": float}),
+        "values_all": counts >> pivot_longer(["n_1", "n_2"], values_ptypes=float),
+        "values_dot": counts >> pivot_longer(
+            ["n_1", "n_2", "sd_1", "sd_2"], names_to=[".value", "visit"], names_sep="_",
+            values_ptypes={"n": float},
+        ),
+        "longer_unique": clash >> pivot_longer(["x", "y"], names_repair="unique"),
+        "longer_universal": clash >> pivot_longer(
+            ["x", "y"], names_to="the key", values_to="the value", names_repair="universal"
+        ),
+        "longer_function": clash >> pivot_longer(
+            ["x", "y"], names_to="key", names_repair=lambda names: [n.upper() for n in names]
+        ),
+        "wider_unique": keyed >> pivot_wider(names_from="k", values_from="v", names_repair="unique"),
+        "wider_universal": odd >> pivot_wider(names_from="k", values_from="v", names_repair="universal"),
+        "wider_glue": keyed >> pivot_wider(
+            names_from="k", values_from="v", names_glue="{k}", names_vary="slowest", names_repair="unique"
+        ),
+        "fn_dict": fn_dict,
+        "fn_callable": dup >> pivot_wider(
+            names_from="key", values_from="val", values_fn=lambda s: s.max() - s.min()
+        ),
+        "fn_length": dup >> pivot_wider(names_from="key", values_from=["val", "w"], values_fn=lambda s: s.len()),
+        "fn_glue": dup >> pivot_wider(
+            names_from="key", values_from="val", values_fn={"val": "mean"},
+            names_glue="{key}_avg", values_fill={"val": 0},
+        ),
+        "fn_fill": dup >> pivot_wider(
+            names_from="key", values_from=["val", "w"], values_fn="sum", values_fill={"w": 0}
+        ),
+        "spec_ptypes": weeks >> tidy3.pivot_longer_spec(
+            tidy3.build_longer_spec(
+                weeks, ["week_1", "week_2"], **week, names_transform={"week": int}, names_ptypes={"week": float}
+            ),
+            values_ptypes={"value": int},
+        ),
+        "spec_longer_unique": clash >> tidy3.pivot_longer_spec(
+            tidy3.build_longer_spec(clash, ["x", "y"]), names_repair="unique"
+        ),
+        "spec_wider_unique": keyed >> tidy3.pivot_wider_spec(
+            tidy3.build_wider_spec(keyed, names_from="k", values_from="v"), names_repair="unique"
+        ),
+    }
+
+
 def _string_equal():
     frame = tidy(
         {
@@ -2736,6 +2822,8 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "lubridate_grid": _lubridate_grid,
     "factor_sort": _factor_sort,
     "string_equal": _string_equal,
+    "string_case_rank": _string_case_rank,
+    "pivot_ptypes_repair": _pivot_ptypes_repair,
 }
 
 
@@ -2778,6 +2866,10 @@ CASE_VERBS = {
     "grids": {"expand_grid", "crossing", "uncount", "full_seq", "complete", "expand"},
     "empty_groups": {"summarise", "count"},
     "pivot_options": {"pivot_wider", "pivot_longer"},
+    "pivot_ptypes_repair": {
+        "pivot_wider", "pivot_longer", "build_longer_spec", "pivot_longer_spec",
+        "build_wider_spec", "pivot_wider_spec",
+    },
     "specs": {
         "build_longer_spec", "pivot_longer_spec", "build_wider_spec",
         "pivot_wider_spec", "check_pivot_spec",

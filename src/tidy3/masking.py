@@ -161,6 +161,10 @@ _PASSTHROUGH_KW = frozenset(
         "names_sep",
         "names_prefix",
         "names_repair",
+        "names_ptypes",
+        "values_ptypes",
+        "names_transform",
+        "values_transform",
         "values_drop_na",
         "values_fill",
         "delim",
@@ -212,6 +216,7 @@ _FIRST_COLUMN_ARG = frozenset(
         "str_width", "str_sub_all", "word", "str_wrap", "str_extract_all",
         "str_match", "str_match_all", "str_split_fixed", "str_flatten_comma",
         "str_escape", "str_conv",
+        "str_to_snake", "str_to_camel", "str_to_kebab", "str_rank",
     }
 )
 # tidyselect helpers whose arguments are vectors of names from the

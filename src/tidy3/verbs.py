@@ -548,6 +548,7 @@ _WINDOW_FUNCTIONS = {
     "n_distinct",
     "nth",
     "consecutive_id",
+    "str_rank",
 }
 
 
