@@ -242,3 +242,14 @@ def test_two_way_rejects_invalid_selections():
         source >> t.tabyl("x", "nested")
     with pytest.raises(TypeError, match="frame column"):
         t.tabyl(["a", "b"], "y")
+
+
+def test_percentages_divide_exactly_as_in_r():
+    counts = {"a": 3, "b": 2, "c": 7, "d": 11}
+    values = [name for name, n in counts.items() for _ in range(n)]
+    out = (t.tidy({"x": values + [None]}) >> t.tabyl("x")).collect()
+    total, valid = sum(counts.values()) + 1, sum(counts.values())
+    assert out["percent"].to_list() == [n / total for n in [*counts.values(), 1]]
+    assert out["valid_percent"].to_list() == [n / valid for n in counts.values()] + [None]
+    out = (t.tidy({"x": list("aaabb")}) >> t.tabyl("x")).collect()
+    assert out["percent"].to_list() == [0.6, 0.4]
