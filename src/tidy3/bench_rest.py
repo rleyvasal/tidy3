@@ -432,58 +432,111 @@ def attach(add, Case) -> None:
     )
 
     # ── rows_* ─────────────────────────────────────────────────────────
+    # x is the whole table; y changes one row in a hundred. The raw recipes
+    # validate as the verbs do: y's keys are unique (update, patch, upsert)
+    # and every y key is in x (update, patch, delete), from one join.
     def _base(df):
-        return df.select("id", "mass", "species").head(6)
+        return df.select("id", "mass", "species")
 
-    def _update(df, replace):
-        right = pl.DataFrame(replace)
-        hit = pl.col("id").is_in(right["id"].implode())
-        joined = _base(df).join(right, on="id", how="left", suffix="_y", maintain_order="left")
-        return joined.with_columns(
-            pl.when(hit).then(pl.col("mass_y")).otherwise(pl.col("mass")).alias("mass"),
-            pl.when(hit).then(pl.col("species_y")).otherwise(pl.col("species")).alias("species"),
-        ).select("id", "mass", "species")
+    def _every_hundredth(df, mass, species):
+        ids = df["id"].to_list()[::100]
+        return pl.DataFrame({"id": ids, "mass": [mass] * len(ids), "species": [species] * len(ids)})
 
-    update_rows = {"id": [1, 3], "mass": [9.0, 9.0], "species": ["Z", "Z"]}
+    def _keyed(right):
+        if right.select("id").is_duplicated().any():
+            raise ValueError("y keys must be unique")
+        return right.rename({"mass": "mass_y", "species": "species_y"}).with_columns(pl.lit(True).alias("hit"))
+
+    def _all_matched(joined, right):
+        if int(joined["hit"].sum()) != right.height:
+            raise ValueError("y contains keys absent from x")
+        return joined
+
+    def _update(base, right):
+        joined = _all_matched(base.join(_keyed(right), on="id", how="left", maintain_order="left"), right)
+        return joined.select(
+            "id",
+            pl.when("hit").then(pl.col("mass_y")).otherwise(pl.col("mass")).alias("mass"),
+            pl.when("hit").then(pl.col("species_y")).otherwise(pl.col("species")).alias("species"),
+        )
+
+    def _update_inputs(df):
+        return _base(df), _every_hundredth(df, 9.0, "Z")
+
     verb(
         "rows_update", "rows", ["rows_update"],
-        lambda df, extra=None: (pipe(_base(df)) >> t.rows_update(pl.DataFrame(update_rows), by="id")).collect(),
-        lambda df, extra=None: _update(df, update_rows),
+        lambda df, extra: (pipe(extra[0]) >> t.rows_update(extra[1], by="id")).collect(),
+        lambda df, extra: _update(*extra),
+        prepare=_update_inputs,
     )
 
     def _patch(df):
-        base = _base(df).with_columns(pl.when(pl.col("id") == 0).then(None).otherwise(pl.col("species")).alias("species"))
-        right = pl.DataFrame({"id": [0], "mass": [None], "species": ["Z"]})
-        return base, right
+        base = _base(df).with_columns(pl.when(pl.col("id") % 100 == 0).then(None).otherwise(pl.col("species")).alias("species"))
+        return base, _every_hundredth(df, None, "Z")
+
+    def _patched(base, right):
+        joined = _all_matched(base.join(_keyed(right), on="id", how="left", maintain_order="left"), right)
+        return joined.select("id", pl.coalesce("mass", "mass_y").alias("mass"), pl.coalesce("species", "species_y").alias("species"))
 
     verb(
         "rows_patch", "rows", ["rows_patch"],
-        # Both tables are built once, outside the timing.
         lambda df, extra: (pipe(extra[0]) >> t.rows_patch(extra[1], by="id")).collect(),
-        lambda df, extra: extra[0].with_columns(pl.when(pl.col("id") == 0).then(pl.lit("Z")).otherwise(pl.col("species")).alias("species")),
+        lambda df, extra: _patched(*extra),
         prepare=_patch,
     )
+
+    def _deleted(base, right):
+        keys = right.select("id")
+        if base.select("id").join(keys, on="id", how="inner").select("id").n_unique() != right.height:
+            raise ValueError("y contains keys absent from x")
+        return base.join(keys, on="id", how="anti", maintain_order="left")
+
     verb(
         "rows_delete", "rows", ["rows_delete"],
-        lambda df, extra=None: (pipe(_base(df)) >> t.rows_delete(pl.DataFrame({"id": [1]}), by="id")).collect(),
-        lambda df, extra=None: _base(df).filter(pl.col("id") != 1),
+        lambda df, extra: (pipe(extra[0]) >> t.rows_delete(extra[1].select("id"), by="id")).collect(),
+        lambda df, extra: _deleted(*extra),
+        prepare=_update_inputs,
     )
+
+    def _new_rows(df):
+        ids = [i + df.height for i in range(df.height // 100)]
+        return pl.DataFrame({"id": ids, "mass": [1.0] * len(ids), "species": ["Q"] * len(ids)})
+
     verb(
         "rows_append", "rows", ["rows_append"],
-        lambda df, extra=None: (pipe(_base(df)) >> t.rows_append(pl.DataFrame({"id": [99], "mass": [1.0], "species": ["Q"]}))).collect(),
-        lambda df, extra=None: pl.concat([_base(df), pl.DataFrame({"id": [99], "mass": [1.0], "species": ["Q"]})], how="vertical"),
+        lambda df, extra: (pipe(extra[0]) >> t.rows_append(extra[1])).collect(),
+        lambda df, extra: pl.concat([extra[0], extra[1]], how="vertical"),
+        prepare=lambda df: (_base(df), _new_rows(df)),
     )
-    inserted = pl.DataFrame({"id": [1, 99], "mass": [7.0, 1.0], "species": ["NO", "Q"]})
+
+    def _insert_inputs(df):
+        # Half of y is already in x (ignored), half is new.
+        return _base(df), pl.concat([_every_hundredth(df, 7.0, "NO"), _new_rows(df)])
+
     verb(
         "rows_insert", "rows", ["rows_insert"],
-        lambda df, extra=None: (pipe(_base(df)) >> t.rows_insert(inserted, by="id", conflict="ignore")).collect(),
-        lambda df, extra=None: pl.concat([_base(df), inserted.filter(pl.col("id") == 99)], how="vertical"),
+        lambda df, extra: (pipe(extra[0]) >> t.rows_insert(extra[1], by="id", conflict="ignore")).collect(),
+        lambda df, extra: pl.concat([extra[0], extra[1].join(extra[0].select("id"), on="id", how="anti", maintain_order="left")], how="vertical"),
+        prepare=_insert_inputs,
     )
-    upserted = pl.DataFrame({"id": [1, 99], "mass": [8.0, 1.0], "species": ["Z", "Q"]})
+
+    def _upsert_inputs(df):
+        return _base(df), pl.concat([_every_hundredth(df, 8.0, "Z"), _new_rows(df)])
+
+    def _upserted(base, right):
+        joined = base.join(_keyed(right), on="id", how="left", maintain_order="left")
+        updated = joined.select(
+            "id",
+            pl.when("hit").then(pl.col("mass_y")).otherwise(pl.col("mass")).alias("mass"),
+            pl.when("hit").then(pl.col("species_y")).otherwise(pl.col("species")).alias("species"),
+        )
+        return pl.concat([updated, right.join(base.select("id"), on="id", how="anti", maintain_order="left")], how="vertical")
+
     verb(
         "rows_upsert", "rows", ["rows_upsert"],
-        lambda df, extra=None: (pipe(_base(df)) >> t.rows_upsert(upserted, by="id")).collect(),
-        lambda df, extra=None: pl.concat([_update(df, {"id": [1], "mass": [8.0], "species": ["Z"]}), upserted.filter(pl.col("id") == 99)], how="vertical"),
+        lambda df, extra: (pipe(extra[0]) >> t.rows_upsert(extra[1], by="id")).collect(),
+        lambda df, extra: _upserted(*extra),
+        prepare=_upsert_inputs,
     )
 
     # ── groups ─────────────────────────────────────────────────────────

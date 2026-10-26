@@ -966,7 +966,8 @@ def _scalar(value: Any) -> str:
     """A typed scalar, ``{"Int32": 5}``, as ``pl.lit(5, dtype=pl.Int32)``."""
     (dtype_name, raw), = value.items()
     if dtype_name == "Null":
-        return "None"
+        # An expression wherever it stands: a bare None has no .alias().
+        return "pl.lit(None)"
     if dtype_name == "List":
         values = pl.read_ipc_stream(io.BytesIO(bytes(raw))).to_series()
         return f"pl.lit({values.to_list()!r}, dtype=pl.List({_dtype_of(values.dtype)}))"
