@@ -463,7 +463,7 @@ def adorn_pct_formatting(
         return f"{rounded + 0.0:.{digits}f}{sign}"
 
     def batch(series: pl.Series) -> pl.Series:
-        return pl.Series(series.name, [text(value) for value in series.cast(pl.Float64).to_list()], dtype=pl.String)
+        return _percent_text(series, digits, rounding, sign, text)
 
     def _apply(tf):
         schema = tf._schema()
@@ -489,6 +489,58 @@ def adorn_pct_formatting(
                            totals=tf._totals, tabyl=tf._tabyl)
 
     return _ReportVerb(_apply, "adorn_pct_formatting")
+
+
+def _percent_text(series: pl.Series, digits: int, rounding: str, sign: str, text: Any) -> pl.Series:
+    """:func:`adorn_pct_formatting`'s text for a column, rounded in bulk.
+
+    The rounded number is an integer count of the last decimal, written as
+    text in one Polars cast. Values within a hair of a rounding tie, or too
+    large for an exact integer, go through *text* one by one, so every value
+    gets exactly the per-value result.
+    """
+    values = series.cast(pl.Float64).to_numpy() * 100  # missing values become NaN
+    scale = 10.0 ** digits
+    finite = np.isfinite(values)
+    with np.errstate(invalid="ignore", over="ignore"):  # these values go the per-value way
+        if rounding == "half to even":
+            scaled = values * scale
+            fraction = np.abs(scaled - np.floor(scaled))
+            exact = finite & (np.abs(fraction - 0.5) > 1e-7) & (np.abs(scaled) < 1e12)
+            whole = np.rint(scaled)
+        else:
+            # janitor's round_half_up, in the same double arithmetic.
+            whole = np.trunc(np.abs(values) * scale + 0.5 + math.sqrt(sys.float_info.epsilon)) * np.sign(values)
+            exact = finite & (np.abs(whole) < 1e12)
+    settled = np.where(exact, whole, 0.0) + 0.0  # -0.0 becomes 0.0, which R shows as 0
+    counts = pl.Series(settled).cast(pl.Int64)
+    if digits == 0:
+        body = counts.cast(pl.String)
+    elif digits == 1:
+        # The shortest text that reads back as counts / 10 is that decimal
+        # with its one digit, so the float cast writes "25.1" directly.
+        # NumPy divides exactly; Polars would multiply by 0.1 instead and
+        # write 33.300000000000004.
+        body = pl.Series(settled / 10).cast(pl.String)
+    else:
+        magnitude = counts.abs()
+        body = (magnitude // int(scale)).cast(pl.String) + "." + (magnitude % int(scale)).cast(pl.String).str.zfill(digits)
+        if bool((counts < 0).any()):
+            body = pl.select(pl.when(counts < 0).then("-" + body).otherwise(body)).to_series()
+    out = body + sign if sign else body
+    # The few special rows are put in afterwards: scattering a constant is
+    # cheap, and only near-tie and huge values need the per-value text.
+    for rows, value in (
+        (np.flatnonzero(np.isnan(values)), "-"),
+        (np.flatnonzero(np.isposinf(values)), "Inf" + sign),
+        (np.flatnonzero(np.isneginf(values)), "-Inf" + sign),
+    ):
+        if rows.size:
+            out = out.scatter(rows, value)
+    rest = np.flatnonzero(finite & ~exact)
+    if rest.size:
+        out = out.scatter(rest, [text(value) for value in series.cast(pl.Float64).gather(rest).to_list()])
+    return out.alias(series.name)
 
 
 def _round_half_up(value: float, digits: int) -> float:
@@ -582,10 +634,9 @@ def adorn_ns(
             if index not in adorned:
                 columns.append(data[column])
                 continue
-            wrapped = [f"({value})" for value in rear[index]]
-            width = max((len(value) for value in wrapped), default=0)
-            columns.append(pl.Series(column, [f"{first} {second.rjust(width)}"
-                                              for first, second in zip(front[index], wrapped)], dtype=pl.String))
+            wrapped = "(" + rear[index] + ")"
+            width = wrapped.str.len_chars().max() or 0
+            columns.append((front[index] + " " + wrapped.str.pad_start(width)).alias(column))
         kept = [column for index, column in enumerate(names) if index not in adorned]
         result = pl.DataFrame(columns) if columns else data
         return tf._with_lf(result.lazy(), rowwise=False, category_levels=_levels(tf, kept),
@@ -594,29 +645,69 @@ def adorn_ns(
     return _ReportVerb(_apply, "adorn_ns")
 
 
-def _count_text(series: pl.Series, format_func: Any) -> list[str]:
+# The text helpers below return String columns. A value's text depends only
+# on the value (and, for format(), on the column's set of values), so each
+# distinct value is written once in Python and mapped back to the rows;
+# integers, text, and logical values are written natively.
+
+
+def _by_value(series: pl.Series, write: Any) -> pl.Series:
+    """*write* applied to each distinct value, mapped back to every row.
+
+    NaN never equals itself, so it is written once and placed by mask.
+    """
+    nan = series.is_nan() if series.dtype.is_float() else None
+    keys = series.fill_nan(None) if nan is not None else series
+    texts = {value: write(value) for value in keys.unique().to_list() if value is not None}
+    out = keys.replace_strict(texts, default=None, return_dtype=pl.String) if texts else (
+        pl.Series(series.name, [None] * series.len(), dtype=pl.String)
+    )
+    if series.null_count():
+        out = pl.select(pl.when(series.is_null()).then(pl.lit(write(None))).otherwise(out)).to_series()
+    if nan is not None and nan.any():
+        out = pl.select(pl.when(nan).then(pl.lit(write(math.nan))).otherwise(out)).to_series()
+    return out.alias(series.name)
+
+
+def _integer_text(series: pl.Series, big_mark: str = "") -> pl.Series:
+    """Integers as decimal text, with *big_mark* between thousands; NA when missing."""
+    text = series.cast(pl.String)
+    if big_mark:
+        digits = series.abs().cast(pl.String)
+        # Group from the right: reverse, mark every third digit, reverse back.
+        grouped = (digits.str.reverse().str.replace_all(r"([0-9]{3})", "${1}" + big_mark)
+                   .str.strip_chars_end(big_mark).str.reverse())
+        text = pl.select(pl.when(series < 0).then("-" + grouped).otherwise(grouped)).to_series()
+    return text.fill_null("NA").alias(series.name)
+
+
+def _count_text(series: pl.Series, format_func: Any) -> pl.Series:
     """A count column as janitor's default ``format(x, big.mark = ",")``, trimmed."""
     if not series.dtype.is_numeric():
-        return [value.strip() for value in _character_text(series)]
+        return _character_text(series).str.strip_chars()
     if format_func is None:
-        return [value.strip() for value in _r_format(series, big_mark=",")]
-    return [str(format_func(value)).strip() for value in series.to_list()]
+        return _r_format(series, big_mark=",").str.strip_chars()
+    return pl.Series(series.name, [str(format_func(value)).strip() for value in series.to_list()], dtype=pl.String)
 
 
-def _character_text(series: pl.Series) -> list[str]:
+def _character_text(series: pl.Series) -> pl.Series:
     """R's ``as.character()`` of each value, then ``paste()``'s ``"NA"``."""
     if series.dtype.is_float():
-        return [_r_reals([value], 15)[0] for value in series.to_list()]
+        return _by_value(series, lambda value: _r_reals([value], 15)[0])
     return _plain_text(series)
 
 
-def _plain_text(series: pl.Series) -> list[str]:
+def _plain_text(series: pl.Series) -> pl.Series:
+    if series.dtype == pl.String:
+        return series.fill_null("NA")
+    if series.dtype.is_integer():
+        return _integer_text(series)
     if series.dtype == pl.Boolean:
-        return ["NA" if value is None else ("TRUE" if value else "FALSE") for value in series.to_list()]
-    return ["NA" if value is None else str(value) for value in series.to_list()]
+        return series.replace_strict({True: "TRUE", False: "FALSE"}, return_dtype=pl.String).fill_null("NA")
+    return _by_value(series, lambda value: "NA" if value is None else str(value))
 
 
-def _matrix_text(frame: pl.DataFrame, levels: Any = ()) -> list[list[str]]:
+def _matrix_text(frame: pl.DataFrame, levels: Any = ()) -> list[pl.Series]:
     """Cells as R's ``as.matrix()`` writes a data frame.
 
     A frame of numbers is written as ``as.character()`` writes each value.
@@ -632,19 +723,24 @@ def _matrix_text(frame: pl.DataFrame, levels: Any = ()) -> list[list[str]]:
             texts.append(_plain_text(frame[column]))
             continue
         # Missing values, NaN included, are put back as NA after formatting.
-        values = frame[column].to_list()
-        texts.append(["NA" if _missing(value) else text for value, text in zip(values, _r_format(frame[column]))])
+        values = frame[column]
+        missing = values.is_null() | (values.is_nan() if values.dtype.is_float() else False)
+        formatted = _r_format(values)
+        texts.append(pl.select(pl.when(missing).then(pl.lit("NA")).otherwise(formatted)).to_series().alias(column))
     return texts
 
 
-def _r_format(series: pl.Series, *, big_mark: str = "") -> list[str]:
+def _r_format(series: pl.Series, *, big_mark: str = "") -> pl.Series:
     """R's ``format()`` of a numeric column: common decimals, right-aligned."""
     if series.dtype.is_float():
-        texts = _r_reals(series.to_list(), 7, big_mark)
+        # The layout depends on the set of values, so the distinct ones decide it.
+        distinct = series.unique().to_list()
+        written = dict(zip(distinct, _r_reals(distinct, 7, big_mark)))
+        texts = _by_value(series, lambda value: "NA" if value is None else "NaN" if math.isnan(value) else written[value])
     else:
-        texts = ["NA" if value is None else _big_mark(str(value), big_mark) for value in series.to_list()]
-    width = max((len(text) for text in texts), default=0)
-    return [text.rjust(width) for text in texts]
+        texts = _integer_text(series, big_mark)
+    width = texts.str.len_chars().max() or 0
+    return texts.str.pad_start(width)
 
 
 def _r_reals(values: list[Any], digits: int, big_mark: str = "") -> list[str]:
@@ -680,7 +776,8 @@ def _r_reals(values: list[Any], digits: int, big_mark: str = "") -> list[str]:
         elif fixed:
             texts.append(_big_mark(f"{value + 0.0:.{decimals}f}", big_mark))
         else:
-            texts.append(f"{value:.{significant - 1}e}")
+            # Adding 0.0 turns -0.0 into 0.0: R never writes a negative zero.
+            texts.append(f"{value + 0.0:.{significant - 1}e}")
     return texts
 
 
