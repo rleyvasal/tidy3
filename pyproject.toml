@@ -20,7 +20,7 @@ classifiers = [
   "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-  "polars>=1.39",
+  "polars>=1.42.1",
   "pandas>=2.0",
   "pyarrow>=14.0",
   "plot3>=0.6.6",

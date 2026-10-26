@@ -17,6 +17,10 @@ under **Changed**.
 - `parse_time()` reads times of day with readr's default and explicit formats (`%H %I %M %S %OS %p %T %R %AT`, skips, and ignored date and zone codes) into a Polars `Time` column. Failures, and readr's durations of a day or more, go to `problems()`.
 - The new parsers are checked against lubridate 1.9.5 and readr 2.2.0 in the R oracle tests (separators, 12/24-hour clocks, fractions, offsets, time zones, daylight saving, mixed and ambiguous orders, long columns), with raw Polars benchmark cases. Differences from R are documented in the reference.
 
+### Changed
+
+- tidy3 now requires Polars 1.42.1 or newer, up from 1.39. Polars 1.40.0 and 1.42.0 fail `bind_cols()`, `closest()` joins, and cross joins (1.41.0 was withdrawn from PyPI). A new CI job runs the full test suite on Python 3.10 with exactly the minimum Polars that `pyproject.toml` allows, so the declared minimum stays true.
+
 ### Fixed
 
 - `parse_time()` on Polars 1.x: an invalid clock such as `24:00` or `13:60` raised "Invalid time components" instead of becoming missing with a problem recorded.
