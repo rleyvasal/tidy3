@@ -50,7 +50,12 @@ unname_or_names <- function(x) {
   if (is.null(names(x))) unname(values) else values
 }
 
-case_name <- commandArgs(trailingOnly=TRUE)[[1]]
+# One case prints its result: Rscript r_oracle_cases.R <case>. With --batch,
+# every named case runs in this one process and prints {case: result}, which
+# saves an R start-up and package load per case.
+args <- commandArgs(trailingOnly=TRUE)
+batch <- length(args) > 0 && args[[1]] == "--batch"
+cases <- if (batch) args[-1] else args[[1]]
 
 base <- tibble(
   id=1:4,
@@ -59,7 +64,7 @@ base <- tibble(
   y=c(20, 10, 40, 30)
 )
 
-result <- switch(
+run_case <- function(case_name) switch(
   case_name,
   janitor_totals = {
     if (!requireNamespace("janitor", quietly=TRUE)) {
@@ -1836,4 +1841,22 @@ result <- switch(
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 
-cat(toJSON(normalise(result), auto_unbox=TRUE, na="null", null="null", digits=15))
+# Cases attach readr, lubridate, or forcats, and an attached package masks
+# names for every later case. Detach what a case attached so batched cases
+# see the same search path as a case run on its own.
+run_isolated <- function(case_name) {
+  attached <- search()
+  on.exit(for (name in setdiff(search(), attached)) detach(name, character.only=TRUE))
+  normalise(run_case(case_name))
+}
+
+if (batch) {
+  results <- lapply(cases, function(case_name) tryCatch(
+    run_isolated(case_name),
+    error=function(e) list(oracle_error=conditionMessage(e))
+  ))
+  names(results) <- cases
+  cat(toJSON(results, auto_unbox=TRUE, na="null", null="null", digits=15))
+} else {
+  cat(toJSON(normalise(run_case(cases)), auto_unbox=TRUE, na="null", null="null", digits=15))
+}

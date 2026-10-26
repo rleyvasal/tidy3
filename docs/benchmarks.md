@@ -96,6 +96,11 @@ tidyr, and jsonlite, then run:
 pytest -q tests/test_r_oracle_parity.py
 ```
 
+Every case runs in one R process, and the answers are cached on disk, keyed by
+the case script, the R version, and the R package versions. A rerun with
+nothing changed skips R. The cache lives in `~/.cache/tidy3/r-oracle`; set
+`TIDY3_R_ORACLE_CACHE` to another folder, or to `off` to always ask R.
+
 If R is kept in a Pixi environment, point the suite at its manifest:
 
 ```bash

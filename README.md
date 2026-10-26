@@ -321,6 +321,17 @@ pip install -e ".[dev]"
 python -m pytest -q            # includes every example in this README and docs/
 ```
 
+While changing one function, run its test file (`python -m pytest -q
+tests/test_tabyl.py`) or everything except the R comparisons, which takes
+seconds:
+
+```bash
+python -m pytest -q -m "not r_oracle"
+```
+
+Run the full suite before pushing. With R installed, it also compares results
+with dplyr, tidyr, and friends; see [docs/benchmarks.md](docs/benchmarks.md).
+
 Releases go to PyPI from a version tag; see [docs/releasing.md](docs/releasing.md).
 
 ## License
