@@ -2586,8 +2586,16 @@ def as_double(x: Any, *, strict: bool = True) -> Expr:
     return _call("as_double", x, suffix={"strict": strict})
 
 
-def as_numeric(x: Any, *, strict: bool = True) -> Expr:
-    """Alias of :func:`as_double`. Errors name ``as_numeric``."""
+def as_numeric(x: Any, unit: str | None = None, *, strict: bool = True) -> Any:
+    """Alias of :func:`as_double`. Errors name ``as_numeric``.
+
+    With *unit*, *x* is a duration and the result is its length in that
+    unit, as R's ``as.numeric(d, "hours")``: see :func:`time_length`.
+    """
+    if unit is not None:
+        from tidy3.dates import time_length
+
+        return time_length(x, unit)
     _bool("as_numeric() strict", strict)
     return _call("as_numeric", x, suffix={"strict": strict})
 

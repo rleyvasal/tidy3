@@ -115,7 +115,7 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 | Helpers | `is_na`, `is_nan`, `is_finite`, `is_infinite`, `abs`, `floor`, `ceiling`, `round`, `pmin`, `pmax`, `row_sums`, `row_means` |
 | Convert | `as_numeric`/`as_double`, `as_integer`, `as_character`/`as_string`, `as_logical`, `as_date`, `as_datetime`, `ConversionError` |
 | Parse | `parse_double`, `parse_integer`, `parse_logical`, `parse_date`, `parse_datetime`, `parse_time`, `parse_number`, `locale`, `problems`, `stop_for_problems` |
-| Dates | `ymd`, `mdy`, `dmy`, `ym`, `ymd_hms`, `ymd_hm`, `ymd_h`, `mdy_hms`, `mdy_hm`, `mdy_h`, `dmy_hms`, `dmy_hm`, `dmy_h`, `parse_date_time`, `with_tz`, `force_tz`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `isoyear`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `round_date`, `days_in_month`, `leap_year`, `make_date`, `make_datetime`, `months`, `years`, `add_with_rollback`, `today`, `now`, `excel_numeric_to_date` |
+| Dates | `ymd`, `mdy`, `dmy`, `ym`, `ymd_hms`, `ymd_hm`, `ymd_h`, `mdy_hms`, `mdy_hm`, `mdy_h`, `dmy_hms`, `dmy_hm`, `dmy_h`, `parse_date_time`, `with_tz`, `force_tz`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `isoyear`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `round_date`, `days_in_month`, `leap_year`, `make_date`, `make_datetime`, `months`, `years`, `weeks`, `days`, `hours`, `minutes`, `seconds`, `period`, `add_with_rollback`, `dseconds`, `dminutes`, `dhours`, `ddays`, `dweeks`, `dmonths`, `dyears`, `duration`, `as_duration`, `time_length`, `today`, `now`, `excel_numeric_to_date` |
 | Factors | `as_factor`, `fct_relevel`, `fct_reorder`, `fct_reorder2` (`last2`, `first2`), `fct_infreq`, `fct_inorder`, `fct_rev`, `fct_recode`, `fct_collapse`, `fct_lump_n`, `fct_lump_prop`, `fct_lump_min`, `fct_drop`, `fct_expand`, `fct_na_value_to_level`, `fct_na_level_to_value` |
 | Cleaning | `clean_names`, `make_clean_names`, `set_names`, `get_dupes`, `remove_empty`, `remove_constant`, `row_to_names`, `find_header`, `compare_df_cols`, `compare_df_cols_same`, `describe_class` |
 | Reporting | `tabyl` (one-variable frequencies and two-variable count tables), `adorn_totals`, `adorn_percentages` |
@@ -779,11 +779,59 @@ parts moves by `12 * years + months` in one step, as lubridate's
 `add_with_rollback` does, so 29 February 2024 plus `years(1) + months(1)`
 is 29 March 2025. `months(col("n"))` takes a count per row; a missing
 count gives a missing date.
-Subtracting a date from `months()` or `years()` is an error. `today()` and
+Subtracting a date from a period is an error. `today()` and
 `now()` are Python values taken when the pipe is built. The default
 timezone is UTC. `tzone="local"` uses the machine zone, and any other
 string is an IANA name such as `"America/Los_Angeles"`. `now()` returns the
 wall time in that zone as a naive datetime.
+
+```python
+ny = "America/New_York"
+cars >> mutate(
+    renewal=make_date(2024, 1, 31) + months(col("cyl")),
+    first_of=add_with_rollback(make_date(2024, 1, 31), months(1), roll_to_first=True),
+    next_day=make_datetime(2024, 3, 9, 12, tz=ny) + days(1),
+    day_later=make_datetime(2024, 3, 9, 12, tz=ny) + ddays(1),
+    warmup=dseconds(col("hp")),
+    warmup_min=time_length(dseconds(col("hp")), "minute"),
+) >> filter(dseconds(col("hp")) > minutes(2)) >> select(
+    "model", "cyl", "renewal", "first_of", "next_day", "day_later", "warmup", "warmup_min"
+) >> head(3)
+```
+
+Durations count exact seconds; periods move the calendar and the clock.
+`dseconds`, `dminutes`, `dhours`, `ddays`, `dweeks`, `dmonths`, and
+`dyears` take a number or a column and give a duration: a day is 86,400
+seconds, a year 365.25 days, and a month a twelfth of that, as in lubridate.
+`duration(90, "minutes")` and `duration(hours=1, minutes=30)` are the same,
+and `as_duration` turns seconds or a period (by average lengths) into one.
+Duration columns are Polars `Duration("us")`, and `date - date` is one.
+`time_length(d, "hour")`, or `as_numeric(d, "hour")`, is the length as a
+fraction, divided exactly. Sums, means, medians, minimums, and maximums of
+durations are durations. A date plus whole days stays a date; any other
+duration, or a duration column, gives a datetime, never a date with the
+fraction dropped. Across a daylight-saving change `ddays(1)` is 24 real
+hours, so 12:00 on 9 March 2024 in New York plus `ddays(1)` is 13:00 EDT.
+
+`weeks`, `days`, `hours`, `minutes`, and `seconds` join `months` and
+`years` as periods; `period(hours=25)` or `period(2, "week")` builds one
+from units. Counts are integers or columns (`days(1.5)` raises, as in R;
+`seconds` takes fractions). Units are not normalized, so `hours(25)` stays
+25 hours, and a period never adds to a duration. Adding a period moves the
+months first (rolled back as above), then the days on the calendar, then
+the local clock. 12:00 plus `days(1)` is 12:00 the next day even when that
+day has 23 hours. A date plus a period with hours, minutes, or seconds
+becomes a datetime. On a zoned column, a clock that daylight saving skips is
+missing, as in lubridate: 01:30 on 10 March 2024 plus `hours(1)` in New
+York is missing, and so is 10 February 02:30 plus `months(1)`.
+`add_with_rollback` instead lands on the transition, 03:00 EDT, as
+lubridate's `%m+%` does; `roll_to_first=True` turns a rolled-back day into
+the first of the next month (31 January plus a month is 1 March). A clock
+that is repeated keeps the input's UTC offset when it is still valid there,
+and otherwise takes the earlier occurrence. Durations compare with periods
+by average length: `ddays(1) == days(1)` and `dhours(1) < minutes(61)`.
+Zoned period arithmetic stays in Polars except for skipped and repeated
+clocks, which are resolved per batch. Intervals are not available yet.
 
 ```python
 from pathlib import Path
@@ -829,6 +877,22 @@ against R, dplyr, readr, and lubridate. These differences are deliberate:
 - A two-digit year needs an explicit `cutoff`; readr and lubridate assume 68.
 - `read_csv` guesses whole-number columns as integers (as Polars does);
   readr guesses double. The values are the same.
+- `date + months(1)` and `+ years(1)` roll an impossible day back, as
+  `%m+%` does, where lubridate's `+` gives `NA`. So 31 January 2010 plus
+  `months(1) + days(1)` is 1 March 2010 (28 February plus a day), not `NA`.
+- A repeated clock produced by period arithmetic keeps the input's UTC
+  offset when it is still valid: 01:30 EST on 3 November 2024 plus
+  `seconds(0)` is itself, and 01:30 EST on 4 November minus `days(1)` is
+  01:30 EST. lubridate always takes the earlier repeat (EDT).
+- `add_with_rollback` adds all of a period in one step and lands a skipped
+  clock on the transition. lubridate adds the months with `%m+%` and the
+  rest with `+`, so a period that has days or a clock and lands in a
+  skipped clock is `NA` there.
+- `date - date` is a `Duration` column; R gives a `difftime` with
+  automatic units. Use `time_length` for a number in any unit.
+- A date plus a duration column is always a datetime. R keeps a `Date`
+  when every value in the vector is whole days; a lazy plan must know the
+  type before reading rows.
 
 ### Factor ordering and recoding
 

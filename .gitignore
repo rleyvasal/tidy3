@@ -13,3 +13,6 @@ build/
 # Output written by the examples
 examples/output/
 examples/.plot3_preview/
+
+# Local scratch notebook
+examples/test.ipynb
