@@ -43,6 +43,30 @@ def _raw_remove_empty(df, extra=None):
     return data.select(name for name, count in present.items() if count)
 
 
+def _raw_tabyl_three_way(df, extra=None):
+    """One species-by-g count table per flag value, each with every species and g."""
+    counts = df.group_by("species", "g", "flag").len(name="n")
+    species = df.select(pl.col("species").unique().sort())
+    labels = [str(value) for value in sorted(df["g"].unique().to_list())]
+    frames = []
+    for flag in (False, True):
+        part = counts.filter(pl.col("flag") == flag).pivot(on="g", index="species", values="n")
+        part = species.join(part, on="species", how="left")
+        frames.append(part.select("species", *[
+            pl.col(label).fill_null(0).cast(pl.Float64) if label in part.columns else pl.lit(0.0).alias(label)
+            for label in labels
+        ]))
+    return [pl.DataFrame({"key": ["FALSE", "TRUE"]}), *frames]
+
+
+def _raw_adorn_ns(df, extra=None):
+    """Counts in parentheses after each text cell, padded to line up."""
+    text, counts = extra
+    wrapped = "(" + counts["share"].cast(pl.String) + ")"
+    width = wrapped.str.len_chars().max()
+    return text.with_columns((text["share"] + " " + wrapped.str.pad_start(width)).alias("share"))
+
+
 def attach(add, Case) -> None:
     from tidy3 import bench_api as api
     import tidy3 as t
@@ -957,6 +981,30 @@ def attach(add, Case) -> None:
         lambda df, extra=None: df.group_by("species", "island").len(name="n")
         .pivot(on="island", index="species", values="n", sort_columns=True)
         .fill_null(0).with_columns(pl.exclude("species").cast(pl.Float64)).sort("species"),
+    )
+    verb(
+        "tabyl_three_way", "janitor", [],
+        lambda df, extra=None: (lambda tables: [pl.DataFrame({"key": list(tables)}),
+                                                *[table.collect() for table in tables.values()]])(
+            pipe(df) >> t.tabyl("species", "g", "flag")),
+        _raw_tabyl_three_way,
+    )
+    verb(
+        "adorn_pct_formatting", "janitor", ["adorn_pct_formatting"],
+        lambda df, extra=None: (pipe(extra) >> t.adorn_pct_formatting()).collect(),
+        lambda df, extra=None: extra.with_columns(
+            ((pl.col("share") * 100).round(1).cast(pl.String) + "%").alias("share")
+        ),
+        prepare=lambda df: df.select("species", share=pl.col("bill") / (pl.col("mass") + pl.col("bill"))),
+    )
+    verb(
+        "adorn_ns", "janitor", ["adorn_ns"],
+        lambda df, extra=None: (pipe(extra[0]) >> t.adorn_ns(ns=extra[1])).collect(),
+        _raw_adorn_ns,
+        prepare=lambda df: (
+            df.select("species", share=((pl.col("id") % 100).cast(pl.String) + ".0%")),
+            df.select("species", share="id"),
+        ),
     )
     verb(
         "get_dupes", "janitor", ["get_dupes"],

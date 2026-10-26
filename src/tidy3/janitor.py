@@ -10,6 +10,7 @@ here prints janitor's status messages.
 from __future__ import annotations
 
 import math
+import sys
 import warnings
 from datetime import date, datetime
 from typing import Any
@@ -20,23 +21,27 @@ import polars as pl
 from tidy3.verbs import Verb
 
 _WHICH = frozenset({"rows", "cols"})
+_ROUNDING = frozenset({"half to even", "half up"})
 _RETURNS = frozenset({"all", "match", "mismatch"})
 _BIND = frozenset({"bind_rows", "rbind"})
 
 
 def tabyl(
-    column: Any, column2: Any = None, *, show_na: bool = True,
+    column: Any, column2: Any = None, column3: Any = None, *, show_na: bool = True,
     show_missing_levels: bool = True,
 ) -> Any:
-    """One-variable frequencies or a two-variable table of numeric counts.
+    """One-variable frequencies, or two-variable tables of numeric counts.
 
     ``frame >> tabyl("x")`` selects one column; a vector is tabulated
     immediately, using its name or ``"x"``. Missing rows are shown by default
     and add ``valid_percent`` (proportions excluding missing rows). Unused
     factor levels have zero counts unless ``show_missing_levels=False``.
     ``frame >> tabyl("x", "y")`` makes one column per value of y. Empty
-    combinations have zero counts. Existing groups are ignored. The small
-    count table is computed once.
+    combinations have zero counts. ``frame >> tabyl("x", "y", "z")`` returns
+    a dict of two-variable tables keyed by z's values as text, in level or
+    sorted order, missing (``"NA_"``) last; every table shows all x and y
+    values unless ``show_missing_levels=False``. Existing groups are
+    ignored. The small count table is computed once.
     """
     from tidy3.expr import Expr
     from tidy3.frame import note_data_read, tidy
@@ -46,8 +51,8 @@ def tabyl(
     _bool("tabyl() show_na", show_na)
     _bool("tabyl() show_missing_levels", show_missing_levels)
     if not isinstance(column, (str, Expr, pl.Expr, Selector)):
-        if column2 is not None:
-            raise TypeError("tabyl() with two variables requires frame column selections")
+        if column2 is not None or column3 is not None:
+            raise TypeError("tabyl() with two or three variables requires frame column selections")
         import pandas as pd
 
         name = str(getattr(column, "name", None) or "x")
@@ -56,7 +61,12 @@ def tabyl(
             name, show_na=show_na, show_missing_levels=show_missing_levels,
         )
 
+    if column3 is not None and column2 is None:
+        raise TypeError("tabyl() with a third variable also requires a second")
+
     def _apply(tf):
+        if column3 is not None:
+            return _tabyl_three_way(tf, [column, column2, column3], show_na, show_missing_levels)
         if column2 is not None:
             return _tabyl_two_way(tf, column, column2, show_na, show_missing_levels)
         selected = resolve_selection(tf, [column])
@@ -90,7 +100,8 @@ def tabyl(
                 pl.when(missing).then(None)
                 .otherwise(pl.col("n") / _per_row(pl.lit(valid_total))).alias("valid_percent")
             )
-        return snapshot._with_lf(data.lazy().with_columns(expressions), rowwise=False)
+        result = data.with_columns(expressions)
+        return snapshot._with_lf(result.lazy(), rowwise=False, tabyl=("one_way", result))
 
     return Verb(_apply, "tabyl")
 
@@ -127,22 +138,28 @@ def _tabyl_column_label(value: Any) -> str:
     return "emptystring_" if value == "" else _header_text(value)
 
 
-def _tabyl_two_way(tf: Any, column: Any, column2: Any, show_na: bool, show_missing_levels: bool) -> Any:
-    from tidy3.frame import note_data_read
+def _tabyl_names(tf: Any, selections: list[Any]) -> list[str]:
     from tidy3.tidyselect import resolve_selection
 
     names = []
-    for selection in (column, column2):
+    for selection in selections:
         selected = resolve_selection(tf, [selection])
         if len(selected) != 1:
             raise ValueError("tabyl() requires exactly one column for each variable")
         names.append(selected[0])
-    row, col = names
-    if row == col:
-        raise ValueError("tabyl() requires two distinct columns")
+    if len(set(names)) != len(names):
+        raise ValueError(f"tabyl() requires {'two' if len(names) == 2 else 'three'} distinct columns")
     schema = tf._schema()
     if any(schema[name].base_type() in {pl.List, pl.Array, pl.Struct, pl.Object, pl.Binary} for name in names):
         raise TypeError("tabyl() requires scalar numeric, text, factor, boolean, or date columns")
+    return names
+
+
+def _tabyl_counts(tf: Any, names: list[str], show_na: bool, reason: str) -> tuple[Any, Any, pl.DataFrame, str]:
+    """The source columns and their combination counts, computed once."""
+    from tidy3.frame import note_data_read
+
+    schema = tf._schema()
     levels = {name: tf._category_levels[name] for name in names if name in tf._category_levels}
     source = tf._with_lf(tf._lf.select(names), rowwise=False, category_levels=levels)
     if not show_na:
@@ -152,14 +169,35 @@ def _tabyl_two_way(tf: Any, column: Any, column2: Any, show_na: bool, show_missi
     while count_name in names:
         count_name += "_"
     counts = source._with_lf(source._lf.group_by(names).agg(pl.len().alias(count_name)), rowwise=False)
-    note_data_read("tabyl() reads frequency counts to discover table axes")
+    note_data_read(reason)
     snapshot = counts._compute()
-    data = snapshot.collect()
-    row_levels = {row: levels[row]} if row in levels else {}
+    return source, snapshot, snapshot.collect(), count_name
+
+
+def _tabyl_two_way(tf: Any, column: Any, column2: Any, show_na: bool, show_missing_levels: bool) -> Any:
+    names = _tabyl_names(tf, [column, column2])
+    source, snapshot, data, count_name = _tabyl_counts(
+        tf, names, show_na, "tabyl() reads frequency counts to discover table axes",
+    )
+    row, col = names
     if data.is_empty():
-        return snapshot._with_lf(data.select(row).lazy(), rowwise=False, category_levels=row_levels)
+        return _tabyl_wide(source, snapshot, data, names, count_name, None, None)
     rows = _tabyl_axis(source, data, row, show_missing_levels)
     columns = _tabyl_axis(source, data, col, show_missing_levels)
+    return _tabyl_wide(source, snapshot, data, names, count_name, rows, columns)
+
+
+def _tabyl_wide(
+    source: Any, snapshot: Any, data: pl.DataFrame, names: list[str], count_name: str,
+    rows: pl.Series | None, columns: pl.Series | None,
+) -> Any:
+    """One column of counts per value of the second variable."""
+    row, col = names
+    row_levels = {row: source._category_levels[row]} if row in source._category_levels else {}
+    if rows is None or columns is None:
+        result = data.select(row)
+        return snapshot._with_lf(result.lazy(), rowwise=False, category_levels=row_levels,
+                                 tabyl=("two_way", result))
     labels = [_tabyl_column_label(value) for value in columns]
     if len(set([row, *labels])) != len(labels) + 1:
         raise ValueError("tabyl() column labels conflict; rename the row column or recode the column values")
@@ -173,7 +211,64 @@ def _tabyl_two_way(tf: Any, column: Any, column2: Any, show_na: bool, show_missi
     wide = data.group_by(row).agg(expressions)
     result = rows.to_frame().join(wide, on=row, how="left", nulls_equal=True, maintain_order="left")
     result = result.with_columns(pl.col([label for _, label in ordered]).fill_null(0).cast(pl.Float64))
-    return snapshot._with_lf(result.lazy(), rowwise=False, category_levels=row_levels)
+    return snapshot._with_lf(result.lazy(), rowwise=False, category_levels=row_levels,
+                             tabyl=("two_way", result))
+
+
+def _tabyl_three_way(tf: Any, selections: list[Any], show_na: bool, show_missing_levels: bool) -> dict[str, Any]:
+    """Two-way tables split by the third variable, as janitor's list of tabyls.
+
+    As in janitor, ``show_missing_levels`` gives every table all values of
+    the first two variables; a missing value appears only in tables that
+    have it. Factor tables follow the level order, unlike janitor 2.2.1,
+    which reorders some factors with three or more levels.
+    """
+    names = _tabyl_names(tf, selections)
+    source, snapshot, data, count_name = _tabyl_counts(
+        tf, names, show_na, "tabyl() reads frequency counts to split tables and discover axes",
+    )
+    row, col, split = names
+    if data.is_empty():
+        return {}
+    schema = source._schema()
+    full = {}
+    if show_missing_levels:
+        for name in (row, col):
+            full[name] = _tabyl_axis(source, data, name, True)
+    keys = _tabyl_axis(source, data, split, False)
+    result = {}
+    for value in keys:
+        part = data.filter(pl.col(split).eq_missing(pl.lit(value, dtype=keys.dtype))).drop(split)
+        axes = []
+        for name in (row, col):
+            if name in full:
+                # A missing value (null or NaN) appears only in tables that have it.
+                present = {_tabyl_column_label(value) for value in
+                           part.filter(_missing_expr(name, schema[name]))[name].to_list()}
+                axis = full[name]
+                keep = pl.Series([not _missing(value) or _tabyl_column_label(value) in present
+                                  for value in axis.to_list()], dtype=pl.Boolean)
+                axes.append(axis.filter(keep))
+            else:
+                axes.append(_tabyl_axis(source, part, name, False))
+        key = "NA_" if value is None else ("" if value == "" else _tabyl_column_label(value))
+        result[key] = _tabyl_wide(source, snapshot, part, [row, col], count_name, *axes)
+    return result
+
+
+class _ReportVerb(Verb):
+    """A reporting verb that also runs on each table of a three-variable tabyl.
+
+    ``tabyl(x, y, z)`` returns a dict of tables; ``dict >> verb`` gives a
+    dict with the verb applied to each, as janitor maps over its list.
+    """
+
+    __slots__ = ()
+
+    def __rrshift__(self, other: Any) -> Any:
+        if isinstance(other, dict):
+            return {key: table >> self for key, table in other.items()}
+        return super().__rrshift__(other)
 
 
 def adorn_totals(
@@ -258,9 +353,9 @@ def adorn_totals(
                 pl.sum_horizontal(values, ignore_nulls=na_rm).cast(pl.Float64).alias(labels[1])
             )
         markers = {**tf._totals, **{dimension: labels[0 if dimension == "row" else 1] for dimension in dimensions}}
-        return tf._with_lf(lf, rowwise=False, category_levels=levels, totals=markers)
+        return tf._with_lf(lf, rowwise=False, category_levels=levels, totals=markers, tabyl=tf._tabyl)
 
-    return Verb(_apply, "adorn_totals")
+    return _ReportVerb(_apply, "adorn_totals")
 
 
 def adorn_percentages(denominator: str = "row", *, na_rm: bool = True, cols: Any = None) -> Verb:
@@ -293,7 +388,7 @@ def adorn_percentages(denominator: str = "row", *, na_rm: bool = True, cols: Any
         include_totals = totals_column is not None and (cols is None or totals_column in chosen)
         selected = [column for column in chosen if column in numeric and column != totals_column]
         if not selected:
-            return tf._with_lf(tf._lf, rowwise=False, totals=tf._totals)
+            return tf._with_lf(tf._lf, rowwise=False, totals=tf._totals, tabyl=tf._tabyl)
 
         def value(column: str, skip_missing: bool) -> pl.Expr:
             if skip_missing and schema[column].is_float():
@@ -325,9 +420,280 @@ def adorn_percentages(denominator: str = "row", *, na_rm: bool = True, cols: Any
             if include_totals:
                 divided.append((pl.col(totals_column) / grand).alias(totals_column))
         lf = tf._lf.with_columns(expr.cast(pl.Float64) for expr in divided)
-        return tf._with_lf(lf, rowwise=False, totals=tf._totals)
+        return tf._with_lf(lf, rowwise=False, totals=tf._totals, tabyl=tf._tabyl)
 
-    return Verb(_apply, "adorn_percentages")
+    return _ReportVerb(_apply, "adorn_percentages")
+
+
+def adorn_pct_formatting(
+    digits: int = 1, rounding: str = "half to even", affix_sign: bool = True, *, cols: Any = None,
+) -> Verb:
+    """Write proportions as percentage text: 0.25 becomes ``"25.0%"``.
+
+    This is the last step of a report: the formatted columns are text and
+    can no longer be summed, sorted, or divided. Values are multiplied by
+    100, rounded to ``digits`` decimals, and always shown with that many
+    decimals. ``rounding="half to even"`` is R's ``round()`` (the nearest
+    representable value, ties to even); ``"half up"`` rounds ties away from
+    zero. ``affix_sign=False`` leaves off ``"%"``. Missing values and NaN
+    become ``"-"``. By default numeric columns after the first are
+    formatted; ``cols=`` selects others and skips text and factor columns.
+    On a one-variable tabyl the ``n`` column is never formatted, as in
+    janitor, which then ignores ``cols`` and turns ``n`` into floats.
+    """
+    from tidy3.tidyselect import resolve_selection
+
+    if isinstance(digits, bool) or not isinstance(digits, int):
+        raise TypeError("adorn_pct_formatting() digits must be an integer")
+    if digits < 0:
+        raise ValueError("adorn_pct_formatting() digits must be 0 or more")
+    if rounding not in _ROUNDING:
+        raise ValueError('adorn_pct_formatting() rounding must be "half to even" or "half up"')
+    _bool("adorn_pct_formatting() affix_sign", affix_sign)
+    sign = "%" if affix_sign else ""
+
+    def text(value: float | None) -> str:
+        if value is None or math.isnan(value):
+            return "-"
+        value *= 100
+        if math.isinf(value):
+            return ("Inf" if value > 0 else "-Inf") + sign
+        rounded = round(value, digits) if rounding == "half to even" else _round_half_up(value, digits)
+        # Adding 0.0 turns -0.0 into 0.0, which R shows as "0".
+        return f"{rounded + 0.0:.{digits}f}{sign}"
+
+    def batch(series: pl.Series) -> pl.Series:
+        return pl.Series(series.name, [text(value) for value in series.cast(pl.Float64).to_list()], dtype=pl.String)
+
+    def _apply(tf):
+        schema = tf._schema()
+        names = schema.names()
+        numeric = [column for column in names
+                   if schema[column].is_numeric() and column not in tf._category_levels]
+        rounded = []
+        if tf._tabyl is not None and tf._tabyl[0] == "one_way":
+            chosen = [column for column in numeric if column not in names[:2]]
+            # janitor rounds the counts as well, which makes them doubles.
+            rounded = [pl.col(column).cast(pl.Float64) for column in numeric if column == names[1]]
+        elif cols is None:
+            chosen = [column for column in numeric if column != names[0]]
+        else:
+            chosen = [column for column in resolve_selection(tf, [cols]) if column in numeric]
+        if not chosen:
+            raise ValueError("adorn_pct_formatting() requires at least one selected numeric column")
+        lf = tf._lf.with_columns(
+            *rounded,
+            *[pl.col(column).map_batches(batch, return_dtype=pl.String, is_elementwise=True) for column in chosen],
+        )
+        return tf._with_lf(lf, rowwise=False, category_levels=_levels(tf, names),
+                           totals=tf._totals, tabyl=tf._tabyl)
+
+    return _ReportVerb(_apply, "adorn_pct_formatting")
+
+
+def _round_half_up(value: float, digits: int) -> float:
+    """janitor's ``round_half_up``, step by step in the same double arithmetic."""
+    sign = (value > 0) - (value < 0)
+    scaled = math.trunc(abs(value) * 10 ** digits + 0.5 + math.sqrt(sys.float_info.epsilon))
+    return scaled / 10 ** digits * sign
+
+
+def adorn_ns(
+    position: str = "rear", *, ns: Any = None, format_func: Any = None, cols: Any = None,
+) -> Verb:
+    """Add counts to a report's cells: ``"25.0% (3)"``, or ``"3 (25.0%)"`` in front.
+
+    Without ``ns``, the counts are the tabyl's own, with the same totals
+    added; a verb that changes the data in between clears them, so call it
+    straight after the other ``adorn_*`` steps. ``ns=`` supplies a frame
+    of the same shape for any table; its values are written as R writes
+    them, without ``format_func``. ``format_func`` turns each count (a
+    number, or ``None`` when missing) into text; the default writes
+    ``1,234``. The part in parentheses is padded on the left to line up
+    within each column. Numeric cells are written as janitor writes them:
+    15 significant digits in parentheses, 7 (aligned) in front. By
+    default the count columns after the first are combined; ``cols=``
+    selects others. Combined columns are text. On a one-variable tabyl
+    this warns, as janitor does.
+    """
+    from tidy3.tidyselect import resolve_selection
+
+    if position not in {"rear", "front"}:
+        raise ValueError('adorn_ns() position must be "rear" or "front"')
+    if format_func is not None and not callable(format_func):
+        raise TypeError("adorn_ns() format_func must be a function or None")
+
+    def _apply(tf):
+        from tidy3.frame import note_data_read
+
+        note_data_read("adorn_ns() reads the table to line up counts")
+        data = tf._lf.collect()
+        names = data.columns
+        if ns is not None:
+            counts = _as_frame(ns).collect()
+            if counts.shape != data.shape:
+                raise ValueError(f"adorn_ns() ns has shape {counts.shape}; the table has {data.shape}")
+            numeric = list(range(1, len(names)))
+            counted = None
+        else:
+            if tf._tabyl is None:
+                raise ValueError(
+                    "adorn_ns() needs a tabyl's counts, which data-changing steps clear; "
+                    "call it right after tabyl() and the other adorn_* steps, or pass ns="
+                )
+            kind, counts = tf._tabyl
+            if kind == "one_way":
+                warnings.warn(
+                    "adorn_ns() is meant for a two-variable tabyl; for a one-variable tabyl "
+                    "consider combining columns with unite()",
+                    stacklevel=2,
+                )
+            if tf._totals:
+                from tidy3.frame import TidyFrame
+
+                label = counts.columns[0]
+                where = [dimension for dimension in ("row", "col") if dimension in tf._totals]
+                totals = adorn_totals(where, name=(tf._totals.get("row", "Total"), tf._totals.get("col", "Total")))
+                counts = (TidyFrame(counts.lazy().with_columns(pl.col(label).cast(pl.String))) >> totals).collect()
+            if counts.shape != data.shape:
+                raise ValueError(
+                    "adorn_ns() found counts of a different shape than the table; pass ns="
+                )
+            numeric = [index for index, column in enumerate(counts.columns)
+                       if counts[column].dtype.is_numeric() and index > 0]
+            counted = [_count_text(counts[column], format_func) for column in counts.columns]
+        if cols is None:
+            adorned = numeric
+        else:
+            chosen = set(resolve_selection(tf, [cols]))
+            adorned = [index for index, column in enumerate(names) if column in chosen]
+        if counted is None:
+            front = _matrix_text(counts) if position == "front" else None
+            rear = [_character_text(counts[column]) for column in counts.columns] if position == "rear" else None
+        else:
+            front = counted if position == "front" else None
+            rear = counted if position == "rear" else None
+        if position == "rear":
+            front = _matrix_text(data, tf._category_levels)
+        else:
+            rear = [_character_text(data[column]) for column in names]
+        columns = []
+        for index, column in enumerate(names):
+            if index not in adorned:
+                columns.append(data[column])
+                continue
+            wrapped = [f"({value})" for value in rear[index]]
+            width = max((len(value) for value in wrapped), default=0)
+            columns.append(pl.Series(column, [f"{first} {second.rjust(width)}"
+                                              for first, second in zip(front[index], wrapped)], dtype=pl.String))
+        kept = [column for index, column in enumerate(names) if index not in adorned]
+        result = pl.DataFrame(columns) if columns else data
+        return tf._with_lf(result.lazy(), rowwise=False, category_levels=_levels(tf, kept),
+                           totals=tf._totals, tabyl=tf._tabyl)
+
+    return _ReportVerb(_apply, "adorn_ns")
+
+
+def _count_text(series: pl.Series, format_func: Any) -> list[str]:
+    """A count column as janitor's default ``format(x, big.mark = ",")``, trimmed."""
+    if not series.dtype.is_numeric():
+        return [value.strip() for value in _character_text(series)]
+    if format_func is None:
+        return [value.strip() for value in _r_format(series, big_mark=",")]
+    return [str(format_func(value)).strip() for value in series.to_list()]
+
+
+def _character_text(series: pl.Series) -> list[str]:
+    """R's ``as.character()`` of each value, then ``paste()``'s ``"NA"``."""
+    if series.dtype.is_float():
+        return [_r_reals([value], 15)[0] for value in series.to_list()]
+    return _plain_text(series)
+
+
+def _plain_text(series: pl.Series) -> list[str]:
+    if series.dtype == pl.Boolean:
+        return ["NA" if value is None else ("TRUE" if value else "FALSE") for value in series.to_list()]
+    return ["NA" if value is None else str(value) for value in series.to_list()]
+
+
+def _matrix_text(frame: pl.DataFrame, levels: Any = ()) -> list[list[str]]:
+    """Cells as R's ``as.matrix()`` writes a data frame.
+
+    A frame of numbers is written as ``as.character()`` writes each value.
+    Otherwise numeric columns are written by ``format()``: 7 significant
+    digits with the same decimals and width down the column.
+    """
+    numeric = [frame[column].dtype.is_numeric() and column not in levels for column in frame.columns]
+    if all(numeric):
+        return [_character_text(frame[column]) for column in frame.columns]
+    texts = []
+    for column, is_numeric in zip(frame.columns, numeric):
+        if not is_numeric:
+            texts.append(_plain_text(frame[column]))
+            continue
+        # Missing values, NaN included, are put back as NA after formatting.
+        values = frame[column].to_list()
+        texts.append(["NA" if _missing(value) else text for value, text in zip(values, _r_format(frame[column]))])
+    return texts
+
+
+def _r_format(series: pl.Series, *, big_mark: str = "") -> list[str]:
+    """R's ``format()`` of a numeric column: common decimals, right-aligned."""
+    if series.dtype.is_float():
+        texts = _r_reals(series.to_list(), 7, big_mark)
+    else:
+        texts = ["NA" if value is None else _big_mark(str(value), big_mark) for value in series.to_list()]
+    width = max((len(text) for text in texts), default=0)
+    return [text.rjust(width) for text in texts]
+
+
+def _r_reals(values: list[Any], digits: int, big_mark: str = "") -> list[str]:
+    """Doubles written together as R writes them with ``digits`` significant digits.
+
+    The same number of decimals serves every value; scientific notation is
+    used when it is narrower, as R decides with ``scipen = 0``.
+    """
+    finite = [value for value in values if value is not None and math.isfinite(value)]
+    fixed = True
+    decimals = 0
+    significant = 1
+    if finite:
+        shapes = []
+        for value in finite:
+            mantissa, exponent = f"{abs(value):.{digits - 1}e}".split("e")
+            shapes.append((len(mantissa.replace(".", "").rstrip("0")) or 1, int(exponent)))
+        decimals = max(max(0, sig - 1 - exponent) for sig, exponent in shapes)
+        significant = max(sig for sig, _ in shapes)
+        negative = any(value < 0 for value in finite)
+        left = max(max(1, exponent + 1) for _, exponent in shapes)
+        fixed_width = negative + left + decimals + (decimals > 0)
+        exponent_width = 4 if max(abs(exponent) for _, exponent in shapes) < 100 else 5
+        fixed = fixed_width <= negative + significant + (significant > 1) + exponent_width
+    texts = []
+    for value in values:
+        if value is None:
+            texts.append("NA")
+        elif math.isnan(value):
+            texts.append("NaN")
+        elif math.isinf(value):
+            texts.append("Inf" if value > 0 else "-Inf")
+        elif fixed:
+            texts.append(_big_mark(f"{value + 0.0:.{decimals}f}", big_mark))
+        else:
+            texts.append(f"{value:.{significant - 1}e}")
+    return texts
+
+
+def _big_mark(text: str, mark: str) -> str:
+    if not mark:
+        return text
+    sign = "-" if text.startswith("-") else ""
+    whole, dot, fraction = text.lstrip("-").partition(".")
+    groups = []
+    while len(whole) > 3:
+        groups.insert(0, whole[-3:])
+        whole = whole[:-3]
+    return sign + mark.join([whole, *groups]) + dot + fraction
 
 
 def _per_row(total: pl.Expr) -> pl.Expr:

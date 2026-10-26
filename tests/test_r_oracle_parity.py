@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import warnings
 from functools import lru_cache
 from typing import Any, Callable
 
@@ -1442,6 +1443,71 @@ def _janitor_percentages():
             for name, frame in result.items()}
 
 
+def _janitor_formatting():
+    import tidy3 as t3
+
+    shares = tidy({"label": ["a", "b", "c", "d"], "x": [0.125, None, 0.00125, -0.00004],
+                   "y": [1 / 3, float("nan"), 2 / 3, float("inf")], "n": [1, 2, 3, 4],
+                   "note": ["p", "q", "r", "s"]})
+    result = {}
+    for digits in (0, 1, 2):
+        for rounding in ("half to even", "half up"):
+            name = f"digits_{digits}_{rounding.replace(' ', '_')}"
+            result[name] = shares >> t3.adorn_pct_formatting(digits, rounding)
+    result["no_sign"] = shares >> t3.adorn_pct_formatting(3, affix_sign=False)
+    # JSON has no Inf, so the unformatted y leaves out the fourth row.
+    result["selected"] = shares >> t3.slice_head(n=3) >> t3.adorn_pct_formatting(cols=["x", "note"])
+    result["first_column"] = tidy({"p": [0.5, 0.25], "q": [1., 0.]}) >> t3.adorn_pct_formatting(cols=t3.everything())
+    one_way = tidy({"g": ["a", "b", None, "a"]}) >> t3.tabyl("g")
+    result["one_way"] = one_way >> t3.adorn_pct_formatting()
+    result["one_way_totals"] = one_way >> t3.adorn_totals() >> t3.adorn_pct_formatting(0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result["one_way_ns"] = one_way >> t3.adorn_ns()
+    counts = tidy({"g": ["b", "a", "b", "a", "b", "c", None],
+                   "answer": ["yes", "no", "yes", "yes", "no", "no", "yes"],
+                   "z": [2., 10., 2., None, 10., 2., 2.]})
+    report = counts >> t3.tabyl("g", "answer")
+    totals = report >> t3.adorn_totals("both")
+    formatted = totals >> t3.adorn_percentages("col") >> t3.adorn_pct_formatting()
+    result["report"] = formatted
+    result["rear"] = formatted >> t3.adorn_ns()
+    result["front"] = formatted >> t3.adorn_ns("front")
+    result["counts_rear"] = report >> t3.adorn_ns()
+    result["counts_front"] = totals >> t3.adorn_ns("front")
+    result["numbers_rear"] = report >> t3.adorn_percentages() >> t3.adorn_ns()
+    result["numbers_front"] = report >> t3.adorn_percentages() >> t3.adorn_ns("front")
+    result["row_totals"] = (report >> t3.adorn_totals() >> t3.adorn_percentages()
+                            >> t3.adorn_pct_formatting() >> t3.adorn_ns())
+    named = report >> t3.adorn_totals("both", name=("All", "Sum"))
+    result["named_totals"] = (named >> t3.adorn_percentages("all")
+                              >> t3.adorn_pct_formatting(2, "half up") >> t3.adorn_ns("front"))
+    result["selected_ns"] = formatted >> t3.adorn_ns(cols="yes")
+    custom = tidy({"g": ["a", "b"], "n": [1 / 3, 12345678.]})
+    result["custom"] = tidy({"g": ["a", "b"], "n": [1234., 5.]}) >> t3.adorn_ns(ns=custom)
+    result["custom_front"] = tidy({"g": ["a", "b"], "n": ["x", "y"]}) >> t3.adorn_ns("front", ns=custom)
+    big = tidy({"g": ["a"] * 1500 + ["b"] * 2, "h": ["x"] * 1502}) >> t3.tabyl("g", "h")
+    result["big_mark"] = big >> t3.adorn_percentages("col") >> t3.adorn_pct_formatting() >> t3.adorn_ns()
+    result["format_func"] = formatted >> t3.adorn_ns(format_func=lambda n: f"{n:g}n")
+    result["three_way"] = counts >> t3.tabyl("g", "answer", "z")
+    result["three_way_no_na"] = counts >> t3.tabyl("g", "answer", "z", show_na=False)
+    result["three_way_present"] = counts >> t3.tabyl("g", "answer", "z", show_missing_levels=False)
+    three = counts >> t3.tabyl("g", "answer", "z") >> t3.adorn_totals("both")
+    result["three_way_report"] = three >> t3.adorn_percentages("row") >> t3.adorn_pct_formatting(2) >> t3.adorn_ns()
+    result["three_way_front"] = (three >> t3.adorn_percentages("all") >> t3.adorn_pct_formatting()
+                                 >> t3.adorn_ns("front"))
+    levels = tidy(pd.DataFrame({
+        "g": pd.Categorical(["b", "a", "b"], categories=["b", "a", "unused"]),
+        "h": ["x", "y", "x"],
+        "z": pd.Categorical(["hi", "lo", "lo"], categories=["lo", "hi"]),
+        "w": ["", "k", ""],
+    }))
+    result["three_way_factor"] = levels >> t3.tabyl("g", "h", "z")
+    text = levels >> t3.tabyl("h", "g", "w")
+    result["three_way_text"] = {key or "<empty>": table for key, table in text.items()}
+    return result
+
+
 def _janitor_tabyl():
     import tidy3 as t3
 
@@ -2725,6 +2791,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "janitor_tabyl": _janitor_tabyl,
     "janitor_totals": _janitor_totals,
     "janitor_percentages": _janitor_percentages,
+    "janitor_formatting": _janitor_formatting,
     "timezone_conversion": _timezone_conversion,
     "timezone_dst": _timezone_dst,
     "timezone_resolved_repeats": _timezone_resolved_repeats,

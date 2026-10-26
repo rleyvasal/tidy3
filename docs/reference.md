@@ -118,7 +118,7 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 | Dates | `ymd`, `mdy`, `dmy`, `ym`, `ymd_hms`, `ymd_hm`, `ymd_h`, `mdy_hms`, `mdy_hm`, `mdy_h`, `dmy_hms`, `dmy_hm`, `dmy_h`, `parse_date_time`, `with_tz`, `force_tz`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `isoyear`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `round_date`, `days_in_month`, `leap_year`, `make_date`, `make_datetime`, `months`, `years`, `weeks`, `days`, `hours`, `minutes`, `seconds`, `period`, `add_with_rollback`, `dseconds`, `dminutes`, `dhours`, `ddays`, `dweeks`, `dmonths`, `dyears`, `duration`, `as_duration`, `time_length`, `today`, `now`, `excel_numeric_to_date` |
 | Factors | `as_factor`, `fct_relevel`, `fct_reorder`, `fct_reorder2` (`last2`, `first2`), `fct_infreq`, `fct_inorder`, `fct_rev`, `fct_recode`, `fct_collapse`, `fct_lump_n`, `fct_lump_prop`, `fct_lump_min`, `fct_drop`, `fct_expand`, `fct_na_value_to_level`, `fct_na_level_to_value` |
 | Cleaning | `clean_names`, `make_clean_names`, `set_names`, `get_dupes`, `remove_empty`, `remove_constant`, `row_to_names`, `find_header`, `compare_df_cols`, `compare_df_cols_same`, `describe_class` |
-| Reporting | `tabyl` (one-variable frequencies and two-variable count tables), `adorn_totals`, `adorn_percentages` |
+| Reporting | `tabyl` (one-variable frequencies, two-variable count tables, and three-variable dicts of tables), `adorn_totals`, `adorn_percentages`, `adorn_pct_formatting`, `adorn_ns` |
 | Rows | `filter`, `filter_out`, `arrange`, `distinct`, `slice`, `slice_head`, `slice_tail`, `slice_min`, `slice_max`, `slice_sample`, `head`, `sample_n`, `sample_frac` |
 | Columns | `mutate`, `transmute`, `select`, `drop`, `rename`, `rename_with`, `relocate`, `pull`, `glimpse` |
 | Groups | `group_by`, `rowwise`, `ungroup`, `with_groups`, `group_split`, `group_map`, `group_modify`, `group_walk`, `group_nest`, `nest_by`, `group_data`, `group_keys`, `group_rows`, `group_size`, `group_indices`, `group_vars`, `groups`, `n_groups`, `group_trim`, `summarise`, `reframe`, `count`, `tally`, `add_count`, `add_tally` |
@@ -289,10 +289,29 @@ A vector can be passed directly: `tabyl(["yes", "no", "yes"])`; its column
 name is `"x"`, or the name of a supplied Series. Rename an input column named
 `n`, `percent`, or `valid_percent` before one-variable tabulation to avoid duplicate
 output names. The count table and existing parse diagnostics are computed
-once; later steps run from that snapshot. Three-variable tables and
-percentage/formatting helpers are not implemented yet.
+once; later steps run from that snapshot.
 
-Both forms are checked against [janitor's `tabyl`](https://sfirke.github.io/janitor/reference/tabyl.html).
+`tabyl("row", "column", "split")` makes a **dict of two-variable tables**,
+one per value of the third variable, as janitor returns a list. Keys are the
+values as text (`"2008"`, `"TRUE"`), in factor level order or sorted order,
+with missing values last under `"NA_"`. Every table shows all row and column
+values of the whole data unless `show_missing_levels=False`; a missing row
+or column value appears only in the tables that have it. `show_na=False`
+drops records missing any of the three values. The `adorn_*` verbs accept
+the dict and return a dict, applying the same step to each table.
+
+```python
+penguins = tidy({"species": ["Adelie", "Adelie", "Gentoo", "Gentoo", "Adelie"],
+                 "sex": ["male", "female", "female", "male", "male"],
+                 "island": ["Biscoe", "Dream", "Biscoe", "Biscoe", "Biscoe"]})
+tables = penguins >> tabyl("species", "sex", "island")
+tables["Dream"]
+```
+
+Unlike janitor 2.2.1, which reorders some factors with three or more
+levels, the tables of a factor follow its level order.
+
+All forms are checked against [janitor's `tabyl`](https://sfirke.github.io/janitor/reference/tabyl.html).
 
 ### Totals
 
@@ -359,6 +378,60 @@ Percentages stay lazy, drop existing groups, and keep parse diagnostics.
 Divisions are exact, as in R: 3 / 5 is 0.6.
 The table needs a numeric column after the first column. Behavior is checked
 against [janitor's `adorn_percentages`](https://sfirke.github.io/janitor/reference/adorn_percentages.html).
+
+### Formatting
+
+Formatting is the last step of a report. `adorn_pct_formatting()` writes
+proportions as percentage text, and `adorn_ns()` adds the counts beside
+them. Their output columns are text, so sort, filter, or plot before this
+step, while the values are still numbers.
+
+```python
+penguins = tidy({"species": ["Adelie", "Adelie", "Gentoo", "Gentoo", "Adelie"],
+                 "sex": ["male", "female", "female", "male", "male"]})
+(penguins >> tabyl("species", "sex") >> adorn_totals("both")
+ >> adorn_percentages("row") >> adorn_pct_formatting() >> adorn_ns())
+```
+
+`adorn_pct_formatting(digits=1)` multiplies by 100, rounds to `digits`
+decimals, always shows that many decimals, and appends `%` (0.5 becomes
+`"50.0%"`); `affix_sign=False` leaves the sign off. The default
+`rounding="half to even"` is R's `round()`: it rounds the stored double to
+the nearest value, so 0.125 (exactly 12.5%) gives `"12%"` with `digits=0`.
+`rounding="half up"` rounds ties away from zero, giving `"13%"`. Missing
+values and NaN become `"-"`, infinite values `"Inf%"`, and a negative value
+that rounds to zero `"0.0%"`. Numeric columns after the first are formatted
+by default; `cols=` selects others, including the first column, and skips
+text and factor columns. On a one-variable tabyl the `n` column is left as
+numbers (floats, as in janitor), and `cols=` is ignored, as janitor does.
+
+`adorn_ns()` pastes each count after the cell in parentheses
+(`"50.0% (2)"`); `position="front"` puts the count first (`"2 (50.0%)"`).
+The part in parentheses is padded on the left so that the cells of a column
+line up. The counts are the tabyl's own, and the totals added by
+`adorn_totals()` are added to them too. A data-changing verb clears those
+counts, as it does the totals record, so keep the `adorn_*` steps together
+at the end of the pipe. For other tables, `ns=` supplies a frame of counts
+of the same shape. `format_func` turns each count into text (default:
+`1,234`), for example `format_func=lambda n: f"{n:.0f}"`; it receives a
+number, not a column as in R, and is not used for `ns=`. Count columns
+after the first are combined by default, or every column after the first
+with `ns=`; `cols=` selects others.
+
+Cells that are still numbers are written as janitor writes them: inside the
+parentheses with 15 significant digits (`0.333333333333333`); in front with
+7 significant digits and the same decimals down the column (`0.5000000`),
+unless every column is numeric. Missing values are `NA`. Format first with
+`adorn_pct_formatting()` to avoid both. On a one-variable tabyl `adorn_ns()`
+warns, as janitor does.
+
+Formatting reads the values, so `adorn_ns()` computes its table, and
+`adorn_pct_formatting()` writes each value in Python; both are meant for
+report-sized tables. They keep the totals record, so adding the same totals
+again still raises an error. In notebooks, `cols=` accepts bare column
+names. Behavior is checked against janitor's
+[`adorn_pct_formatting`](https://sfirke.github.io/janitor/reference/adorn_pct_formatting.html)
+and [`adorn_ns`](https://sfirke.github.io/janitor/reference/adorn_ns.html).
 
 ### Empty columns, headers, and class checks
 

@@ -201,6 +201,8 @@ class TidyFrame:
         "_schema_cache",
         # Totals added by reporting verbs; ordinary data changes clear them.
         "_totals",
+        # A tabyl's kind and core counts, for adorn_ns(); cleared the same way.
+        "_tabyl",
     )
 
     def __init__(
@@ -215,6 +217,7 @@ class TidyFrame:
         problems: Any | None = None,
         data_reads: tuple[str, ...] = (),
         totals: dict[str, str] | None = None,
+        tabyl: tuple[str, pl.DataFrame] | None = None,
     ):
         if not isinstance(data, pl.LazyFrame):
             import pandas as pd
@@ -234,6 +237,7 @@ class TidyFrame:
         self._data_reads = tuple(data_reads)
         self._schema_cache = None
         self._totals = dict(totals or {})
+        self._tabyl = tabyl
 
     @property
     def _lf(self) -> pl.LazyFrame:
@@ -327,6 +331,7 @@ class TidyFrame:
         problems: Any = _KEEP,
         data_reads: tuple[str, ...] = (),
         totals: dict[str, str] | None = None,
+        tabyl: tuple[str, pl.DataFrame] | None = None,
     ) -> TidyFrame:
         # Default: clear select_base (most verbs invalidate the rewrite window).
         # select/filter set select_base=...; pass keep_select_base to preserve.
@@ -350,6 +355,7 @@ class TidyFrame:
             problems=problems,
             data_reads=_merge_reads(self._data_reads, data_reads),
             totals=totals,
+            tabyl=tabyl,
         )
 
     # ── pipe ────────────────────────────────────────────────────────────
@@ -1091,12 +1097,12 @@ class TidyFrame:
         if self._problems is None:
             return self._with_lf(
                 self._lf.collect(engine=engine).lazy(), groups=self._groups,
-                data_reads=reads, totals=self._totals,
+                data_reads=reads, totals=self._totals, tabyl=self._tabyl,
             )
         data, found = pl.collect_all([self._lf, self._problems], engine=engine)
         return self._with_lf(
             data.lazy(), groups=self._groups, problems=found.lazy(),
-            data_reads=reads, totals=self._totals,
+            data_reads=reads, totals=self._totals, tabyl=self._tabyl,
         )
 
     def collect(

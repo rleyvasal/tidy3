@@ -119,6 +119,62 @@ result <- switch(
       lapply(result, function(df) { df[] <- lapply(df, function(x) if (is.double(x)) signif(x, 12) else x); df })
     }
   },
+  janitor_formatting = {
+    if (!requireNamespace("janitor", quietly=TRUE)) {
+      list(skip=TRUE, reason="janitor is not installed")
+    } else {
+      shares <- data.frame(label=c("a", "b", "c", "d"), x=c(0.125, NA, 0.00125, -0.00004),
+                           y=c(1/3, NaN, 2/3, Inf), n=c(1L, 2L, 3L, 4L), note=c("p", "q", "r", "s"))
+      result <- list()
+      for (digits in 0:2) for (rounding in c("half to even", "half up")) {
+        result[[paste0("digits_", digits, "_", gsub(" ", "_", rounding))]] <-
+          janitor::adorn_pct_formatting(shares, digits, rounding)
+      }
+      result$no_sign <- janitor::adorn_pct_formatting(shares, 3, affix_sign=FALSE)
+      result$selected <- suppressMessages(janitor::adorn_pct_formatting(shares[1:3, ], 1, "half to even", TRUE, c(x, note)))
+      result$first_column <- janitor::adorn_pct_formatting(data.frame(p=c(0.5, 0.25), q=c(1, 0)), 1, "half to even", TRUE, dplyr::everything())
+      one_way <- janitor::tabyl(data.frame(g=c("a", "b", NA, "a")), g)
+      result$one_way <- janitor::adorn_pct_formatting(one_way)
+      result$one_way_totals <- janitor::adorn_pct_formatting(janitor::adorn_totals(one_way), 0)
+      result$one_way_ns <- suppressWarnings(janitor::adorn_ns(one_way))
+      counts <- data.frame(g=c("b", "a", "b", "a", "b", "c", NA), answer=c("yes", "no", "yes", "yes", "no", "no", "yes"),
+                           z=c(2, 10, 2, NA, 10, 2, 2))
+      report <- janitor::tabyl(counts, g, answer)
+      totals <- janitor::adorn_totals(report, c("row", "col"))
+      formatted <- janitor::adorn_pct_formatting(janitor::adorn_percentages(totals, "col"))
+      result$report <- formatted
+      result$rear <- janitor::adorn_ns(formatted)
+      result$front <- janitor::adorn_ns(formatted, "front")
+      result$counts_rear <- janitor::adorn_ns(report)
+      result$counts_front <- janitor::adorn_ns(totals, "front")
+      result$numbers_rear <- janitor::adorn_ns(janitor::adorn_percentages(report))
+      result$numbers_front <- janitor::adorn_ns(janitor::adorn_percentages(report), "front")
+      result$row_totals <- janitor::adorn_ns(janitor::adorn_pct_formatting(janitor::adorn_percentages(janitor::adorn_totals(report))))
+      named <- janitor::adorn_totals(report, c("row", "col"), name=c("All", "Sum"))
+      result$named_totals <- janitor::adorn_ns(janitor::adorn_pct_formatting(janitor::adorn_percentages(named, "all"), 2, "half up"), "front")
+      result$selected_ns <- janitor::adorn_ns(formatted, "rear", attr(formatted, "core"), function(x) format(x, big.mark=","), yes)
+      custom <- data.frame(g=c("a", "b"), n=c(1/3, 12345678))
+      result$custom <- janitor::adorn_ns(data.frame(g=c("a", "b"), n=c(1234, 5)), ns=custom)
+      result$custom_front <- janitor::adorn_ns(data.frame(g=c("a", "b"), n=c("x", "y")), "front", ns=custom)
+      big <- janitor::tabyl(data.frame(g=rep(c("a", "b"), c(1500, 2)), h=rep("x", 1502)), g, h)
+      result$big_mark <- janitor::adorn_ns(janitor::adorn_pct_formatting(janitor::adorn_percentages(big, "col")))
+      result$format_func <- janitor::adorn_ns(formatted, format_func=function(x) paste0(x, "n"))
+      result$three_way <- janitor::tabyl(counts, g, answer, z)
+      result$three_way_no_na <- janitor::tabyl(counts, g, answer, z, show_na=FALSE)
+      result$three_way_present <- janitor::tabyl(counts, g, answer, z, show_missing_levels=FALSE)
+      three <- janitor::adorn_totals(janitor::tabyl(counts, g, answer, z), c("row", "col"))
+      result$three_way_report <- janitor::adorn_ns(janitor::adorn_pct_formatting(janitor::adorn_percentages(three, "row"), 2))
+      result$three_way_front <- janitor::adorn_ns(janitor::adorn_pct_formatting(janitor::adorn_percentages(three, "all")), "front")
+      levels <- data.frame(g=factor(c("b", "a", "b"), levels=c("b", "a", "unused")), h=c("x", "y", "x"),
+                           z=factor(c("hi", "lo", "lo"), levels=c("lo", "hi")), w=c("", "k", ""))
+      result$three_way_factor <- janitor::tabyl(levels, g, h, z)
+      text <- janitor::tabyl(levels, h, g, w)
+      # JSON writes an empty list name as its position, so name it here.
+      names(text)[names(text) == ""] <- "<empty>"
+      result$three_way_text <- text
+      result
+    }
+  },
   janitor_tabyl = {
     if (!requireNamespace("janitor", quietly=TRUE)) {
       list(skip=TRUE, reason="janitor is not installed")
