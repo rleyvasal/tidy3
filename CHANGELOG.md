@@ -20,6 +20,7 @@ under **Changed**.
 
 ### Changed
 
+- `adorn_pct_formatting()`, `adorn_ns()`, and `parse_date_time()` do most of their work in Polars. On 100,000 rows they now take 7.0, 6.4, and 8.7 ms instead of 37.2, 23.9, and 27.4 ms (raw Polars: 3.0, 6.0, and 3.7 ms); `adorn_ns()` on a 5,001-row tabyl takes 12 ms instead of 55. Results are unchanged: formatting values near a rounding tie, and anything only Python can write, still go value by value, and each distinct value is written once.
 - tidy3 now requires pandas 2.1.4 or newer (up from 2.0) and pyarrow 15.0 or newer (up from 14.0). The CI job for the oldest Polars now installs exactly the oldest Polars, pandas, and pyarrow that `pyproject.toml` allows, on Python 3.10, so all three minimums stay true.
 
   | Package | Old minimum | New minimum | Below the new minimum |
@@ -34,6 +35,7 @@ under **Changed**.
 
 ### Fixed
 
+- R writes a negative zero as 0, so `adorn_ns()` no longer writes `-0.000000e+00` in a column R shows in scientific notation.
 - On a timezone-aware column, `x + months(1)` landing in a clock skipped by daylight saving gave a time an hour early (2024-02-10 02:30 EST plus one month was 2024-03-10 01:30 EST). It is now missing, as lubridate's `+` gives, and `add_with_rollback` gives the transition, 03:00 EDT, as `%m+%` does. A repeated clock keeps the input's UTC offset when that offset is still valid, so adding `seconds(0)` returns the same instant.
 
 ## 0.10.0 — 2026-10-25

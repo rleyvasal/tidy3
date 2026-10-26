@@ -1913,9 +1913,14 @@ def _native_layout(fields: tuple[str, ...]) -> tuple[str, str, str] | None:
 
 
 def _native_orders(
-    text: pl.Series, expanded: tuple[tuple[str, ...], ...], tz: str
+    text: pl.Series, expanded: tuple[tuple[str, ...], ...], tz: str, *, forms: bool = True
 ) -> tuple[pl.DataFrame, pl.Series] | None:
-    """Candidates Polars reads, and the rows it settles; None when it cannot."""
+    """Candidates Polars reads, and the rows it settles; None when it cannot.
+
+    Only rows matching an order's shape are parsed, and an order no row
+    matches is skipped. ``forms=False`` leaves ``form`` missing: the format
+    text only matters when :func:`_rank_orders` has to choose between readings.
+    """
     layouts = []
     for index, fields in enumerate(expanded):
         if _WORD_FIELDS & set(fields):
@@ -1930,26 +1935,36 @@ def _native_orders(
     # One spelling of every separator; T only ever separates date and clock.
     plain = t.str.replace_all("[/.]", "-").str.replace("T", " ", literal=True)
     frame = text.to_frame("text").with_row_index("row").with_columns(pl.col("row").cast(pl.Int64))
-    found, unsure = [], pl.repeat(False, text.len(), dtype=pl.Boolean, eager=True)
+    found = [pl.DataFrame(schema=_CANDIDATE_SCHEMA)]
+    unsure = pl.repeat(False, text.len(), dtype=pl.Boolean, eager=True)
     for index, fields, shape, fmt, suffix in layouts:
-        value = (plain + pl.lit(suffix)).str.to_datetime(fmt, time_unit="us", strict=False)
-        value = value.dt.replace_time_zone(tz, ambiguous="latest", non_existent="null")
-        # lubridate's format keeps the text's own separators, which sit at
-        # fixed places since every field has a fixed width.
-        form, at = [], 0
-        for position, field in enumerate(fields):
-            if position:
-                form.append(t.str.slice(at, 1))
-                at += 1
-            form.append(pl.lit(_NATIVE_ORDER_FIELDS[field][0]))
-            at += 4 if field in "Yy" else 2
-        rows = frame.with_columns(matched=t.str.contains(shape).fill_null(False)).with_columns(
-            value=pl.when("matched").then(value)
+        rows = frame.filter(t.str.contains(shape).fill_null(False))
+        if rows.height == 0:
+            continue
+        # Rewriting separators costs as much as parsing; skip it when the
+        # matched text already uses the spellings the format expects.
+        source = plain if bool(rows["text"].str.contains("[/.T]").any()) else t
+        value = (source + pl.lit(suffix) if suffix else source).str.to_datetime(fmt, time_unit="us", strict=False)
+        rows = rows.with_columns(
+            value=value.dt.replace_time_zone(tz, ambiguous="latest", non_existent="null")
         )
-        unsure = unsure | (rows["matched"] & rows["value"].is_null())
+        unsure = unsure.scatter(rows.filter(pl.col("value").is_null())["row"], True)
+        if forms:
+            # lubridate's format keeps the text's own separators, which sit
+            # at fixed places since every field has a fixed width.
+            parts, at = [], 0
+            for position, field in enumerate(fields):
+                if position:
+                    parts.append(t.str.slice(at, 1))
+                    at += 1
+                parts.append(pl.lit(_NATIVE_ORDER_FIELDS[field][0]))
+                at += 4 if field in "Yy" else 2
+            form = pl.concat_str(parts)
+        else:
+            form = pl.lit(None, dtype=pl.String)
         found.append(
             rows.filter(pl.col("value").is_not_null()).select(
-                "row", pl.concat_str(form).alias("form"),
+                "row", form.alias("form"),
                 pl.lit(len(fields), dtype=pl.Int64).alias("score"),
                 pl.lit(index, dtype=pl.Int64).alias("order"), pl.lit(True).alias("own"),
                 pl.col("value").dt.convert_time_zone("UTC"),
@@ -2071,21 +2086,28 @@ def _date_time_orders(series: pl.Series, options: dict[str, Any]) -> tuple[pl.Se
         out = pl.Series(utc, dtype=pl.Datetime("us")).dt.replace_time_zone("UTC")
     else:
         expanded = _expand_orders(options["orders"], options["truncated"])
-        native = _native_orders(text, expanded, options["tz"]) if rows.len() else None
-        if native is None:
-            candidates = _orders_per_value(text, rows, expanded, options)
-        else:
+
+        def gather(forms: bool) -> pl.DataFrame:
+            native = _native_orders(text, expanded, options["tz"], forms=forms) if rows.len() else None
+            if native is None:
+                return _orders_per_value(text, rows, expanded, options)
             candidates, settled = native
             rest = rows.filter(~settled.gather(rows))
             if rest.len():
                 candidates = pl.concat([candidates, _orders_per_value(text, rest, expanded, options)])
+            return candidates
+
+        candidates = gather(forms=False)
         if (
             candidates.height == rows.len() and candidates["row"].n_unique() == rows.len()
             and candidates["own"].all()
         ):
-            # One reading of every value: the ranking cannot change it.
+            # One reading of every value: the ranking cannot change it, so
+            # the formats it ranks by are never needed.
             chosen = candidates.select("row", "value")
         else:
+            if candidates["form"].null_count():
+                candidates = gather(forms=True)
             chosen = _rank_orders(candidates, rows)
         out = pl.repeat(None, text.len(), dtype=pl.Datetime("us", "UTC"), eager=True)
         if chosen.height:
