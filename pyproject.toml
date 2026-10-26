@@ -50,6 +50,9 @@ tidy3 = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+  "r_oracle: compares results with R; deselect with -m 'not r_oracle' for a fast run",
+]
 
 # Pylance / Pyright: understand tidy3 >> pipes without notebook workarounds.
 [tool.pyright]

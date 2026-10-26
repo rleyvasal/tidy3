@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -217,21 +218,71 @@ def _normalise(value: Any) -> Any:
     return _value(value)
 
 
+# R's answers depend only on the case script, R, and its packages. One R
+# process answers every case (``--batch`` in r_oracle_cases.R), and the answers
+# are kept on disk for the next run with the same script and R setup.
+# TIDY3_R_ORACLE_CACHE names the folder (default ~/.cache/tidy3/r-oracle);
+# "off" always asks R.
+_R_PACKAGES = ("dplyr", "tidyr", "jsonlite", "lubridate", "readr", "stringr", "forcats", "janitor")
+
+
+def _r_setup() -> str:
+    versions = ", ".join(f'"{name}"' for name in _R_PACKAGES)
+    probe = subprocess.run(
+        [*R_COMMAND, "-e", f"cat(R.version.string, sapply(c({versions}), function(p) "
+         "tryCatch(format(packageVersion(p)), error=function(e) 'none')))"],
+        capture_output=True, text=True, check=True,
+    )
+    return " ".join(R_COMMAND) + "\n" + probe.stdout
+
+
+def _cache_file() -> Path | None:
+    setting = os.environ.get("TIDY3_R_ORACLE_CACHE", "")
+    if setting.lower() == "off":
+        return None
+    folder = Path(setting).expanduser() if setting else Path.home() / ".cache" / "tidy3" / "r-oracle"
+    key = hashlib.sha256()
+    key.update(R_CASES.read_bytes())
+    key.update(_r_setup().encode())
+    key.update(" ".join(sorted(ORACLE_CASES)).encode())
+    return folder / f"{key.hexdigest()[:20]}.json"
+
+
 @lru_cache(maxsize=None)
-def _oracle(case: str) -> Any:
+def _oracle_answers() -> dict[str, Any]:
     if R_COMMAND is None:
         pytest.skip(
             "R oracle unavailable; install R/dplyr/tidyr/jsonlite or set "
             "TIDY3_R_ORACLE_MANIFEST"
         )
+    path = _cache_file()
+    if path is not None and path.exists():
+        try:
+            return json.loads(path.read_text())
+        except ValueError:
+            pass  # a damaged file is recomputed below
     completed = subprocess.run(
-        [*R_COMMAND, str(R_CASES), case],
+        [*R_COMMAND, str(R_CASES), "--batch", *sorted(ORACLE_CASES)],
         cwd=ROOT,
         check=True,
         capture_output=True,
         text=True,
     )
-    return json.loads(completed.stdout)
+    answers = json.loads(completed.stdout)
+    if path is not None:
+        # Parallel test runs may finish together; each renames a whole file.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_suffix(f".{os.getpid()}.tmp")
+        partial.write_text(completed.stdout)
+        os.replace(partial, path)
+    return answers
+
+
+def _oracle(case: str) -> Any:
+    answer = _oracle_answers()[case]
+    if isinstance(answer, dict) and set(answer) == {"oracle_error"}:
+        raise RuntimeError(f"R oracle case {case!r} failed in R: {answer['oracle_error']}")
+    return answer
 
 
 def _base():
@@ -2964,6 +3015,7 @@ INVARIANT_ONLY = {
 }
 
 
+@pytest.mark.r_oracle
 @pytest.mark.parametrize("case", sorted(ORACLE_CASES))
 def test_r_oracle_parity(case):
     oracle = _oracle(case)
