@@ -10,6 +10,16 @@ under **Changed**.
 
 - Durations and periods, phase 1 of the [time-span design](docs/design-time-spans.md). Exact durations: `dseconds`, `dminutes`, `dhours`, `ddays`, `dweeks`, `dmonths`, `dyears`, `duration(num, units)`, and `as_duration`, with lubridate's lengths (a year is 365.25 days, a month a twelfth of that). They take numbers or columns and make `Duration("us")` columns; `time_length(d, unit)` and `as_numeric(d, unit)` give fractional lengths, divided exactly. Calendar and clock periods: `weeks`, `days`, `hours`, `minutes`, `seconds`, and `period()` join `months` and `years`, unnormalized (`hours(25)` stays 25 hours) and with column counts. Adding a period moves months (rolled back at month ends), then days, then the local clock, so `days(1)` keeps 12:00 across a daylight-saving change and `hours(1)` from 01:30 on a spring-forward day is missing, as in lubridate. A date plus whole days stays a date; a fraction of a day, a clock period, or a duration column gives a datetime instead of Polars' silent truncation. Durations compare with periods by average length (`ddays(1) == days(1)`), and adding one to the other raises. `add_with_rollback` gains `roll_to_first=`. `to_polars_code` exports duration literals and `dt.total_*` lengths. Checked against lubridate 1.9.5 in the R oracle tests (constructors, leap days, both 2024 New York changes, Lord Howe's half-hour change, month ends, column counts), with raw Polars benchmark cases. Differences from lubridate are listed in the reference.
 
+### Changed
+
+- tidy3 now requires pandas 2.1.4 or newer (up from 2.0) and pyarrow 15.0 or newer (up from 14.0). The CI job for the oldest Polars now installs exactly the oldest Polars, pandas, and pyarrow that `pyproject.toml` allows, on Python 3.10, so all three minimums stay true.
+
+  | Package | Old minimum | New minimum | Below the new minimum |
+  | --- | --- | --- | --- |
+  | Polars | 1.42.1 | 1.42.1 | unchanged |
+  | pandas | 2.0 | 2.1.4 | 2.0.x builds a `datetime64[ns, UTC]` Series where tidy3 asks for `us`, and raises a NumPy 1.25 deprecation warning inside `fct_relevel()`. 2.1.0–2.1.3 pass the tests but do not cap NumPy below 2, so pip pairs them with NumPy 2 and pandas fails to import |
+  | pyarrow | 14.0 | 15.0 | 14.x does not cap NumPy below 2 and fails to import with it, which is what pip installs alongside pandas 3. With pandas 2.2 or newer it also raises pandas's BlockManager deprecation warning on every conversion to pandas |
+
 ### Fixed
 
 - On a timezone-aware column, `x + months(1)` landing in a clock skipped by daylight saving gave a time an hour early (2024-02-10 02:30 EST plus one month was 2024-03-10 01:30 EST). It is now missing, as lubridate's `+` gives, and `add_with_rollback` gives the transition, 03:00 EDT, as `%m+%` does. A repeated clock keeps the input's UTC offset when that offset is still valid, so adding `seconds(0)` returns the same instant.
