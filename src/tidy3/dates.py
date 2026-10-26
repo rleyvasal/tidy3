@@ -28,8 +28,25 @@ from tidy3.expr import Expr, _func, col
 
 __all__ = [
     "Period",
+    "Duration",
     "months",
     "years",
+    "weeks",
+    "days",
+    "hours",
+    "minutes",
+    "seconds",
+    "period",
+    "dseconds",
+    "dminutes",
+    "dhours",
+    "ddays",
+    "dweeks",
+    "dmonths",
+    "dyears",
+    "duration",
+    "as_duration",
+    "time_length",
     "add_with_rollback",
     "year",
     "month",
@@ -96,6 +113,9 @@ FUNCTIONS = frozenset(
         "make_datetime",
         "isoyear",
         "leap_year",
+        "duration",
+        "as_duration",
+        "time_length",
     }
 )
 _UNITS = ("second", "minute", "hour", "day", "week", "month", "quarter", "year")
@@ -121,51 +141,212 @@ _OFFSET = {
 _PANDAS_FREQ = {"second": "s", "minute": "min", "hour": "h", "day": "D"}
 
 
-class Period:
-    """A number of calendar months, years, or both.
+_PERIOD_SLOTS = ("years", "months", "days", "hours", "minutes", "seconds")
+# Average lengths, as lubridate uses for durations and period comparisons.
+_SECONDS = {
+    "second": 1.0,
+    "minute": 60.0,
+    "hour": 3600.0,
+    "day": 86400.0,
+    "week": 604800.0,
+    "month": 2629800.0,
+    "year": 31557600.0,
+}
+_SPAN_UNITS = {
+    **{name: name for name in _SECONDS},
+    **{f"{name}s": name for name in _SECONDS},
+    "sec": "second",
+    "secs": "second",
+    "min": "minute",
+    "mins": "minute",
+}
+_SLOT_SECONDS = {
+    "years": _SECONDS["year"],
+    "months": _SECONDS["month"],
+    "days": _SECONDS["day"],
+    "hours": _SECONDS["hour"],
+    "minutes": _SECONDS["minute"],
+    "seconds": 1.0,
+}
 
-    Adding one to a date rolls the day backward when the target month is
-    shorter. See :func:`add_with_rollback`.
+
+def _span_unit(name: str, unit: Any) -> str:
+    if not isinstance(unit, str):
+        raise TypeError(f"{name}() unit must be a string")
+    token = _SPAN_UNITS.get(unit.strip().lower())
+    if token is None:
+        raise ValueError(f"{name}() unit must be one of: {', '.join(_SECONDS)}; got {unit!r}")
+    return token
+
+
+def _is_column(value: Any) -> bool:
+    return isinstance(value, (Expr, pl.Expr))
+
+
+class Period:
+    """Calendar and clock units: years, months, days, hours, minutes, seconds.
+
+    Adding a period moves the calendar or the local clock, so ``days(1)``
+    can be 23 or 25 real hours. Months and years roll a missing day back to
+    the end of the month (see :func:`add_with_rollback`). Weeks are stored
+    as seven days. Units are not normalized: ``hours(25)`` stays 25 hours.
     """
 
-    __slots__ = ("months", "years")
+    __slots__ = _PERIOD_SLOTS
 
-    def __init__(self, *, months: Any = 0, years: Any = 0):
-        self.months = months
+    def __init__(
+        self,
+        *,
+        years: Any = 0,
+        months: Any = 0,
+        weeks: Any = 0,
+        days: Any = 0,
+        hours: Any = 0,
+        minutes: Any = 0,
+        seconds: Any = 0,
+    ):
         self.years = years
+        self.months = months
+        self.days = days if _zero(weeks) else _combine(_scale(weeks, 7), days)
+        self.hours = hours
+        self.minutes = minutes
+        self.seconds = seconds
+
+    def _slots(self) -> tuple[Any, ...]:
+        return tuple(getattr(self, name) for name in _PERIOD_SLOTS)
 
     def __repr__(self) -> str:
-        return f"Period(months={self.months!r}, years={self.years!r})"
+        parts = [f"{name}={value!r}" for name, value in zip(_PERIOD_SLOTS, self._slots()) if not _zero(value)]
+        return f"Period({', '.join(parts) or 'seconds=0'})"
 
     def __neg__(self) -> "Period":
-        return Period(months=_negate(self.months), years=_negate(self.years))
+        return Period(**{name: _negate(value) for name, value in zip(_PERIOD_SLOTS, self._slots())})
 
     def __add__(self, other: Any) -> "Period":
+        if isinstance(other, timedelta):
+            raise TypeError(_INCOMPATIBLE)
         if not isinstance(other, Period):
             return NotImplemented
-        return Period(
-            months=_combine(self.months, other.months),
-            years=_combine(self.years, other.years),
-        )
+        return Period(**{
+            name: _combine(left, right)
+            for name, left, right in zip(_PERIOD_SLOTS, self._slots(), other._slots())
+        })
+
+    def __radd__(self, other: Any) -> "Period":
+        if isinstance(other, timedelta):
+            raise TypeError(_INCOMPATIBLE)
+        return NotImplemented
+
+    def __sub__(self, other: Any) -> "Period":
+        if isinstance(other, timedelta):
+            raise TypeError(_INCOMPATIBLE)
+        if not isinstance(other, Period):
+            return NotImplemented
+        return self + -other
+
+    def __rsub__(self, other: Any) -> "Period":
+        if isinstance(other, timedelta):
+            raise TypeError(_INCOMPATIBLE)
+        return NotImplemented
+
+    def __mul__(self, other: Any) -> "Period":
+        if isinstance(other, bool) or not isinstance(other, int):
+            return NotImplemented
+        return Period(**{name: _scale(value, other) for name, value in zip(_PERIOD_SLOTS, self._slots())})
+
+    __rmul__ = __mul__
+
+    def total_seconds(self) -> float:
+        """Length using average units (a month is 30.4375 days), as lubridate compares periods."""
+        if any(_is_column(value) or value is None for value in self._slots()):
+            raise TypeError("a period with column counts has no single length")
+        return float(sum(value * _SLOT_SECONDS[name] for name, value in zip(_PERIOD_SLOTS, self._slots())))
+
+    def _compare(self, other: Any) -> Any:
+        if isinstance(other, (Period, timedelta)) and not any(_is_column(v) for v in self._slots()):
+            if isinstance(other, Period) and any(_is_column(v) for v in other._slots()):
+                return None
+            return self.total_seconds(), other.total_seconds()
+        return None
+
+    def __eq__(self, other: Any) -> Any:
+        pair = self._compare(other)
+        return NotImplemented if pair is None else pair[0] == pair[1]
+
+    def __ne__(self, other: Any) -> Any:
+        pair = self._compare(other)
+        return NotImplemented if pair is None else pair[0] != pair[1]
+
+    def __lt__(self, other: Any) -> Any:
+        pair = self._compare(other)
+        return NotImplemented if pair is None else pair[0] < pair[1]
+
+    def __le__(self, other: Any) -> Any:
+        pair = self._compare(other)
+        return NotImplemented if pair is None else pair[0] <= pair[1]
+
+    def __gt__(self, other: Any) -> Any:
+        pair = self._compare(other)
+        return NotImplemented if pair is None else pair[0] > pair[1]
+
+    def __ge__(self, other: Any) -> Any:
+        pair = self._compare(other)
+        return NotImplemented if pair is None else pair[0] >= pair[1]
+
+    def __hash__(self) -> int:
+        if any(_is_column(value) for value in self._slots()):
+            return id(self)
+        return hash(("Period", self._slots()))
+
+    def has_clock(self) -> bool:
+        """True when hours, minutes, or seconds may be nonzero."""
+        return not all(_zero(value) for value in (self.hours, self.minutes, self.seconds))
+
+
+_INCOMPATIBLE = (
+    "cannot combine a period with a duration: periods move the calendar, "
+    "durations count seconds. Convert one with as_duration()."
+)
+
+
+def _zero(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
 
 
 def _negate(value: Any) -> Any:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return -value
-    return -value
+    return None if value is None else -value
+
+
+def _scale(value: Any, factor: int) -> Any:
+    if value is None:
+        return None
+    return value * factor
 
 
 def _combine(left: Any, right: Any) -> Any:
-    if isinstance(left, int) and isinstance(right, int):
-        return left + right
+    if left is None or right is None:
+        return None
+    if _zero(left):
+        return right
+    if _zero(right):
+        return left
     return left + right
 
 
-def _count(name: str, value: Any) -> None:
-    if isinstance(value, bool) or not isinstance(value, int):
-        if isinstance(value, (Expr, pl.Expr)):
-            return
-        raise TypeError(f"{name}() needs an integer or a column")
+def _count(name: str, value: Any, *, fraction: bool = False) -> None:
+    if value is None or _is_column(value):
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float) if fraction else int):
+        kind = "a number" if fraction else "an integer"
+        raise TypeError(f"{name}() needs {kind} or a column; periods must have integer values")
+    if fraction and value != value:
+        raise ValueError(f"{name}() count must not be NaN; use None for a missing count")
+
+
+def years(n: Any = 1) -> Period:
+    """A period of *n* calendar years. 29 February plus ``years(1)`` is 28 February."""
+    _count("years", n)
+    return Period(years=n)
 
 
 def months(n: Any = 1) -> Period:
@@ -179,25 +360,291 @@ def months(n: Any = 1) -> Period:
     return Period(months=n)
 
 
-def years(n: Any = 1) -> Period:
-    """A period of *n* calendar years. 29 February plus ``years(1)`` is 28 February."""
-    _count("years", n)
-    return Period(years=n)
+def weeks(n: Any = 1) -> Period:
+    """A period of *n* weeks, stored as ``7 * n`` calendar days."""
+    _count("weeks", n)
+    return Period(weeks=n)
+
+
+def days(n: Any = 1) -> Period:
+    """A period of *n* calendar days. Across a daylight-saving change the
+    clock time stays the same, so a day can be 23 or 25 real hours.
+    ``days(1.5)`` raises, as in lubridate; use :func:`ddays` for exact time.
+    """
+    _count("days", n)
+    return Period(days=n)
+
+
+def hours(n: Any = 1) -> Period:
+    """A period of *n* hours on the local clock. A date becomes a datetime.
+
+    On a zoned column, 01:30 plus ``hours(1)`` on a spring-forward day is
+    missing, because 02:30 does not exist, as in lubridate. Use
+    :func:`dhours` for elapsed hours.
+    """
+    _count("hours", n)
+    return Period(hours=n)
+
+
+def minutes(n: Any = 1) -> Period:
+    """A period of *n* minutes on the local clock."""
+    _count("minutes", n)
+    return Period(minutes=n)
+
+
+def seconds(n: Any = 1) -> Period:
+    """A period of *n* seconds on the local clock. Fractions are allowed, as in lubridate."""
+    _count("seconds", n, fraction=True)
+    return Period(seconds=n)
+
+
+def period(num: Any = None, units: Any = "second", **parts: Any) -> Period:
+    """Build a period from counts and unit names, or from keyword units.
+
+    ``period(hours=25)`` is 25 hours, not normalized to a day.
+    ``period(2, "week")`` is 14 days. ``period([1, 2], ["hour", "minute"])``
+    pairs counts with units, as R's ``period(c(1, 2), c("hour", "minute"))``.
+    Keywords are ``years``, ``months``, ``weeks``, ``days``, ``hours``,
+    ``minutes``, and ``seconds``.
+    """
+    allowed = ("years", "months", "weeks", "days", "hours", "minutes", "seconds")
+    unknown = sorted(set(parts) - set(allowed))
+    if unknown:
+        raise TypeError(f"period() got unknown units: {', '.join(unknown)}")
+    builders = {"year": years, "month": months, "week": weeks, "day": days,
+                "hour": hours, "minute": minutes, "second": seconds}
+    result = Period()
+    for name, value in parts.items():
+        result = result + builders[name[:-1]](value)
+    if num is None:
+        return result
+    counts = list(num) if isinstance(num, (list, tuple)) else [num]
+    names = list(units) if isinstance(units, (list, tuple)) else [units] * len(counts)
+    if len(names) != len(counts):
+        raise ValueError("period() needs one unit per count")
+    for count_, unit in zip(counts, names):
+        result = result + builders[_span_unit("period", unit)](count_)
+    return result
+
+
+class Duration(timedelta):
+    """An exact number of seconds, held to the microsecond.
+
+    A day is 86,400 seconds, a year 365.25 days, and a month a twelfth of
+    a year, as in lubridate. Arithmetic with other durations stays a
+    duration; adding a :class:`Period` raises, as R does.
+    """
+
+    __slots__ = ()
+
+    def __new__(cls, seconds: float = 0.0) -> "Duration":
+        if isinstance(seconds, timedelta):
+            return super().__new__(cls, seconds.days, seconds.seconds, seconds.microseconds)
+        return super().__new__(cls, microseconds=round(seconds * 1_000_000))
+
+    def __repr__(self) -> str:
+        total = self.total_seconds()
+        text = f"{_number(total)}s"
+        size = abs(total)
+        for unit, length in (("years", 31557600), ("weeks", 604800), ("days", 86400),
+                             ("hours", 3600), ("minutes", 60)):
+            if size >= length:
+                return f"{text} (~{total / length:.3g} {unit})"
+        return text
+
+    __str__ = __repr__
+
+    def __add__(self, other: Any) -> Any:
+        if isinstance(other, Period):
+            raise TypeError(_INCOMPATIBLE)
+        return _as_duration_value(super().__add__(other))
+
+    def __radd__(self, other: Any) -> Any:
+        if isinstance(other, Period):
+            raise TypeError(_INCOMPATIBLE)
+        return _as_duration_value(super().__radd__(other))
+
+    def __sub__(self, other: Any) -> Any:
+        if isinstance(other, Period):
+            raise TypeError(_INCOMPATIBLE)
+        return _as_duration_value(super().__sub__(other))
+
+    def __rsub__(self, other: Any) -> Any:
+        if isinstance(other, Period):
+            raise TypeError(_INCOMPATIBLE)
+        return _as_duration_value(super().__rsub__(other))
+
+    def __neg__(self) -> "Duration":
+        return Duration(super().__neg__())
+
+    def __abs__(self) -> "Duration":
+        return Duration(super().__abs__())
+
+    def __mul__(self, other: Any) -> Any:
+        return _as_duration_value(super().__mul__(other))
+
+    __rmul__ = __mul__
+
+    def __truediv__(self, other: Any) -> Any:
+        if isinstance(other, Period):
+            return self.total_seconds() / other.total_seconds()
+        return _as_duration_value(super().__truediv__(other))
+
+    def __eq__(self, other: Any) -> Any:
+        if isinstance(other, Period):
+            return NotImplemented
+        return super().__eq__(other)
+
+    def __ne__(self, other: Any) -> Any:
+        if isinstance(other, Period):
+            return NotImplemented
+        return super().__ne__(other)
+
+    __hash__ = timedelta.__hash__
+
+
+def _as_duration_value(value: Any) -> Any:
+    if type(value) is timedelta:
+        return Duration(value)
+    return value
+
+
+def _number(value: float) -> str:
+    return str(int(value)) if value == int(value) else repr(value)
+
+
+def _duration_of(function: str, n: Any, unit: str) -> Any:
+    if n is None or (isinstance(n, float) and n != n):
+        return None
+    if isinstance(n, str):
+        raise TypeError(f"{function}() needs a number or a column; pass col({n!r}) for a column")
+    if _is_column(n):
+        return _func("duration", n, unit=unit)
+    if isinstance(n, bool) or not isinstance(n, numbers.Real):
+        raise TypeError(f"{function}() needs a number or a column")
+    return Duration(float(n) * _SECONDS[unit])
+
+
+def dseconds(x: Any = 1) -> Any:
+    """An exact duration of *x* seconds. *x* may be a number or a column."""
+    return _duration_of("dseconds", x, "second")
+
+
+def dminutes(x: Any = 1) -> Any:
+    """An exact duration of *x* minutes (60 seconds each)."""
+    return _duration_of("dminutes", x, "minute")
+
+
+def dhours(x: Any = 1) -> Any:
+    """An exact duration of *x* hours (3,600 seconds each)."""
+    return _duration_of("dhours", x, "hour")
+
+
+def ddays(x: Any = 1) -> Any:
+    """An exact duration of *x* days of 86,400 seconds.
+
+    Across a daylight-saving change this is 24 real hours, so 12:00 plus
+    ``ddays(1)`` can be 13:00. A date plus whole days stays a date; a
+    fraction, such as ``ddays(1.5)``, gives a datetime.
+    """
+    return _duration_of("ddays", x, "day")
+
+
+def dweeks(x: Any = 1) -> Any:
+    """An exact duration of *x* weeks of seven 86,400-second days."""
+    return _duration_of("dweeks", x, "week")
+
+
+def dmonths(x: Any = 1) -> Any:
+    """An exact duration of *x* average months: 30.4375 days (2,629,800 seconds)."""
+    return _duration_of("dmonths", x, "month")
+
+
+def dyears(x: Any = 1) -> Any:
+    """An exact duration of *x* average years: 365.25 days (31,557,600 seconds)."""
+    return _duration_of("dyears", x, "year")
+
+
+def duration(num: Any = None, units: str = "second", **parts: Any) -> Any:
+    """An exact duration from a count and a unit, or from keyword units.
+
+    ``duration(90, "minutes")`` is 5,400 seconds; ``duration(hours=1,
+    minutes=30)`` is the same. Units are ``second``, ``minute``, ``hour``,
+    ``day``, ``week``, ``month`` (30.4375 days), and ``year`` (365.25
+    days), singular or plural. Counts may be columns.
+    """
+    allowed = {f"{name}s": name for name in _SECONDS}
+    unknown = sorted(set(parts) - set(allowed))
+    if unknown:
+        raise TypeError(f"duration() got unknown units: {', '.join(unknown)}")
+    pieces = [_duration_of("duration", value, allowed[name]) for name, value in parts.items()]
+    if num is not None or not pieces:
+        pieces.insert(0, _duration_of("duration", 0 if num is None else num, _span_unit("duration", units)))
+    total = pieces[0]
+    for piece in pieces[1:]:
+        total = None if total is None or piece is None else total + piece
+    return total
+
+
+def as_duration(x: Any) -> Any:
+    """Convert to an exact duration.
+
+    A number counts seconds. A :class:`Period` uses average lengths, so
+    ``as_duration(months(1))`` is 2,629,800 seconds. A column of numbers
+    becomes a duration column; a duration column (such as ``date - date``)
+    is returned as is. A quoted string is a column name.
+    """
+    if x is None:
+        return None
+    if isinstance(x, timedelta):
+        return Duration(x)
+    if isinstance(x, Period):
+        return Duration(x.total_seconds())
+    if isinstance(x, str) or _is_column(x):
+        return _func("as_duration", _value(x))
+    if isinstance(x, bool) or not isinstance(x, numbers.Real):
+        raise TypeError("as_duration() needs a number, a period, a duration, or a column")
+    return None if x != x else Duration(float(x))
+
+
+def time_length(x: Any, unit: str = "second") -> Any:
+    """Length of a duration in *unit*, as a fractional number.
+
+    ``time_length(ddays(1.5), "hour")`` is 36. Months and years are the
+    average lengths (30.4375 and 365.25 days). A column of durations gives
+    a column of numbers; numbers are read as seconds. A period uses the
+    average lengths too.
+    """
+    token = _span_unit("time_length", unit)
+    if x is None:
+        return None
+    if isinstance(x, (timedelta, Period)):
+        return x.total_seconds() / _SECONDS[token]
+    if isinstance(x, str) or _is_column(x):
+        return _func("time_length", _value(x), unit=token)
+    if isinstance(x, bool) or not isinstance(x, numbers.Real):
+        raise TypeError("time_length() needs a duration, a period, or a column")
+    return float(x) / _SECONDS[token]
 
 
 def _value(x: Any) -> Any:
     return col(x) if isinstance(x, str) else x
 
 
-def add_with_rollback(x: Any, period: Period) -> Expr:
-    """Add a :func:`months` or :func:`years` period, rolling invalid days backward.
+def add_with_rollback(x: Any, period: Period, *, roll_to_first: bool = False) -> Expr:
+    """Add a period, rolling a day that does not exist in the month backward.
 
-    ``+`` and ``-`` with those periods do the same thing. Subtracting a date
-    from a period is an error.
+    31 January plus ``months(1)`` is the last day of February; with
+    ``roll_to_first=True`` it is 1 March instead, as in lubridate. ``+``
+    rolls back the same way. On a zoned column, a clock time skipped by
+    daylight saving lands on the transition here (02:30 becomes 03:00),
+    while ``+`` gives missing. Subtracting a date from a period is an error.
     """
     if not isinstance(period, Period):
-        raise TypeError("add_with_rollback() period must be months() or years()")
-    return _func("add_with_rollback", _value(x), period=period)
+        raise TypeError("add_with_rollback() period must be a period such as months(1)")
+    if not isinstance(roll_to_first, bool):
+        raise TypeError("add_with_rollback() roll_to_first must be a boolean")
+    return _func("add_with_rollback", _value(x), period=period, roll_to_first=roll_to_first)
 
 
 def year(x: Any) -> Expr:
@@ -492,6 +939,21 @@ def now(tzone: str = "UTC") -> datetime:
 # ── polars ──────────────────────────────────────────────────────────────
 
 
+_STEP_UNITS = {"months": "mo", "days": "d", "clock": "us"}
+_CLOCK_US = {"hours": 3_600_000_000, "minutes": 60_000_000, "seconds": 1_000_000}
+
+
+def _polars_count(value: Any) -> Any:
+    """An int count as is; None, or a column, as an Int64 Polars expression."""
+    if value is None:
+        return pl.lit(None, dtype=pl.Int64)
+    if isinstance(value, Expr):
+        from tidy3.expr import to_polars
+
+        return to_polars(value)
+    return value
+
+
 def _amount(value: Any, unit: str) -> Any:
     if isinstance(value, bool):
         raise TypeError("a period count must be an integer or a column")
@@ -499,9 +961,7 @@ def _amount(value: Any, unit: str) -> Any:
         if value == 0:
             return None
         return f"{value}{unit}"
-    from tidy3.expr import to_polars
-
-    compiled = value if isinstance(value, pl.Expr) else to_polars(value)
+    compiled = _polars_count(value)
     return pl.format("{}{}", compiled.cast(pl.Int64), pl.lit(unit))
 
 
@@ -512,20 +972,325 @@ def total_months(period: Period) -> Any:
     rolls back once, at the end. Adding years and then months would roll
     29 February back to the 28th before the month moves.
     """
-    years, months_ = period.years, period.months
-    if isinstance(years, int) and isinstance(months_, int):
-        return 12 * years + months_
-    if isinstance(years, int) and years == 0:
+    years_, months_ = period.years, period.months
+    if years_ is None or months_ is None:
+        return None
+    if isinstance(years_, int) and isinstance(months_, int):
+        return 12 * years_ + months_
+    if isinstance(years_, int) and years_ == 0:
         return months_
     if isinstance(months_, int) and months_ == 0:
-        return years * 12
-    return years * 12 + months_
+        return years_ * 12
+    return years_ * 12 + months_
 
 
-def shift_polars(expr: pl.Expr, period: Period) -> pl.Expr:
-    """Move *expr* by *period* as one count of months."""
-    by = _amount(total_months(period), "mo")
-    return expr if by is None else expr.dt.offset_by(by)
+def _clock_micros(period: Period) -> Any:
+    """Hours, minutes, and seconds as one count of microseconds."""
+    total: Any = 0
+    for name, size in _CLOCK_US.items():
+        value = getattr(period, name)
+        if _zero(value):
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            total = total + round(value * size)
+            continue
+        compiled = _polars_count(value)
+        if name == "seconds":
+            micros = (compiled.cast(pl.Float64) * size).round().cast(pl.Int64)
+        else:
+            micros = compiled.cast(pl.Int64) * size
+        total = micros if isinstance(total, int) and total == 0 else total + micros
+    return total
+
+
+def _steps(period: Period) -> list[tuple[str, Any]]:
+    """The moves of *period* in the order they apply: months, days, clock."""
+    days_ = period.days
+    return [
+        ("months", total_months(period)),
+        ("days", days_ if isinstance(days_, int) else _polars_count(days_)),
+        ("clock", _clock_micros(period)),
+    ]
+
+
+def _offset(base: pl.Expr, steps: list[tuple[str, Any]], roll_to_first: bool) -> pl.Expr:
+    """Apply each step with ``dt.offset_by``: one call when the counts allow."""
+    nonzero = [(unit, count) for unit, count in steps if not (isinstance(count, int) and count == 0)]
+    if not nonzero:
+        return base
+    plain = all(isinstance(count, int) for _, count in nonzero)
+    if plain and len({count > 0 for _, count in nonzero}) == 1 and not (
+        roll_to_first and nonzero[0][0] == "months"
+    ):
+        # Polars allows one sign, at the front: "-1mo2d" moves back a
+        # month, then two days, the same order as separate steps.
+        sign = "" if nonzero[0][1] > 0 else "-"
+        return base.dt.offset_by(sign + "".join(f"{abs(count)}{_STEP_UNITS[unit]}" for unit, count in nonzero))
+    for unit, count in nonzero:
+        moved = base.dt.offset_by(_amount(count, _STEP_UNITS[unit]))
+        if unit == "months" and roll_to_first:
+            # A rolled-back day is the last of its month, so one more day
+            # is the first of the next, as lubridate's roll_to_first gives.
+            moved = pl.when(moved.dt.day() != base.dt.day()).then(moved.dt.offset_by("1d")).otherwise(moved)
+        base = moved
+    return base
+
+
+def _resolve_clocks(source: pl.Series, moved: pl.Series, tz: str, rollback: bool) -> pl.Series:
+    """Place local clocks *moved* back in *tz*.
+
+    Most rows have one reading and stay in Polars. A repeated clock keeps
+    *source*'s UTC offset when that offset is valid, otherwise it takes the
+    earlier occurrence, so adding zero is a no-op. A skipped clock is
+    missing, or with *rollback* lands on the transition, as ``%m+%`` does.
+    """
+    placed = moved.dt.replace_time_zone(tz, ambiguous="null", non_existent="null")
+    rows = (placed.is_null() & moved.is_not_null()).arg_true()
+    if not len(rows):
+        return placed
+    clocks = moved.gather(rows)
+    origin = source.gather(rows)
+    offset = origin.dt.replace_time_zone(None) - origin.dt.convert_time_zone("UTC").dt.replace_time_zone(None)
+    kept = (clocks - offset).dt.replace_time_zone("UTC").dt.convert_time_zone(tz)
+    keep = (kept.dt.replace_time_zone(None) == clocks).fill_null(False)
+    fallback = clocks.dt.replace_time_zone(tz, ambiguous="earliest", non_existent="null")
+    if rollback:
+        from tidy3._timezones import transform
+
+        boundary = transform(clocks, "force_tz", tzone=tz, roll_dst=("boundary", "pre"))
+        fallback = fallback.zip_with(fallback.is_not_null(), boundary)
+    return placed.scatter(rows, kept.zip_with(keep, fallback))
+
+
+def _shift_known(
+    value: pl.Expr, dtype: Any, period: Period, *, rollback: bool, roll_to_first: bool
+) -> pl.Expr:
+    steps = _steps(period)
+    if dtype in {pl.Date, pl.Null}:
+        # A clock unit makes a date a datetime, as R gives a UTC POSIXct.
+        base = value.cast(pl.Datetime("us")) if period.has_clock() else value.cast(pl.Date)
+        return _offset(base, steps, roll_to_first)
+    if isinstance(dtype, pl.Datetime) and dtype.time_zone not in {None, "UTC"}:
+        # Move the local clock, then put it back in the zone.
+        zone, unit = dtype.time_zone, dtype.time_unit
+        moved = _offset(value.dt.replace_time_zone(None), steps, roll_to_first)
+        placed = pl.struct(x=value, m=moved).map_batches(
+            lambda batch: _resolve_clocks(batch.struct.field("x"), batch.struct.field("m"), zone, rollback),
+            return_dtype=pl.Datetime(unit, zone),
+            is_elementwise=True,
+        )
+        return _named_like(placed, value)
+    return _offset(value, steps, roll_to_first)
+
+
+def _named_like(result: pl.Expr, value: pl.Expr) -> pl.Expr:
+    """*result* under *value*'s output name, as a plain operator would keep it."""
+    try:
+        return result.alias(value.meta.output_name())
+    except Exception:
+        return result
+
+
+def shift_polars(
+    expr: pl.Expr, period: Period, *, rollback: bool = True, roll_to_first: bool = False
+) -> pl.Expr:
+    """Move *expr* by *period*: months, then days, then the local clock.
+
+    *rollback* chooses what a zoned clock skipped by daylight saving
+    becomes: the transition (:func:`add_with_rollback`) or missing (``+``).
+    """
+    from tidy3.expr import input_dtype
+
+    known = input_dtype(expr)
+    if known is not None:
+        return _shift_known(expr, known, period, rollback=rollback, roll_to_first=roll_to_first)
+    # The rule depends on the dtype, known per batch. Column counts travel
+    # with the values as struct fields.
+    fields: dict[str, Any] = {"v": expr}
+    slots: dict[str, Any] = {}
+    for name, count in zip(_PERIOD_SLOTS, period._slots()):
+        if _is_column(count):
+            key = f"c{len(fields)}"
+            fields[key] = _polars_count(count)
+            count = pl.col(key)
+        slots[name] = count
+    local = Period(**slots)
+
+    def batch(series: pl.Series) -> pl.Series:
+        frame = series.struct.unnest()
+        shifted = _shift_known(
+            pl.col("v"), frame.schema["v"], local, rollback=rollback, roll_to_first=roll_to_first
+        )
+        return frame.select(shifted).to_series()
+
+    return _named_like(pl.struct(**fields).map_batches(batch, is_elementwise=True), expr)
+
+
+def _exact_divide(value: pl.Expr, divisor: float) -> pl.Expr:
+    """``value / divisor`` divided row by row.
+
+    Polars divides by a scalar as multiplication by its reciprocal, which
+    can miss R's result by one unit in the last place. A divisor of the
+    value's own shape is divided exactly, in a mutate or a summary.
+    """
+    return value / ((value * 0.0).fill_nan(0.0) + divisor)
+
+
+def _duration_polars(value: pl.Expr, unit: str) -> pl.Expr:
+    from tidy3.expr import input_dtype
+
+    size = int(_SECONDS[unit] * 1_000_000)
+    known = input_dtype(value)
+    if known is not None and known.is_integer():
+        micros = value.cast(pl.Int64) * size
+    else:
+        micros = (value.cast(pl.Float64) * size).round().cast(pl.Int64)
+    return micros.cast(pl.Duration("us"))
+
+
+def _as_duration_of(value: pl.Expr, dtype: Any) -> pl.Expr:
+    if isinstance(dtype, pl.Duration):
+        return value.cast(pl.Duration("us"))
+    if dtype == pl.Null or dtype.is_numeric():
+        return _duration_polars(value, "second")
+    raise TypeError("as_duration() needs numbers (seconds) or durations")
+
+
+def _time_length_of(value: pl.Expr, dtype: Any, unit: str) -> pl.Expr:
+    if isinstance(dtype, pl.Duration):
+        micros = value.dt.total_microseconds().cast(pl.Float64)
+        return _exact_divide(micros, _SECONDS[unit] * 1_000_000)
+    if dtype == pl.Null or dtype.is_numeric():
+        return _exact_divide(value.cast(pl.Float64), _SECONDS[unit])
+    raise TypeError("time_length() needs durations or numbers (seconds); intervals are not supported yet")
+
+
+def _by_dtype(value: pl.Expr, rule: Any, return_dtype: Any) -> pl.Expr:
+    from tidy3.expr import input_dtype
+
+    known = input_dtype(value)
+    if known is not None:
+        return rule(value, known)
+
+    def batch(series: pl.Series) -> pl.Series:
+        return series.to_frame("v").select(rule(pl.col("v"), series.dtype)).to_series()
+
+    return value.map_batches(batch, return_dtype=return_dtype, is_elementwise=True)
+
+
+def _duration_literal(node: Any) -> timedelta | None:
+    if isinstance(node, tuple) and node and node[0] == "lit" and isinstance(node[1], timedelta):
+        return node[1]
+    return None
+
+
+def _datetime_if_date(value: pl.Expr) -> pl.Expr:
+    from tidy3.expr import input_dtype
+
+    return value.cast(pl.Datetime("us")) if input_dtype(value) == pl.Date else value
+
+
+def _duration_bin(op: str, value: pl.Expr, span: timedelta, value_first: bool) -> pl.Expr:
+    """``date + ddays(n)``: whole days keep a date; anything else is a datetime.
+
+    Polars would keep the date and drop the fraction of a day.
+    """
+    from tidy3.expr import _PL_BIN, input_dtype
+
+    literal = pl.lit(span, dtype=pl.Duration("us"))
+    whole = span % timedelta(days=1) == timedelta(0)
+
+    def apply(side: pl.Expr) -> pl.Expr:
+        return _PL_BIN[op](side, literal) if value_first else _PL_BIN[op](literal, side)
+
+    known = input_dtype(value)
+    if known is not None or whole:
+        return apply(value.cast(pl.Datetime("us")) if known == pl.Date and not whole else value)
+
+    def batch(series: pl.Series) -> pl.Series:
+        if series.dtype == pl.Date:
+            series = series.cast(pl.Datetime("us"))
+        return series.to_frame("v").select(apply(pl.col("v"))).to_series()
+
+    return value.map_batches(batch, is_elementwise=True)
+
+
+_DURATION_FUNCTIONS = frozenset({"duration", "as_duration"})
+_COMPARISONS = frozenset({"==", "!=", "<", "<=", ">", ">="})
+
+
+def _period_of(node: Any) -> Period | None:
+    if isinstance(node, tuple) and node and node[0] == "lit" and isinstance(node[1], Period):
+        return node[1]
+    return None
+
+
+def _is_duration_node(node: Any) -> bool:
+    return isinstance(node, tuple) and len(node) > 1 and node[0] == "func" and node[1] in _DURATION_FUNCTIONS
+
+
+def compile_period_bin(op: str, left: Any, right: Any, compile: Any) -> pl.Expr | None:
+    """Compile span arithmetic that plain Polars operators get wrong.
+
+    ``date + months(1)`` and other periods move the calendar and clock
+    before a period would reach ``pl.lit``. A date plus a duration that is
+    not whole days becomes a datetime. A period compared with a duration
+    uses average lengths, as lubridate does. Anything else returns None.
+    """
+    from tidy3.expr import _PL_BIN
+
+    left_period = _period_of(left)
+    right_period = _period_of(right)
+    if op in _COMPARISONS:
+        if left_period is None and right_period is None:
+            return None
+
+        def side(node: Any, period_: Period | None) -> Any:
+            return compile(node) if period_ is None else pl.lit(Duration(period_.total_seconds()), dtype=pl.Duration("us"))
+
+        return _PL_BIN[op](side(left, left_period), side(right, right_period))
+    if op not in {"+", "-"}:
+        return None
+    if left_period is not None or right_period is not None:
+        if left_period is not None and right_period is not None:
+            raise TypeError("add a period to a date, not to another period")
+        if left_period is not None:
+            if op == "-":
+                raise TypeError("cannot subtract a date from a period")
+            return shift_polars(compile(right), left_period, rollback=False)
+        period_ = right_period if op == "+" else -right_period
+        return shift_polars(compile(left), period_, rollback=False)
+    left_span, right_span = _duration_literal(left), _duration_literal(right)
+    if (left_span is None) != (right_span is None):
+        if left_span is not None:
+            return _duration_bin(op, compile(right), left_span, value_first=False)
+        return _duration_bin(op, compile(left), right_span, value_first=True)
+    if _is_duration_node(left) != _is_duration_node(right):
+        # A duration column: a date side becomes a datetime first.
+        first, second = compile(left), compile(right)
+        if _is_duration_node(right):
+            first = _datetime_if_date(first)
+        elif op == "+":
+            second = _datetime_if_date(second)
+        return _PL_BIN[op](first, second)
+    if left[0] in {"col", "name"} or right[0] in {"col", "name"}:
+        # A date column plus a duration expression, or a duration column
+        # plus a date. Column types come from the cached schema; the other
+        # side's type is looked up only next to a date or duration column.
+        from tidy3.expr import input_dtype
+
+        first, second = compile(left), compile(right)
+        types = [input_dtype(side) if node[0] in {"col", "name"} else None
+                 for side, node in ((first, left), (second, right))]
+        if not any(kind == pl.Date or isinstance(kind, pl.Duration) for kind in types):
+            return _PL_BIN[op](first, second)
+        types = [kind if kind is not None else input_dtype(side) for kind, side in zip(types, (first, second))]
+        if types[0] == pl.Date and isinstance(types[1], pl.Duration):
+            first = first.cast(pl.Datetime("us"))
+        elif op == "+" and types[1] == pl.Date and isinstance(types[0], pl.Duration):
+            second = second.cast(pl.Datetime("us"))
+        return _PL_BIN[op](first, second)
+    return None
 
 
 def _floor_polars(expr: pl.Expr, unit: str, week_start: int) -> pl.Expr:
@@ -662,30 +1427,6 @@ def _leap_polars(value: pl.Expr) -> pl.Expr:
         return series.to_frame("v").select(_leap_of(pl.col("v"), series.dtype)).to_series()
 
     return value.map_batches(batch, return_dtype=pl.Boolean, is_elementwise=True)
-
-
-def _period_of(node: Any) -> Period | None:
-    if isinstance(node, tuple) and node and node[0] == "lit" and isinstance(node[1], Period):
-        return node[1]
-    return None
-
-
-def compile_period_bin(op: str, left: Any, right: Any, compile: Any) -> pl.Expr | None:
-    """Compile ``date + months(1)`` before a period would be sent to ``pl.lit``."""
-    left_period = _period_of(left)
-    right_period = _period_of(right)
-    if left_period is None and right_period is None:
-        return None
-    if op not in {"+", "-"}:
-        return None
-    if left_period is not None and right_period is not None:
-        raise TypeError("add months() or years() to a date, not to another period")
-    if left_period is not None:
-        if op == "-":
-            raise TypeError("cannot subtract a date from months() or years()")
-        return shift_polars(compile(right), left_period)
-    period = right_period if op == "+" else -right_period
-    return shift_polars(compile(left), period)
 
 
 def _clock_polars(value: pl.Expr, name: str) -> pl.Expr:
@@ -1083,7 +1824,13 @@ def compile_polars(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> 
     if name == "ceiling_date":
         return _ceiling_polars(value, kwargs["unit"], int(kwargs["week_start"]))
     if name == "add_with_rollback":
-        return shift_polars(value, kwargs["period"])
+        return shift_polars(value, kwargs["period"], roll_to_first=kwargs.get("roll_to_first", False))
+    if name == "duration":
+        return _duration_polars(value, kwargs["unit"])
+    if name == "as_duration":
+        return _by_dtype(value, _as_duration_of, pl.Duration("us"))
+    if name == "time_length":
+        return _by_dtype(value, lambda v, dtype: _time_length_of(v, dtype, kwargs["unit"]), pl.Float64)
     if name == "round_date":
         return _round_polars(value, kwargs["unit"], int(kwargs["week_start"]))
     if name == "make_date":
@@ -1163,30 +1910,40 @@ def _quarter_pandas(source: pd.Series, kind: str, start: int) -> pd.Series:
     return pd.Series(values, index=source.index, dtype=pd.ArrowDtype(pa.date32()))
 
 
-def shift_pandas(series: pd.Series, period: Period) -> pd.Series:
-    """Move *series* by *period* as one count of months.
+def shift_pandas(
+    series: pd.Series, period: Period, *, rollback: bool = True, roll_to_first: bool = False
+) -> pd.Series:
+    """Move *series* by *period* with the Polars kernel, so both backends agree.
 
     Column counts must already be evaluated to Series (see
     :func:`tidy3.pandas_engine`). A missing count gives a missing date.
     """
-    date_only = _date_only(series)
-    result = _temporal(series)
-    count = total_months(period)
-    if isinstance(count, (Expr, pl.Expr)):
-        raise TypeError(
-            "months() or years() of a column must be evaluated before shifting"
-        )
-    if isinstance(count, int):
-        if count != 0:
-            result = result + pd.DateOffset(months=count)
-        return _restore(result, date_only)
-    counts = count if isinstance(count, pd.Series) else pd.Series(count, index=result.index)
-    moved = [
-        None if pd.isna(step) or pd.isna(value) else value + pd.DateOffset(months=int(step))
-        for value, step in zip(result.tolist(), counts.reindex(result.index).tolist())
-    ]
-    result = pd.Series(moved, index=result.index, dtype=result.dtype)
-    return _restore(result, date_only)
+    columns = {"v": pl.from_pandas(series.reset_index(drop=True))}
+    slots: dict[str, Any] = {}
+    for name, count in zip(_PERIOD_SLOTS, period._slots()):
+        if _is_column(count):
+            raise TypeError("a period of a column must be evaluated before shifting")
+        if isinstance(count, pd.Series):
+            key = f"c{len(columns)}"
+            columns[key] = pl.from_pandas(count.reindex(series.index).reset_index(drop=True))
+            count = pl.col(key)
+        slots[name] = count
+    frame = pl.DataFrame(columns)
+    kind = frame.schema["v"]
+    shifted = _shift_known(
+        pl.col("v"), kind, Period(**slots), rollback=rollback, roll_to_first=roll_to_first
+    )
+    result = frame.select(shifted).to_series()
+    if result.dtype == pl.Date:
+        return pd.Series(result.to_list(), index=series.index, dtype="object")
+    return result.to_pandas().set_axis(series.index)
+
+
+def duration_pandas(op: Any, series: pd.Series, span: timedelta, value_first: bool) -> pd.Series:
+    """``date + ddays(n)`` on pandas: a fraction of a day makes a datetime."""
+    if _date_only(series) and span % timedelta(days=1) != timedelta(0):
+        series = pd.to_datetime(series)
+    return op(series, span) if value_first else op(span, series)
 
 
 def _dtype_zone(series: pd.Series):
@@ -1297,8 +2054,11 @@ def _ceiling_pandas(
     return stamped.where(same, nudged)
 
 
-_VIA_POLARS = frozenset({"round_date", "make_date", "make_datetime", "isoyear", "leap_year"})
-_PANDAS_DTYPES = {pl.Int64: "Int64", pl.Boolean: "boolean"}
+_VIA_POLARS = frozenset({
+    "round_date", "make_date", "make_datetime", "isoyear", "leap_year",
+    "duration", "as_duration", "time_length",
+})
+_PANDAS_DTYPES = {pl.Int64: "Int64", pl.Boolean: "boolean", pl.Float64: "Float64"}
 
 
 def _pandas_via_polars(
@@ -1314,7 +2074,7 @@ def _pandas_via_polars(
     }
     frame = pl.DataFrame(columns)
     result = frame.select(compile_polars(name, tuple(pl.col(key) for key in columns), kwargs)).to_series()
-    if isinstance(result.dtype, pl.Datetime):
+    if isinstance(result.dtype, (pl.Datetime, pl.Duration)):
         return result.to_pandas().set_axis(index)
     dtype = _PANDAS_DTYPES.get(result.dtype, "object")
     return pd.Series(result.to_list(), index=index, dtype=dtype)
@@ -1384,5 +2144,5 @@ def eval_pandas(
         )
         return _restore(ceiling, date_only)
     if name == "add_with_rollback":
-        return shift_pandas(source, kwargs["period"])
+        return shift_pandas(source, kwargs["period"], roll_to_first=kwargs.get("roll_to_first", False))
     raise ValueError(f"unknown date helper: {name}")

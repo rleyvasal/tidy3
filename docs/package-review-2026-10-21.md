@@ -304,6 +304,8 @@ decisions, not the next missing Python data-cleaning helpers.
 
    **Follow-up:** the span design was approved on 2026-10-25 in
    [design-time-spans.md](design-time-spans.md).
+
+   **Follow-up (spans phase 1): added in the working tree.** Durations, day and clock periods, zone-aware period arithmetic (skipped clocks missing for `+`, the transition for `add_with_rollback`), and `roll_to_first`, checked against lubridate 1.9.5; intervals (phase 2) and period columns (phase 3) remain.
 6. **Remaining portability:** string case/ranking helpers, quantiles,
    advanced pivot arguments, and typed list-column mapping. Use Python's
    existing collection tools where a new purrr wrapper adds little value.

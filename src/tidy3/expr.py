@@ -152,6 +152,10 @@ _PL_BIN = {
 }
 
 
+# Operators that may meet a period or a duration; see compile_period_bin.
+_SPAN_OPERATORS = frozenset({"+", "-", "==", "!=", "<", "<=", ">", ">="})
+
+
 def _node(v: Any):
     if isinstance(v, Expr):
         return v.node
@@ -863,8 +867,9 @@ def _compile_pl(node: tuple) -> Any:
         return pl.col(node[1])
     if kind == "lit":
         value = node[1]
-        # months()/years() are Python periods, not Polars scalars. Callers
-        # that add them read the period off the node; pl.lit cannot hold one.
+        # Periods (months(), days(), ...) are Python objects, not Polars
+        # scalars. Callers that add them read the period off the node;
+        # pl.lit cannot hold one.
         if type(value).__name__ == "Period":
             from tidy3.dates import Period
 
@@ -882,7 +887,7 @@ def _compile_pl(node: tuple) -> Any:
     if kind == "not":
         return ~_compile_pl(node[1])
     if kind == "bin":
-        if node[1] in {"+", "-"}:
+        if node[1] in _SPAN_OPERATORS:
             from tidy3.dates import compile_period_bin
 
             shifted = compile_period_bin(node[1], node[2], node[3], _compile_pl)

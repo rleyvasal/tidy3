@@ -395,6 +395,89 @@ result <- switch(
       result
     }
   },
+  time_spans = {
+    if (!requireNamespace("lubridate", quietly=TRUE)) {
+      list(skip=TRUE, reason="lubridate is not installed")
+    } else {
+      suppressPackageStartupMessages(library(lubridate))
+      ny <- "America/New_York"
+      lh <- "Australia/Lord_Howe"
+      at <- function(x, tz) list(epochs=as.numeric(x), clocks=format(x, "%Y-%m-%d %H:%M:%S %z", tz=tz))
+      day_text <- function(x) format(x, "%Y-%m-%d")
+      utc_text <- function(x) format(x, "%Y-%m-%d %H:%M:%OS3", tz="UTC")
+      # JSON keeps 15 digits; compare fractional lengths at 10 places.
+      r10 <- function(x) round(as.numeric(x), 10)
+      n <- c(1, 1.5, NA)
+      leap <- ymd("2012-02-29")
+      ends <- ymd(c("2010-01-31", "2012-02-29", "2010-03-31"))
+      noon <- ymd_hms(c("2024-03-09 12:00:00", "2024-11-02 12:00:00"), tz=ny)
+      later <- with_tz(ymd_hms("2024-11-03 06:30:00"), ny)  # 01:30 EST, the second 01:30
+      list(
+        constructors=lapply(list(dseconds=dseconds, dminutes=dminutes, dhours=dhours, ddays=ddays,
+                                 dweeks=dweeks, dmonths=dmonths, dyears=dyears), function(f) r10(f(n))),
+        duration_units=r10(c(duration(90, "minutes"), duration(1.5, "days"), duration(2, "weeks"), duration(1, "month"))),
+        as_duration=r10(c(as.duration(c(90, NA)), as.duration(months(1)), as.duration(days(1) + hours(1)), as.duration(weeks(1)))),
+        leap_dates=list(
+          days365=day_text(leap + ddays(365)), year=utc_text(leap + dyears(1)),
+          day_and_half=utc_text(leap + ddays(1.5)), minus=utc_text(leap - ddays(1.5)),
+          classes=c(class(leap + ddays(365))[1], class(leap + dyears(1))[1], class(leap + ddays(1.5))[1])
+        ),
+        ddays_dst=at(c(noon, ymd_hms("2024-03-09 02:30:00", tz=ny)) + ddays(1), ny),
+        summaries=r10(c(sum(ddays(1:3)), mean(ddays(c(1, 2))), median(ddays(c(1, 2, 4))))),
+        time_length=lapply(setNames(nm=c("second", "minute", "hour", "day", "week", "month", "year")),
+                           function(u) r10(time_length(ddays(c(1.5, NA)), u))),
+        date_difference=r10(c(as.duration(ymd("2012-03-01") - ymd("2012-01-31")),
+                              as.duration(ymd("2024-03-11", tz=ny) - ymd("2024-03-10", tz=ny)))),
+        comparisons=c(ddays(1) == days(1), dhours(1) < minutes(61), days(1) == hours(24), months(1) == days(30)),
+        compare_column=dseconds(c(3600, 90000)) > days(1),
+        days_hours_dst=list(days=at(noon + days(1), ny), hours=at(noon + hours(24), ny)),
+        skipped=at(c(ymd_hms("2024-03-09 02:30:00", tz=ny) + days(1),
+                     ymd_hms("2024-03-10 01:30:00", tz=ny) + hours(1),
+                     ymd_hms("2024-03-10 01:30:00", tz=ny) + minutes(30),
+                     ymd_hms("2024-03-10 01:30:00", tz=ny) + minutes(90)), ny),
+        autumn_hours=at(ymd_hms("2024-11-03 00:30:00", tz=ny) + hours(c(1, 2)), ny),
+        repeat_from_before=at(ymd_hms("2024-11-02 01:30:00", tz=ny) + days(1), ny),
+        # Deliberate difference: tidy3 keeps the input's offset when it is
+        # still valid; lubridate takes the earlier repeat. The R side of the
+        # tidy3 rule is force_tz with the later occurrence.
+        repeat_from_after=list(
+          tidy3=at(force_tz(ymd_hms("2024-11-03 01:30:00"), ny, roll_dst=c("NA", "post")), ny),
+          lubridate=format(ymd_hms("2024-11-04 01:30:00", tz=ny) - days(1), "%H:%M %Z")
+        ),
+        repeat_identity=list(
+          tidy3=at(c(later, later + hours(1), later - hours(1), later + dminutes(1)), ny),
+          lubridate=format(c(later + seconds(0), later + minutes(1)), "%H:%M %Z")
+        ),
+        month_skipped=list(plus=at(ymd_hms("2024-02-10 02:30:00", tz=ny) + months(1), ny),
+                           rollback=at(ymd_hms("2024-02-10 02:30:00", tz=ny) %m+% months(1), ny),
+                           first=at(add_with_rollback(ymd_hms("2024-01-31 02:30:00", tz=ny), months(1), roll_to_first=TRUE), ny)),
+        # Deliberate difference: tidy3's + rolls back, as %m+% does.
+        month_ends=list(
+          rollback=list(months=day_text(ends %m+% months(1)), years=day_text(ends %m+% years(1)),
+                        mixed=day_text(ends %m+% (months(1) + days(1)))),
+          lubridate_plus=list(months=day_text(ends + months(1)), years=day_text(ends + years(1)),
+                              mixed=day_text(ends + (months(1) + days(1))))
+        ),
+        roll_to_first=list(
+          months=day_text(add_with_rollback(ends, months(c(1, 12, -1)), roll_to_first=TRUE)),
+          years=day_text(add_with_rollback(ends, years(1), roll_to_first=TRUE)),
+          mixed=day_text(add_with_rollback(ends, months(1) + days(1), roll_to_first=TRUE))
+        ),
+        column_counts=list(
+          days=day_text(ends + days(c(1L, NA, -1L))),
+          months=day_text(ends %m+% months(c(1L, NA, -1L))),
+          hours=utc_text(ends + hours(c(1L, NA, 30L)))
+        ),
+        date_classes=c(class(leap + days(1))[1], class(leap + hours(1))[1], class(leap + weeks(2))[1]),
+        date_clock=list(hours=utc_text(leap + hours(1)), weeks=day_text(leap + weeks(2)),
+                        seconds=utc_text(ymd_hms("2024-01-01 00:00:00") + seconds(1.5)),
+                        period=at(noon + period(hours=25), ny), mixed_sign=utc_text(leap + (days(1) - hours(2)))),
+        lord_howe=at(c(ymd_hms("2024-10-05 02:15:00", tz=lh) + days(1),
+                       ymd_hms("2024-04-06 01:45:00", tz=lh) + days(1),
+                       ymd_hms("2024-10-06 01:45:00", tz=lh) + minutes(30)), lh)
+      )
+    }
+  },
   datetime_parsers = {
     if (!requireNamespace("lubridate", quietly=TRUE)) {
       list(skip=TRUE, reason="lubridate is not installed")

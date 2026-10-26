@@ -155,6 +155,19 @@ from tidy3.dates import (
 )
 from tidy3.dates import day as day
 from tidy3.dates import isoyear, leap_year, make_date, make_datetime, round_date
+from tidy3.dates import (
+    as_duration,
+    ddays,
+    dhours,
+    dminutes,
+    dmonths,
+    dseconds,
+    duration,
+    dweeks,
+    dyears,
+    time_length,
+)
+from tidy3.dates import days, hours, minutes, period, seconds, weeks
 from tidy3.join_spec import (
     JoinCondition,
     JoinSpec,
@@ -698,6 +711,22 @@ __all__ = [
     "make_datetime",
     "isoyear",
     "leap_year",
+    "weeks",
+    "days",
+    "hours",
+    "minutes",
+    "seconds",
+    "period",
+    "dseconds",
+    "dminutes",
+    "dhours",
+    "ddays",
+    "dweeks",
+    "dmonths",
+    "dyears",
+    "duration",
+    "as_duration",
+    "time_length",
     "select",
     "separate",
     "separate_longer_delim",

@@ -970,6 +970,9 @@ def _scalar(value: Any) -> str:
     if dtype_name == "List":
         values = pl.read_ipc_stream(io.BytesIO(bytes(raw))).to_series()
         return f"pl.lit({values.to_list()!r}, dtype=pl.List({_dtype_of(values.dtype)}))"
+    if dtype_name == "Duration":
+        ticks, unit = raw
+        return f"pl.lit({int(ticks)}).cast(pl.Duration({_TIME_UNITS[unit]!r}))"
     python = _scalar_python(dtype_name, raw)
     if dtype_name in ("String", "Boolean"):
         return f"pl.lit({python})"
@@ -1209,6 +1212,12 @@ def _strptime(first, rest, options, printer):
     return f"{first}.str.strptime({', '.join(args)})"
 
 
+_TOTALS = {
+    f"Total{unit}": f"total_{unit.lower()}"
+    for unit in ("Days", "Hours", "Minutes", "Seconds", "Milliseconds", "Microseconds", "Nanoseconds")
+}
+
+
 def _temporal(first, rest, detail, printer):
     sub, options = _variant(detail)
     simple = {
@@ -1235,6 +1244,9 @@ def _temporal(first, rest, detail, printer):
         return f"{first}.dt.replace_time_zone({', '.join(args)})"
     if sub == "ConvertTimeZone":
         return f"{first}.dt.convert_time_zone({_zone(options)!r})"
+    if sub in _TOTALS:
+        fractional = isinstance(options, dict) and options.get("fractional")
+        return f"{first}.dt.{_TOTALS[sub]}({'fractional=True' if fractional else ''})"
     if sub == "CastTimeUnit":
         return f"{first}.dt.cast_time_unit({_TIME_UNITS[options]!r})"
     raise printer.unsupported(f"the Polars function TemporalExpr.{sub}")

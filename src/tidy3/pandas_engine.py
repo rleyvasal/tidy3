@@ -166,24 +166,39 @@ def _ev(node: tuple, df: pd.DataFrame, groups: list[str] | None, mode: str) -> A
             if left_period is not None or right_period is not None:
                 if left_period is not None and right_period is not None:
                     raise TypeError(
-                        "add months() or years() to a date, not to another period"
+                        "add a period to a date, not to another period"
                     )
                 if left_period is not None:
                     if node[1] == "-":
                         raise TypeError(
-                            "cannot subtract a date from months() or years()"
+                            "cannot subtract a date from a period"
                         )
                     side = _ev(node[3], df, groups, mode)
                     if not isinstance(side, pd.Series):
                         side = pd.Series(side, index=df.index)
                     return shift_pandas(
-                        side, _resolve_period(left_period, df, groups, mode)
+                        side, _resolve_period(left_period, df, groups, mode), rollback=False
                     )
                 period = right_period if node[1] == "+" else -right_period
                 side = _ev(node[2], df, groups, mode)
                 if not isinstance(side, pd.Series):
                     side = pd.Series(side, index=df.index)
-                return shift_pandas(side, _resolve_period(period, df, groups, mode))
+                return shift_pandas(
+                    side, _resolve_period(period, df, groups, mode), rollback=False
+                )
+            from datetime import timedelta
+
+            from tidy3.dates import duration_pandas
+
+            spans = [
+                part[0] == "lit" and isinstance(part[1], timedelta)
+                for part in (node[2], node[3])
+            ]
+            if spans[0] != spans[1]:
+                value = _ev(node[3] if spans[0] else node[2], df, groups, mode)
+                if isinstance(value, pd.Series):
+                    span = node[2][1] if spans[0] else node[3][1]
+                    return duration_pandas(_BIN[node[1]], value, span, value_first=spans[1])
         left = _ev(node[2], df, groups, mode)
         right = _ev(node[3], df, groups, mode)
         if node[1] in _COMPARE:
@@ -240,18 +255,18 @@ def _resolve_period(period: Any, df: pd.DataFrame, groups: list[str] | None, mod
     """Evaluate column counts in ``months(col("k"))`` against *df*."""
     import polars as pl
 
-    from tidy3.dates import Period
+    from tidy3.dates import _PERIOD_SLOTS, Period
 
     def count(value: Any) -> Any:
         if isinstance(value, Expr):
             return _as_series(_ev(value.node, df, groups, mode), df.index)
         if isinstance(value, pl.Expr):
             raise TypeError(
-                "months() and years() take col() on the pandas backend, not a Polars expression"
+                "period counts take col() on the pandas backend, not a Polars expression"
             )
         return value
 
-    return Period(months=count(period.months), years=count(period.years))
+    return Period(**{name: count(getattr(period, name)) for name in _PERIOD_SLOTS})
 
 
 def _as_series(value: Any, index: pd.Index) -> pd.Series:

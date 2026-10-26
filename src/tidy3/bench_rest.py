@@ -1150,3 +1150,62 @@ def attach(add, Case) -> None:
     )
     _col("isoyear", ["isoyear"], lambda t, df: t.isoyear("day_d"), lambda df: pl.col("day_d").dt.iso_year().cast(pl.Int64))
     _col("leap_year", ["leap_year"], lambda t, df: t.leap_year("day_d"), lambda df: pl.col("day_d").dt.is_leap_year())
+
+    # ── durations and periods ────────────────────────────────────────────
+    def _span(name, functions, build, native):
+        add(api._column(name, "dates", functions, build, native))
+
+    def _us(seconds):
+        return pl.duration(microseconds=seconds * 1_000_000)
+
+    _span("ddays", ["ddays"], lambda t, df: t.col("day_d") + t.ddays(1), lambda df: pl.col("day_d") + pl.duration(days=1))
+    _span("dseconds", ["dseconds"], lambda t, df: t.dseconds(t.col("bill")), lambda df: (pl.col("bill") * 1e6).round().cast(pl.Int64).cast(pl.Duration("us")))
+    _span("dminutes", ["dminutes"], lambda t, df: t.col("at") + t.dminutes(90), lambda df: pl.col("at") + _us(5400))
+    _span("dhours", ["dhours"], lambda t, df: t.col("at") - t.dhours(1.5), lambda df: pl.col("at") - _us(5400))
+    _span("dweeks", ["dweeks"], lambda t, df: t.col("day_d") + t.dweeks(2), lambda df: pl.col("day_d") + pl.duration(weeks=2))
+    _span("dmonths", ["dmonths"], lambda t, df: t.col("at") + t.dmonths(1), lambda df: pl.col("at") + _us(2629800))
+    _span("dyears", ["dyears"], lambda t, df: t.col("day_d") + t.dyears(1), lambda df: pl.col("day_d").cast(pl.Datetime("us")) + _us(31557600))
+    _span("duration", ["duration"], lambda t, df: t.col("at") + t.duration(hours=1, minutes=30), lambda df: pl.col("at") + pl.duration(hours=1, minutes=30))
+    _span("as_duration", ["as_duration"], lambda t, df: t.as_duration("whole"), lambda df: (pl.col("whole") * 1_000_000).cast(pl.Duration("us")))
+    _span(
+        "date_difference", [],
+        lambda t, df: t.col("day_d") - t.col("day_d").min(),
+        lambda df: pl.col("day_d") - pl.col("day_d").min(),
+    )
+
+    def _length(df):
+        micros = (pl.col("day_d") - pl.col("day_d").min()).dt.total_microseconds().cast(pl.Float64)
+        return micros / (micros * 0.0 + 86_400_000_000.0)
+
+    _span("time_length", ["time_length"], lambda t, df: t.time_length(t.col("day_d") - t.min("day_d"), "day"), _length)
+    add(api._summary(
+        "duration_sum", [],
+        lambda t, df: t.sum(t.col("day_d") - t.col("day_d").min()),
+        lambda df: (pl.col("day_d") - pl.col("day_d").min()).sum(),
+        family="dates",
+    ))
+    _span("days", ["days"], lambda t, df: t.col("day_d") + t.days(1), lambda df: pl.col("day_d").dt.offset_by("1d"))
+    _span("weeks", ["weeks"], lambda t, df: t.col("day_d") - t.weeks(2), lambda df: pl.col("day_d").dt.offset_by("-14d"))
+    _span("months_plus", [], lambda t, df: t.col("day_d") + t.months(1), lambda df: pl.col("day_d").dt.offset_by("1mo"))
+    _span("minutes", ["minutes"], lambda t, df: t.col("at") + t.minutes(90), lambda df: pl.col("at").dt.offset_by("5400000000us"))
+    _span("seconds", ["seconds"], lambda t, df: t.col("at") + t.seconds(1.5), lambda df: pl.col("at").dt.offset_by("1500000us"))
+    _span(
+        "period", ["period"],
+        lambda t, df: t.col("day_d") + t.period(months=1, days=2, hours=3),
+        lambda df: pl.col("day_d").cast(pl.Datetime("us")).dt.offset_by("1mo2d10800000000us"),
+    )
+
+    zone = "America/New_York"
+
+    def _zoned(df):
+        return df.select("id", pl.col("at").dt.replace_time_zone(zone, ambiguous="earliest", non_existent="null").alias("z"))
+
+    verb(
+        "hours", "dates", ["hours"],
+        lambda df, extra: (t.tidy(extra) >> t.mutate(out=t.col("z") + t.hours(1)) >> t.select("out")).collect(),
+        lambda df, extra: extra.select(
+            pl.col("z").dt.replace_time_zone(None).dt.offset_by("1h")
+            .dt.replace_time_zone(zone, ambiguous="earliest", non_existent="null").alias("out")
+        ),
+        prepare=_zoned,
+    )

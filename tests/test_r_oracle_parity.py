@@ -1778,6 +1778,160 @@ def _date_helpers():
     return result
 
 
+def _time_spans():
+    from datetime import date
+
+    ny, lh = "America/New_York", "Australia/Lord_Howe"
+
+    def vec(values):
+        return values[0] if len(values) == 1 else pl.Series(values)
+
+    def r10(values):
+        return vec([None if value is None else round(value, 10) for value in values])
+
+    def values(frame, expr):
+        return (frame >> mutate(at=expr)).collect()["at"]
+
+    def clocks(out):
+        return {
+            "epochs": vec([value.timestamp() if value is not None else None for value in out]),
+            "clocks": vec(out.dt.strftime("%Y-%m-%d %H:%M:%S %z").to_list()),
+        }
+
+    def zoned(texts, tz):
+        return tidy({"x": texts}) >> mutate(x=tidy3.ymd_hms("x", tz=tz))
+
+    def rows(pairs, tz):
+        """One zoned clock per (text, period), each added on its own row."""
+        return clocks(pl.concat([values(zoned([text], tz), col("x") + span) for text, span in pairs]))
+
+    def day_text(out):
+        return vec(out.dt.strftime("%Y-%m-%d").to_list())
+
+    def utc_text(out):
+        return vec(out.dt.strftime("%Y-%m-%d %H:%M:%S%.3f").to_list())
+
+    def kind(out):
+        return "Date" if out.dtype == pl.Date else "POSIXct"
+
+    def lengths(frame, expr):
+        return r10(values(frame, tidy3.time_length(expr)).to_list())
+
+    n = tidy({"n": [1.0, 1.5, None]})
+    leap = tidy({"x": [date(2012, 2, 29)]})
+    ends = tidy({"x": [date(2010, 1, 31), date(2012, 2, 29), date(2010, 3, 31)],
+                 "k": [1, None, -1], "m": [1, 12, -1], "h": [1, None, 30]})
+    noon = zoned(["2024-03-09 12:00:00", "2024-11-02 12:00:00"], ny)
+    later = tidy({"x": ["2024-11-03 06:30:00"]}) >> mutate(x=tidy3.with_tz(tidy3.ymd_hms("x"), ny))
+    constructors = {
+        name: lengths(n, getattr(tidy3, name)(col("n")))
+        for name in ("dseconds", "dminutes", "dhours", "ddays", "dweeks", "dmonths", "dyears")
+    }
+    scalars = [tidy3.duration(90, "minutes"), tidy3.duration(1.5, "days"),
+               tidy3.duration(2, "weeks"), tidy3.duration(1, "month")]
+    as_duration = lengths(tidy({"s": [90, None]}), tidy3.as_duration("s")).to_list() + [
+        tidy3.time_length(tidy3.as_duration(value))
+        for value in (tidy3.months(1), tidy3.days(1) + tidy3.hours(1), tidy3.weeks(1))
+    ]
+
+    def summary(days_, verb):
+        frame = tidy({"k": days_}) >> mutate(d=tidy3.ddays(col("k"))) >> summarise(s=verb("d"))
+        return (frame >> mutate(s=tidy3.time_length("s"))).collect()["s"][0]
+
+    span = tidy({"k": [1.5, None]}) >> mutate(d=tidy3.ddays(col("k")))
+    gaps = tidy({"a": [date(2012, 1, 31)], "b": [date(2012, 3, 1)]})
+    clock_gap = tidy({"a": ["2024-03-10 00:00:00"], "b": ["2024-03-11 00:00:00"]}) >> mutate(
+        a=tidy3.ymd_hms("a", tz=ny), b=tidy3.ymd_hms("b", tz=ny))
+    leap_out = (leap >> mutate(
+        a=col("x") + tidy3.ddays(365), b=col("x") + tidy3.dyears(1),
+        c=col("x") + tidy3.ddays(1.5), m=col("x") - tidy3.ddays(1.5),
+    )).collect()
+    date_out = (leap >> mutate(
+        d=col("x") + tidy3.days(1), h=col("x") + tidy3.hours(1), w=col("x") + tidy3.weeks(2),
+        mixed=col("x") + (tidy3.days(1) - tidy3.hours(2)),
+    )).collect()
+    first = zoned(["2024-01-31 02:30:00"], ny)
+    skipped_month = zoned(["2024-02-10 02:30:00"], ny)
+    return {
+        "constructors": constructors,
+        "duration_units": r10([tidy3.time_length(value) for value in scalars]),
+        "as_duration": r10(as_duration),
+        "leap_dates": {
+            "days365": day_text(leap_out["a"]), "year": utc_text(leap_out["b"]),
+            "day_and_half": utc_text(leap_out["c"]), "minus": utc_text(leap_out["m"]),
+            "classes": vec([kind(leap_out[name]) for name in ("a", "b", "c")]),
+        },
+        "ddays_dst": clocks(values(zoned(["2024-03-09 12:00:00", "2024-11-02 12:00:00", "2024-03-09 02:30:00"], ny),
+                                   col("x") + tidy3.ddays(1))),
+        "summaries": r10([summary([1, 2, 3], tidy3.sum), summary([1, 2], tidy3.mean), summary([1, 2, 4], tidy3.median)]),
+        "time_length": {
+            unit: r10(values(span, tidy3.time_length("d", unit)).to_list())
+            for unit in ("second", "minute", "hour", "day", "week", "month", "year")
+        },
+        "date_difference": r10([values(gaps, tidy3.time_length(col("b") - col("a")))[0],
+                                values(clock_gap, tidy3.as_numeric(col("b") - col("a"), "second"))[0]]),
+        "comparisons": vec([tidy3.ddays(1) == tidy3.days(1), tidy3.dhours(1) < tidy3.minutes(61),
+                            tidy3.days(1) == tidy3.hours(24), tidy3.months(1) == tidy3.days(30)]),
+        "compare_column": values(tidy({"n": [3600, 90000]}), tidy3.dseconds(col("n")) > tidy3.days(1)),
+        "days_hours_dst": {"days": clocks(values(noon, col("x") + tidy3.days(1))),
+                           "hours": clocks(values(noon, col("x") + tidy3.hours(24)))},
+        "skipped": rows([("2024-03-09 02:30:00", tidy3.days(1)), ("2024-03-10 01:30:00", tidy3.hours(1)),
+                         ("2024-03-10 01:30:00", tidy3.minutes(30)), ("2024-03-10 01:30:00", tidy3.minutes(90))], ny),
+        "autumn_hours": rows([("2024-11-03 00:30:00", tidy3.hours(1)), ("2024-11-03 00:30:00", tidy3.hours(2))], ny),
+        "repeat_from_before": rows([("2024-11-02 01:30:00", tidy3.days(1))], ny),
+        "repeat_from_after": {
+            "tidy3": rows([("2024-11-04 01:30:00", -tidy3.days(1))], ny),
+            # lubridate takes the earlier repeat; tidy3 keeps EST.
+            "lubridate": "01:30 EDT",
+        },
+        "repeat_identity": {
+            "tidy3": clocks(pl.concat([values(later, col("x") + span) for span in (
+                tidy3.seconds(0), tidy3.hours(1), -tidy3.hours(1), tidy3.minutes(1))])),
+            # lubridate moves x + seconds(0) to the earlier 01:30.
+            "lubridate": vec(["01:30 EDT", "01:31 EDT"]),
+        },
+        "month_skipped": {
+            "plus": clocks(values(skipped_month, col("x") + tidy3.months(1))),
+            "rollback": clocks(values(skipped_month, tidy3.add_with_rollback("x", tidy3.months(1)))),
+            "first": clocks(values(first, tidy3.add_with_rollback("x", tidy3.months(1), roll_to_first=True))),
+        },
+        "month_ends": {
+            "rollback": {
+                "months": day_text(values(ends, col("x") + tidy3.months(1))),
+                "years": day_text(values(ends, col("x") + tidy3.years(1))),
+                "mixed": day_text(values(ends, col("x") + (tidy3.months(1) + tidy3.days(1)))),
+            },
+            # lubridate's + gives NA where tidy3 rolls back.
+            "lubridate_plus": {
+                "months": vec([None, "2012-03-29", None]),
+                "years": vec(["2011-01-31", None, "2011-03-31"]),
+                "mixed": vec([None, "2012-03-30", None]),
+            },
+        },
+        "roll_to_first": {
+            "months": day_text(values(ends, tidy3.add_with_rollback("x", tidy3.months(col("m")), roll_to_first=True))),
+            "years": day_text(values(ends, tidy3.add_with_rollback("x", tidy3.years(1), roll_to_first=True))),
+            "mixed": day_text(values(ends, tidy3.add_with_rollback(
+                "x", tidy3.months(1) + tidy3.days(1), roll_to_first=True))),
+        },
+        "column_counts": {
+            "days": day_text(values(ends, col("x") + tidy3.days(col("k")))),
+            "months": day_text(values(ends, col("x") + tidy3.months(col("k")))),
+            "hours": utc_text(values(ends, col("x") + tidy3.hours(col("h")))),
+        },
+        "date_classes": vec([kind(date_out[name]) for name in ("d", "h", "w")]),
+        "date_clock": {
+            "hours": utc_text(date_out["h"]), "weeks": day_text(date_out["w"]),
+            "seconds": utc_text(values(tidy({"x": ["2024-01-01 00:00:00"]}) >> mutate(x=tidy3.ymd_hms("x")),
+                                       col("x") + tidy3.seconds(1.5))),
+            "period": clocks(values(noon, col("x") + tidy3.period(hours=25))),
+            "mixed_sign": utc_text(date_out["mixed"]),
+        },
+        "lord_howe": rows([("2024-10-05 02:15:00", tidy3.days(1)), ("2024-04-06 01:45:00", tidy3.days(1)),
+                           ("2024-10-06 01:45:00", tidy3.minutes(30))], lh),
+    }
+
+
 def _datetime_epochs(values: list, parser: Callable, **kwargs):
     out = (tidy({"x": values}) >> mutate(at=parser("x", **kwargs))).collect()["at"]
     return pl.Series([value.timestamp() if value is not None else None for value in out], dtype=pl.Float64)
@@ -2491,6 +2645,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "formatted_offsets": _formatted_offsets,
     "calendar_rounding": _calendar_rounding,
     "date_helpers": _date_helpers,
+    "time_spans": _time_spans,
     "datetime_parsers": _datetime_parsers,
     "date_time_orders": _date_time_orders,
     "datetime_truncation": _datetime_truncation,
