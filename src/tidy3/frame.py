@@ -203,6 +203,9 @@ class TidyFrame:
         "_totals",
         # A tabyl's kind and core counts, for adorn_ns(); cleared the same way.
         "_tabyl",
+        # build_wider_spec()'s checked table, for pivot_wider_spec(); only
+        # on the frame build_wider_spec() returned.
+        "_spec_table",
     )
 
     def __init__(
@@ -238,6 +241,7 @@ class TidyFrame:
         self._schema_cache = None
         self._totals = dict(totals or {})
         self._tabyl = tabyl
+        self._spec_table = None
 
     @property
     def _lf(self) -> pl.LazyFrame:

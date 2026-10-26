@@ -84,10 +84,14 @@ def _full_seq_array(values: list[Any], period: float, tol: float) -> list[float]
         return None
     if numbers.shape != (len(values),) or not np.isfinite(numbers).all():
         return None
-    low = float(numbers.min())
-    high = float(numbers.max())
-    offset = np.mod(numbers - low, period)
-    if np.any((offset > tol) & ((period - offset) > tol)):
+    # Polars over the same memory: its remainder runs on several threads,
+    # where NumPy's mod is the slowest step. The values are finite and at
+    # least ``low``, so the remainder is in [0, period) as with np.mod.
+    column = pl.Series(numbers)
+    low = float(column.min())
+    high = float(column.max())
+    offset = (column - low) % period
+    if ((offset > tol) & ((period - offset) > tol)).any():
         raise ValueError("full_seq() x is not a regular sequence")
     count = int(round((high - low) / period))
     return (low + np.arange(count + 1, dtype=np.float64) * period).tolist()
@@ -1218,6 +1222,9 @@ def _spec_frame(spec: Any) -> Any:
     """A spec as a Polars frame (it is small), checked like tidyr's."""
     from tidy3.frame import TidyFrame
 
+    checked = getattr(spec, "_spec_table", None)
+    if checked is not None:
+        return checked
     if isinstance(spec, TidyFrame):
         frame = spec._lf.collect()
     elif isinstance(spec, pl.DataFrame):
@@ -1426,11 +1433,17 @@ def build_wider_spec(
     schema = (
         tf._lf.collect_schema()
     )
-    return tidy(spec.with_columns(
+    table = spec.with_columns(
         pl.col(".name").cast(pl.String),
         pl.col(".value").cast(pl.String),
         *(pl.col(name).cast(schema[name]) for name in name_columns),
-    ))
+    )
+    out = tidy(table)
+    if not table[".name"].is_duplicated().any():
+        # Checked here once; pivot_wider_spec() takes the table as it is.
+        # Verbs build new frames without it, so an edited spec is checked again.
+        out._spec_table = table
+    return out
 
 
 def pivot_wider_spec(
@@ -2365,8 +2378,16 @@ def _pl_separate_wider_regex(tf, column, pieces, too_few, names_sep, cols_remove
 def _pl_separate_wider_position(tf, column, pieces, total, too_few, too_many, names_sep, cols_remove):
     source = _one_column(tf, column, "separate_wider_position")
     length = pl.col(source).str.len_chars()
-    short = _pl_count(tf, pl.col(source).is_not_null() & (length < total)) if too_few == "error" else 0
-    long = _pl_count(tf, pl.col(source).is_not_null() & (length > total)) if too_many == "error" else 0
+    # Both counts in one pass over the column; a missing value's length is
+    # missing, which a boolean sum leaves out.
+    checks = {}
+    if too_few == "error":
+        checks["short"] = (length < total).sum()
+    if too_many == "error":
+        checks["long"] = (length > total).sum()
+    counts = tf._lf.select(**checks).collect().row(0, named=True) if checks else {}
+    short = int(counts.get("short") or 0)
+    long = int(counts.get("long") or 0)
     if short:
         raise ValueError(
             f"separate_wider_position(): expected {total} characters in each "
@@ -2381,11 +2402,18 @@ def _pl_separate_wider_position(tf, column, pieces, total, too_few, too_many, na
     for name, width in pieces:
         if name is not None:
             part = pl.col(source).str.slice(start, int(width))
-            new.append(
-                pl.when(part.str.len_chars() > 0).then(part).alias(
-                    _output_name(source, name, names_sep)
+            if too_few == "error":
+                # Every present value has at least the total width, so no
+                # piece is empty: the slice is the column.
+                new.append(part.alias(_output_name(source, name, names_sep)))
+            else:
+                # An empty piece is missing; its byte length says so without
+                # counting characters.
+                new.append(
+                    pl.when(part.str.len_bytes() > 0).then(part).alias(
+                        _output_name(source, name, names_sep)
+                    )
                 )
-            )
         start += int(width)
     return _pl_place(tf, source, new, not cols_remove)
 

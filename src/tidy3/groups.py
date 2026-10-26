@@ -13,6 +13,8 @@ first group's rows. Subtract 1 to index a pandas frame or NumPy array.
 
 from __future__ import annotations
 
+import inspect
+
 from typing import Any, Callable
 
 import numpy as np
@@ -66,6 +68,14 @@ def _row_count(tf: Any) -> int:
     return int(tf._lf.select(pl.len()).collect().item())
 
 
+# Polars 1.4x warns unless empty_as_null is explicit; older 1.x lacks it.
+_SERIES_EXPLODE = (
+    {"empty_as_null": True}
+    if "empty_as_null" in inspect.signature(pl.Series.explode).parameters
+    else {}
+)
+
+
 def _observed(tf: Any, names: list[str], positions: bool = True) -> dict[tuple, Any]:
     """Row positions of each key combination that occurs (backend-native).
 
@@ -90,13 +100,9 @@ def _observed(tf: Any, names: list[str], positions: bool = True) -> dict[tuple, 
         .agg(pl.col(index))
         .collect()
     )
-    # One flat array split at the group boundaries, not a Python list per group.
-    from tidy3.tidyr import _EXPLODE_OPTIONS
-
-    flat = (
-        found.lazy().select(index).explode(index, **_EXPLODE_OPTIONS).collect()[index]
-        .to_numpy().astype(np.int64, copy=False)
-    )
+    # One flat array split at the group boundaries, not a Python list per
+    # group. Every list has at least one row, so the lists concatenate.
+    flat = found[index].explode(**_SERIES_EXPLODE).to_numpy().astype(np.int64, copy=False)
     bounds = np.cumsum(found[index].list.len().to_numpy())[:-1]
     keys = found.select(names).iter_rows()
     observed: dict[tuple, np.ndarray] = {}

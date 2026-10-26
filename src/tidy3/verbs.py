@@ -2176,15 +2176,15 @@ def _grouped_parts(
     import numpy as np
 
     if len(table) <= _FILTER_PARTS_MAX:
-        # Few groups: each part is a lazy filter on a group-id column.
+        # Few groups: each part is a lazy filter on a prepared boolean mask.
         # A sequential filter is cheaper than a gather on wide frames, and
-        # a callback that keeps a few rows lets Polars skip the rest.
-        group_id = np.full(frame.height, -1, dtype=np.int32)
-        for index, (_, positions) in enumerate(table):
-            group_id[positions] = index
-        ids = pl.Series(group_id)
+        # a callback that keeps a few columns lets Polars skip the rest.
         base = frame.lazy()
-        subsets = [base.filter(pl.lit(ids) == index) for index in range(len(table))]
+        subsets = []
+        for _, positions in table:
+            mask = np.zeros(frame.height, dtype=bool)
+            mask[positions] = True
+            subsets.append(base.filter(pl.lit(pl.Series(mask))))
     else:
         # Many groups: one gather in group order, then zero-copy slices.
         ordered = frame.gather(pl.Series(np.concatenate([p for _, p in table]), dtype=pl.Int64))
@@ -2250,6 +2250,15 @@ def group_modify(fn: Any, *cols: Any) -> Verb:
     def _apply(tf):
         from tidy3.frame import tidy
 
+        names = resolve_selection(tf, cols) if cols else list(tf._groups or [])
+        if names:
+            # A callback that is a pipeline of grouped-safe verbs runs once
+            # over the whole frame (see tidy3.group_trace).
+            from tidy3.group_trace import one_pass
+
+            traced = one_pass(tf, fn, names)
+            if traced is not None:
+                return traced
         outputs = []
         for key, part, rows in _grouped_parts(tf, tuple(cols)):
             token = _group_rows_token(rows)
@@ -2260,9 +2269,14 @@ def group_modify(fn: Any, *cols: Any) -> Verb:
             outputs.append(result)
         if not outputs:
             return tidy({})
-        # Bind the callback results in one plan, collected once.
-        frames = [_as_polars_lazy(r) for r in outputs]
-        return tidy(pl.concat(frames, how="diagonal_relaxed").collect().lazy())
+        # The callback results run as parallel plans: each one's source is
+        # already in memory, so nothing is gained by sharing it between
+        # them. Then they bind.
+        frames = pl.collect_all(
+            [_as_polars_lazy(r) for r in outputs],
+            optimizations=pl.QueryOptFlags(comm_subplan_elim=False),
+        )
+        return tidy(pl.concat(frames, how="diagonal_relaxed").lazy())
 
     return Verb(_apply, "group_modify")
 
@@ -3310,11 +3324,17 @@ def _polars_join_by(
         )
         if unique_right:
             key, right_key = rolling.left, right_names[rolling.right]
+            # A narrow y rides along: the asof join carries its row id and
+            # payload with the nearest key, so no second join looks the
+            # match up. A wide y is searched by key alone and joined back,
+            # which sorts less.
+            carry = len(right_columns) <= _ASOF_CARRY_COLUMNS
+            searched = y if carry else y.select(right_key)
             nearest = (
                 left.select(left_id, key)
                 .sort(key, nulls_last=True)
                 .join_asof(
-                    y.select(right_key).filter(pl.col(right_key).is_not_null()).sort(right_key),
+                    searched.filter(pl.col(right_key).is_not_null()).sort(right_key),
                     left_on=key, right_on=right_key,
                     strategy="backward" if rolling.operator in {">", ">="} else "forward",
                     allow_exact_matches=rolling.operator in {">=", "<="},
@@ -3322,9 +3342,12 @@ def _polars_join_by(
                 )
             )
             # The id pairs, for the relationship and unmatched checks.
-            candidates = nearest.join(
-                y.select(right_id, right_key), on=right_key, how="inner"
-            ).select(left_id, right_id)
+            if carry:
+                candidates = nearest.filter(pl.col(right_id).is_not_null()).select(left_id, right_id)
+            else:
+                candidates = nearest.join(
+                    y.select(right_id, right_key), on=right_key, how="inner"
+                ).select(left_id, right_id)
         else:
             candidates = _polars_closest_pairs(
                 match_left, match_right, spec, left_id=left_id, right_id=right_id,
@@ -3449,14 +3472,20 @@ def _polars_join_by(
                 right_names, keep, suffix,
             )
         if unique_right:
-            # The keys alone were searched; put the matches back in x's
-            # order and attach y's row by its key, with no sort of payloads.
-            matched = nearest.sort(left_id).select(right_key)
-            combined = pl.concat([left, matched], how="horizontal_extend").join(
-                y, on=right_key, how="left", maintain_order="left"
-            )
+            # x's keys alone were searched; put the matches back in x's
+            # order beside x's columns, with no sort of x's payload. A
+            # narrow y came along with the match; a wide y is attached by
+            # its key.
+            if carry:
+                matched = nearest.sort(left_id).drop(left_id, key)
+                combined = pl.concat([left, matched], how="horizontal_extend")
+            else:
+                matched = nearest.sort(left_id).select(right_key)
+                combined = pl.concat([left, matched], how="horizontal_extend").join(
+                    y, on=right_key, how="left", maintain_order="left"
+                )
             if how == "inner":
-                combined = combined.filter(pl.col(right_key).is_not_null())
+                combined = combined.filter(pl.col(right_id).is_not_null())
             return _join_by_output(
                 tf, combined, guards, equality, left_columns, right_columns,
                 right_names, keep, suffix,
@@ -3580,6 +3609,10 @@ def _join_suffix(suffix: Any) -> tuple[str, str]:
 # Up to this many rows in y, an inequality join runs as a nested loop; above
 # it, Polars' IE join (sort-based) is faster when few rows match.
 _NESTED_LOOP_ROWS = 64
+
+# A lookup table with up to this many columns rides along through a rolling
+# join's asof search; a wider one is searched by key and joined back.
+_ASOF_CARRY_COLUMNS = 8
 
 
 def _known_rows(frame: Any) -> int | None:
@@ -4262,15 +4295,19 @@ def _validate_policy(value: str, name: str) -> str:
 
 
 def _pl_assert_rows(lf: pl.LazyFrame, condition: pl.Expr, message: str) -> pl.LazyFrame:
-    """Raise at collect-time while keeping row operations lazy."""
+    """Raise at collect-time while keeping row operations lazy.
 
-    def validate(value: bool) -> bool:
-        if not value:
+    *condition* is one value. ``map_batches`` hands it over as a Series;
+    ``map_elements`` would inspect the function's bytecode on every call.
+    """
+
+    def validate(values: pl.Series) -> pl.Series:
+        if not values.item():
             raise ValueError(message)
-        return True
+        return values
 
     return lf.filter(
-        condition.map_elements(validate, return_dtype=pl.Boolean, skip_nulls=False)
+        condition.map_batches(validate, return_dtype=pl.Boolean, returns_scalar=True)
     )
 
 

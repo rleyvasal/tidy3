@@ -78,7 +78,7 @@ def test_closest_keeps_relationship_and_unmatched_checks(kwargs, message):
 
 
 @pytest.mark.parametrize("grouped", [False, True])
-def test_large_closest_join_builds_lazily_and_searches_only_keys(monkeypatch, grouped):
+def test_large_closest_join_builds_lazily_and_searches_only_x_keys(monkeypatch, grouped):
     rows = 200_000
     left = t.tidy(pl.DataFrame({"x": range(rows), "g": [None] * rows}).with_columns(
         *(pl.col("x").alias(f"payload_{i}") for i in range(20))
@@ -99,7 +99,31 @@ def test_large_closest_join_builds_lazily_and_searches_only_keys(monkeypatch, gr
         building.setattr(pl.LazyFrame, "collect", unexpected_collect)
         spec = t.join_by(*(["g"] if grouped else []), t.closest(t.ge("x", "y")))
         result = left >> t.left_join(right, by=spec)
-    assert searches == ([(3, 2)] if grouped else [(2, 1)])
+    # x is searched by its row id and key alone, never its payload. The
+    # narrow y (its row id, key, and g) rides along with the match.
+    assert searches == ([(3, 2)] if grouped else [(2, 3)])
     out = result.collect()
     assert out.height == rows
     assert out["y"].to_list() == [i // 10 * 10 for i in range(rows)]
+
+
+def test_wide_lookup_closest_join_searches_keys_only(monkeypatch):
+    rows = 20_000
+    left = t.tidy(pl.DataFrame({"x": range(rows)}))
+    right = pl.DataFrame({"y": range(0, rows, 10)}).with_columns(
+        *(pl.col("y").alias(f"payload_{i}") for i in range(10))
+    )
+    original = pl.LazyFrame.join_asof
+    searches = []
+
+    def search(self, other, **kwargs):
+        searches.append((len(self.collect_schema()), len(other.collect_schema())))
+        return original(self, other, **kwargs)
+
+    monkeypatch.setattr(pl.LazyFrame, "join_asof", search)
+    out = (left >> t.inner_join(right, by=t.join_by(t.closest(t.ge("x", "y"))))).collect()
+    # Both sides are searched by key alone; y's payload is joined back by key.
+    assert searches == [(2, 1)]
+    assert out.height == rows
+    assert out["y"].to_list() == [i // 10 * 10 for i in range(rows)]
+    assert out["payload_9"].to_list() == out["y"].to_list()
