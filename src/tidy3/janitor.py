@@ -494,10 +494,10 @@ def adorn_pct_formatting(
 def _percent_text(series: pl.Series, digits: int, rounding: str, sign: str, text: Any) -> pl.Series:
     """:func:`adorn_pct_formatting`'s text for a column, rounded in bulk.
 
-    The rounded number is an integer count of the last decimal, so the text
-    is that integer with a decimal point put in. Values within a hair of a
-    rounding tie, or too large for an exact integer, go through *text*
-    one by one, so every value gets exactly the per-value result.
+    The rounded number is an integer count of the last decimal, written as
+    text in one Polars cast. Values within a hair of a rounding tie, or too
+    large for an exact integer, go through *text* one by one, so every value
+    gets exactly the per-value result.
     """
     values = series.cast(pl.Float64).to_numpy() * 100  # missing values become NaN
     scale = 10.0 ** digits
@@ -512,23 +512,34 @@ def _percent_text(series: pl.Series, digits: int, rounding: str, sign: str, text
             # janitor's round_half_up, in the same double arithmetic.
             whole = np.trunc(np.abs(values) * scale + 0.5 + math.sqrt(sys.float_info.epsilon)) * np.sign(values)
             exact = finite & (np.abs(whole) < 1e12)
-    counts = pl.Series(np.where(exact, whole, 0.0)).cast(pl.Int64)
-    magnitude = counts.abs()
-    body = (magnitude // int(scale)).cast(pl.String)
-    if digits:
-        body = body + "." + (magnitude % int(scale)).cast(pl.String).str.zfill(digits)
-    out = pl.select(
-        pl.when(pl.Series(exact))
-        .then(pl.when(counts < 0).then(pl.lit("-")).otherwise(pl.lit("")) + body + pl.lit(sign))
-        .when(pl.Series(np.isnan(values))).then(pl.lit("-"))
-        .when(pl.Series(np.isposinf(values))).then(pl.lit("Inf" + sign))
-        .when(pl.Series(np.isneginf(values))).then(pl.lit("-Inf" + sign))
-        .otherwise(pl.lit(None, dtype=pl.String))
-    ).to_series()
+    settled = np.where(exact, whole, 0.0) + 0.0  # -0.0 becomes 0.0, which R shows as 0
+    counts = pl.Series(settled).cast(pl.Int64)
+    if digits == 0:
+        body = counts.cast(pl.String)
+    elif digits == 1:
+        # The shortest text that reads back as counts / 10 is that decimal
+        # with its one digit, so the float cast writes "25.1" directly.
+        # NumPy divides exactly; Polars would multiply by 0.1 instead and
+        # write 33.300000000000004.
+        body = pl.Series(settled / 10).cast(pl.String)
+    else:
+        magnitude = counts.abs()
+        body = (magnitude // int(scale)).cast(pl.String) + "." + (magnitude % int(scale)).cast(pl.String).str.zfill(digits)
+        if bool((counts < 0).any()):
+            body = pl.select(pl.when(counts < 0).then("-" + body).otherwise(body)).to_series()
+    out = body + sign if sign else body
+    # The few special rows are put in afterwards: scattering a constant is
+    # cheap, and only near-tie and huge values need the per-value text.
+    for rows, value in (
+        (np.flatnonzero(np.isnan(values)), "-"),
+        (np.flatnonzero(np.isposinf(values)), "Inf" + sign),
+        (np.flatnonzero(np.isneginf(values)), "-Inf" + sign),
+    ):
+        if rows.size:
+            out = out.scatter(rows, value)
     rest = np.flatnonzero(finite & ~exact)
     if rest.size:
-        originals = series.cast(pl.Float64).gather(rest).to_list()
-        out = out.scatter(rest, [text(value) for value in originals])
+        out = out.scatter(rest, [text(value) for value in series.cast(pl.Float64).gather(rest).to_list()])
     return out.alias(series.name)
 
 

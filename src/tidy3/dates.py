@@ -1341,8 +1341,15 @@ def _round_polars(expr: pl.Expr, unit: str, week_start: int) -> pl.Expr:
 
 def _whole_polars(part: pl.Expr, *, exact: bool = False) -> pl.Expr:
     """An Int64 part. Fractions go toward zero, or to missing when *exact*."""
+    from tidy3.expr import input_dtype
+
     whole = part.cast(pl.Int64, strict=False)
     if not exact:
+        return whole
+    known = input_dtype(part)
+    if known is not None and (known.is_integer() or known == pl.Null):
+        # Already whole. Skipping the check also lets Polars fold literal
+        # parts such as a year of 2024 instead of computing them per row.
         return whole
     return pl.when(part.cast(pl.Float64) == whole.cast(pl.Float64)).then(whole)
 

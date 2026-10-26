@@ -20,7 +20,7 @@ under **Changed**.
 
 ### Changed
 
-- `adorn_pct_formatting()`, `adorn_ns()`, and `parse_date_time()` do most of their work in Polars. On 100,000 rows they now take 7.0, 6.4, and 8.7 ms instead of 37.2, 23.9, and 27.4 ms (raw Polars: 3.0, 6.0, and 3.7 ms); `adorn_ns()` on a 5,001-row tabyl takes 12 ms instead of 55. Results are unchanged: formatting values near a rounding tie, and anything only Python can write, still go value by value, and each distinct value is written once.
+- `adorn_pct_formatting()`, `adorn_ns()`, `parse_date_time()`, `make_datetime()`, and the CSV readers do most of their work in Polars. On 100,000 rows (raw Polars in brackets): `adorn_pct_formatting` 37.8 to 2.7 ms (2.7), `adorn_ns` 25.7 to 6.6 ms (6.4), `parse_date_time` 25.8 to 6.7 ms (3.8), `make_datetime` 4.8 to 2.6 ms (1.8), and `read_csv`/`read_tsv`/`read_delim` 3.8 to 2.0 ms (0.9). `adorn_ns()` on a 5,001-row tabyl takes 12 ms instead of 55. The readers let Polars type the columns it can read whole, which have no padding or bad values, and trim and guess only the text columns, falling back to the text path otherwise. Results are unchanged: values near a rounding tie, and anything only Python can write, still go value by value, and each distinct value is written once.
 - tidy3 now requires pandas 2.1.4 or newer (up from 2.0) and pyarrow 15.0 or newer (up from 14.0). The CI job for the oldest Polars now installs exactly the oldest Polars, pandas, and pyarrow that `pyproject.toml` allows, on Python 3.10, so all three minimums stay true.
 
   | Package | Old minimum | New minimum | Below the new minimum |

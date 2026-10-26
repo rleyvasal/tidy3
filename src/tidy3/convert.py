@@ -1915,7 +1915,7 @@ def _native_layout(fields: tuple[str, ...]) -> tuple[str, str, str] | None:
 def _native_orders(
     text: pl.Series, expanded: tuple[tuple[str, ...], ...], tz: str, *, forms: bool = True
 ) -> tuple[pl.DataFrame, pl.Series] | None:
-    """Candidates Polars reads, and the rows it settles; None when it cannot.
+    """Candidates Polars reads, and the rows left unsettled; None when it cannot.
 
     Only rows matching an order's shape are parsed, and an order no row
     matches is skipped. ``forms=False`` leaves ``form`` missing: the format
@@ -1936,19 +1936,36 @@ def _native_orders(
     plain = t.str.replace_all("[/.]", "-").str.replace("T", " ", literal=True)
     frame = text.to_frame("text").with_row_index("row").with_columns(pl.col("row").cast(pl.Int64))
     found = [pl.DataFrame(schema=_CANDIDATE_SCHEMA)]
-    unsure = pl.repeat(False, text.len(), dtype=pl.Boolean, eager=True)
+    unsure: list[pl.Series] = []
+    # Orders with the same shape match the same rows (mdy and dmy), and
+    # shapes that differ cannot both match one fixed-width text, so each
+    # distinct shape is tested once, on the rows no earlier shape matched.
+    matched: dict[str, pl.DataFrame] = {}
+    unmatched = frame
     for index, fields, shape, fmt, suffix in layouts:
-        rows = frame.filter(t.str.contains(shape).fill_null(False))
+        rows = matched.get(shape)
+        if rows is None:
+            hit = unmatched["text"].str.contains(shape).fill_null(False)
+            rows = unmatched.filter(hit)
+            unmatched = unmatched.filter(~hit)
+            matched[shape] = rows
         if rows.height == 0:
             continue
-        # Rewriting separators costs as much as parsing; skip it when the
-        # matched text already uses the spellings the format expects.
-        source = plain if bool(rows["text"].str.contains("[/.T]").any()) else t
-        value = (source + pl.lit(suffix) if suffix else source).str.to_datetime(fmt, time_unit="us", strict=False)
+        rows = rows.with_columns(value=_native_parse(t, fmt, suffix))
+        if rows["value"].null_count():
+            # The format spells separators as - and a space. Text with / .
+            # or T is rewritten and read again; only that text pays for it.
+            missed = rows.filter(pl.col("value").is_null())
+            rows = pl.concat([
+                rows.filter(pl.col("value").is_not_null()),
+                missed.with_columns(value=_native_parse(plain, fmt, suffix)),
+            ]).sort("row")
         rows = rows.with_columns(
-            value=value.dt.replace_time_zone(tz, ambiguous="latest", non_existent="null")
+            value=pl.col("value").dt.replace_time_zone(tz, ambiguous="latest", non_existent="null")
         )
-        unsure = unsure.scatter(rows.filter(pl.col("value").is_null())["row"], True)
+        if rows["value"].null_count():
+            unsure.append(rows.filter(pl.col("value").is_null())["row"])
+            rows = rows.filter(pl.col("value").is_not_null())
         if forms:
             # lubridate's format keeps the text's own separators, which sit
             # at fixed places since every field has a fixed width.
@@ -1963,7 +1980,7 @@ def _native_orders(
         else:
             form = pl.lit(None, dtype=pl.String)
         found.append(
-            rows.filter(pl.col("value").is_not_null()).select(
+            rows.select(
                 "row", form.alias("form"),
                 pl.lit(len(fields), dtype=pl.Int64).alias("score"),
                 pl.lit(index, dtype=pl.Int64).alias("order"), pl.lit(True).alias("own"),
@@ -1971,10 +1988,18 @@ def _native_orders(
             )
         )
     candidates = pl.concat(found)
-    settled = pl.repeat(False, text.len(), dtype=pl.Boolean, eager=True).scatter(
-        candidates["row"].unique(), True
-    ) & ~unsure
-    return candidates.filter(settled.gather(candidates["row"])), settled
+    # Rows no shape matched, or that a shape read as missing, are unsettled
+    # and keep none of their native readings.
+    unsettled = pl.concat([unmatched["row"], *unsure]) if unsure else unmatched["row"]
+    if unsettled.len():
+        candidates = candidates.filter(~pl.col("row").is_in(unsettled.implode()))
+    return candidates, unsettled
+
+
+def _native_parse(source: pl.Expr, fmt: str, suffix: str) -> pl.Expr:
+    if suffix:
+        source = source + pl.lit(suffix)
+    return source.str.to_datetime(fmt, time_unit="us", strict=False)
 
 
 def _orders_per_value(
@@ -2091,8 +2116,8 @@ def _date_time_orders(series: pl.Series, options: dict[str, Any]) -> tuple[pl.Se
             native = _native_orders(text, expanded, options["tz"], forms=forms) if rows.len() else None
             if native is None:
                 return _orders_per_value(text, rows, expanded, options)
-            candidates, settled = native
-            rest = rows.filter(~settled.gather(rows))
+            candidates, unsettled = native
+            rest = rows.filter(rows.is_in(unsettled.implode())) if unsettled.len() else rows.clear()
             if rest.len():
                 candidates = pl.concat([candidates, _orders_per_value(text, rest, expanded, options)])
             return candidates
@@ -2109,9 +2134,12 @@ def _date_time_orders(series: pl.Series, options: dict[str, Any]) -> tuple[pl.Se
             if candidates["form"].null_count():
                 candidates = gather(forms=True)
             chosen = _rank_orders(candidates, rows)
-        out = pl.repeat(None, text.len(), dtype=pl.Datetime("us", "UTC"), eager=True)
-        if chosen.height:
-            out = out.scatter(chosen["row"], chosen["value"])
+        if chosen.height == text.len() and chosen["row"].is_sorted():
+            out = chosen["value"]  # every row read, in order
+        else:
+            out = pl.repeat(None, text.len(), dtype=pl.Datetime("us", "UTC"), eager=True)
+            if chosen.height:
+                out = out.scatter(chosen["row"], chosen["value"])
     out = out.dt.convert_time_zone(options["tz"]).cast(dtype).alias(series.name)
     return out, (present & out.is_null()).alias("failed")
 

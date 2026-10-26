@@ -211,6 +211,29 @@ def _guess_types(lf: pl.LazyFrame, skip: set[str], rows: int | None) -> dict[str
     return inferred
 
 
+def _read_typed(source: Any, options: dict[str, Any], rows: int | None) -> pl.DataFrame | None:
+    """The file with Polars' own types where they equal readr's, or None.
+
+    A column Polars reads as numbers or logical values has no padding and
+    no bad value anywhere in the file, since Polars would otherwise keep it
+    as text or fail, so readr's trim-then-guess gives the same values. Only
+    text columns still need :func:`_trim_strings` and :func:`_guess_types`.
+    A failure, or an infinity or NaN that readr's rules read differently,
+    leaves the whole file to the text path.
+    """
+    typed_options = {key: value for key, value in options.items() if key != "infer_schema"}
+    try:
+        typed = pl.read_csv(source, infer_schema_length=rows, **typed_options)
+    except (pl.exceptions.PolarsError, ValueError):
+        return None
+    for name, dtype in typed.schema.items():
+        if dtype == pl.String or dtype == pl.Boolean or dtype == pl.Int64:
+            continue
+        if dtype != pl.Float64 or not bool(typed[name].is_finite().fill_null(True).all()):
+            return None
+    return typed
+
+
 def _scan_table(
     source: Any,
     *,
@@ -277,6 +300,13 @@ def _scan_table(
     if polars_encoding is None:
         text = Path(source).read_text(encoding=encoding)
         frame = pl.read_csv(io.BytesIO(text.encode("utf-8")), **options).lazy()
+    elif materialize and id is None and not _is_glob(source):
+        # read_* materialize anyway, and the eager reader parses one file
+        # in half the time of a scan that is then collected.
+        if polars_encoding != "utf8":
+            options["encoding"] = polars_encoding
+        typed = _read_typed(source, options, sample_rows) if guess else None
+        frame = (typed if typed is not None else pl.read_csv(source, **options)).lazy()
     else:
         if polars_encoding != "utf8":
             options["encoding"] = polars_encoding
