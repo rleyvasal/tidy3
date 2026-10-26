@@ -1126,14 +1126,19 @@ def shift_polars(
     return _named_like(pl.struct(**fields).map_batches(batch, is_elementwise=True), expr)
 
 
-def _exact_divide(value: pl.Expr, divisor: float) -> pl.Expr:
+def _exact_divide(value: pl.Expr, divisor: float, *, finite: bool = False) -> pl.Expr:
     """``value / divisor`` divided row by row.
 
     Polars divides by a scalar as multiplication by its reciprocal, which
     can miss R's result by one unit in the last place. A divisor of the
-    value's own shape is divided exactly, in a mutate or a summary.
+    value's own shape is divided exactly, in a mutate or a summary. With
+    ``finite`` (a duration's microseconds), ``value * 0.0`` is that shape
+    at the least cost; otherwise ``is_null()``, false (0.0) on every
+    present row, keeps an infinite value from turning the divisor to NaN.
     """
-    return value / ((value * 0.0).fill_nan(0.0) + divisor)
+    if finite:
+        return value / (value * 0.0 + divisor)
+    return value / (value.is_null().cast(pl.Float64) + divisor)
 
 
 def _duration_polars(value: pl.Expr, unit: str) -> pl.Expr:
@@ -1159,7 +1164,7 @@ def _as_duration_of(value: pl.Expr, dtype: Any) -> pl.Expr:
 def _time_length_of(value: pl.Expr, dtype: Any, unit: str) -> pl.Expr:
     if isinstance(dtype, pl.Duration):
         micros = value.dt.total_microseconds().cast(pl.Float64)
-        return _exact_divide(micros, _SECONDS[unit] * 1_000_000)
+        return _exact_divide(micros, _SECONDS[unit] * 1_000_000, finite=True)
     if dtype == pl.Null or dtype.is_numeric():
         return _exact_divide(value.cast(pl.Float64), _SECONDS[unit])
     raise TypeError("time_length() needs durations or numbers (seconds); intervals are not supported yet")

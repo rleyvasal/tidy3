@@ -373,19 +373,49 @@ def _round_expr(value: pl.Expr, digits: int) -> pl.Expr:
             return series
         # NumPy, not Polars arithmetic: Polars divides a column by a constant
         # through its reciprocal, so 3 / 10 would come out 0.30000000000000004.
+        # (Polars expressions were tried: at these sizes each of the twenty
+        # or so passes costs more in Polars than in NumPy.)
         values = series.cast(pl.Float64).to_numpy()
         rounded = pl.Series(series.name, _round_numpy(values, digits))
-        rounded = pl.select(
-            pl.when(series.is_null()).then(None).otherwise(rounded)
-        ).to_series()
-        return rounded.cast(series.dtype)
+        if series.null_count():
+            rounded = pl.select(
+                pl.when(series.is_null()).then(None).otherwise(rounded)
+            ).to_series()
+        return rounded if rounded.dtype == series.dtype else rounded.cast(series.dtype)
 
     # Integers stay integers; floats stay floats.
     return value.map_batches(batch, return_dtype=pl.dtype_of(value), is_elementwise=True)
 
 
 def _round_numpy(values: np.ndarray, digits: int) -> np.ndarray:
-    """R's ``round`` on a float array; shared by both backends."""
+    """R's ``round`` on a float array; shared by both backends.
+
+    Most values are settled by rounding the scaled value to the nearest
+    whole number with ties to even, in three passes. A value whose scaled
+    fraction is within a few units in the last place of one half, where
+    R's comparison of the two candidates could go either way, and a value
+    large enough for the keep rule, go through :func:`_round_candidates`.
+    """
+    x = np.asarray(values, dtype=float)
+    if digits < 0 or digits > 308:
+        return _round_candidates(x, digits)
+    scale = 10.0**digits
+    with np.errstate(all="ignore"):
+        scaled = x * scale
+        nearest = np.rint(scaled)
+        # |scaled - nearest| is one half at a tie; within 16 eps relative
+        # (at least 8 ulp of scaled) the candidates are nearly equidistant.
+        unsettled = np.abs(scaled - nearest) >= 0.5 - (16 * np.finfo(float).eps) * np.abs(scaled)
+        if digits > 0:
+            unsettled |= np.abs(x) >= 10.0 ** (_ROUND_KEEP_DIGITS - digits - 1)
+        rounded = nearest / scale
+    if unsettled.any():
+        rounded[unsettled] = _round_candidates(x[unsettled], digits)
+    return rounded
+
+
+def _round_candidates(values: np.ndarray, digits: int) -> np.ndarray:
+    """R's ``round``, comparing both candidates for every value."""
     x = np.asarray(values, dtype=float)
     if digits > 323:
         return x.copy()
@@ -402,12 +432,14 @@ def _round_numpy(values: np.ndarray, digits: int) -> np.ndarray:
             lower, upper = (whole / 1e308) / extra, (np.ceil(scaled) / 1e308) / extra
         elif digits >= 0:
             scale = 10.0**digits
-            whole = np.floor(size * scale)
-            lower, upper = whole / scale, np.ceil(size * scale) / scale
+            scaled = size * scale
+            whole = np.floor(scaled)
+            lower, upper = whole / scale, np.ceil(scaled) / scale
         else:
             scale = 10.0**-digits
-            whole = np.floor(size / scale)
-            lower, upper = whole * scale, np.ceil(size / scale) * scale
+            scaled = size / scale
+            whole = np.floor(scaled)
+            lower, upper = whole * scale, np.ceil(scaled) * scale
         down, up = size - lower, upper - size
         # whole is a non-negative whole number, so halving and doubling are
         # exact: a cheaper even test than fmod. Ties need finite values.

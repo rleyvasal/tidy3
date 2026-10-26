@@ -165,23 +165,53 @@ def _null_after_trim(lf: pl.LazyFrame, na: Any, skip: set[str]) -> pl.LazyFrame:
         if name in skip or dtype != pl.String or not values:
             continue
         column = pl.col(name)
-        expressions.append(
-            pl.when(column.is_in(values)).then(None).otherwise(column).alias(name)
-        )
+        if len(values) <= _NULL_EQUALITY_MAX:
+            # A few strings: equality tests are cheaper than a hashed is_in.
+            missing = column == values[0]
+            for value in values[1:]:
+                missing = missing | (column == value)
+        else:
+            missing = column.is_in(values)
+        expressions.append(pl.when(missing).then(None).otherwise(column).alias(name))
     return lf.with_columns(expressions) if expressions else lf
 
 
-def _guess_dtype(values: pl.Series) -> Any:
-    """Integer, float, or logical when every sampled value is one; else None."""
-    if values.str.contains(r"^[+-]?\d+$").all() and not values.cast(
-        pl.Int64, strict=False
-    ).null_count():
-        return pl.Int64
-    if not values.cast(pl.Float64, strict=False).null_count():
-        return pl.Float64
-    if values.str.to_lowercase().is_in(["true", "false"]).all():
-        return pl.Boolean
-    return None
+# Up to this many missing-value strings are matched by equality tests.
+_NULL_EQUALITY_MAX = 4
+
+
+def _guess_dtypes(sample: pl.DataFrame, names: list[str]) -> dict[str, Any]:
+    """Each column's guessed type, from one query over the sampled rows.
+
+    A column is integer when every present value is whole and fits, double
+    when every present value is a number, logical when every present
+    value is true or false; otherwise it stays text.
+    """
+    checks = []
+    for position, name in enumerate(names):
+        present = pl.col(name).drop_nulls()
+        checks += [
+            present.len().alias(f"{position}_count"),
+            (
+                present.str.contains(r"^[+-]?\d+$").all()
+                & (present.cast(pl.Int64, strict=False).null_count() == 0)
+            ).alias(f"{position}_integer"),
+            (present.cast(pl.Float64, strict=False).null_count() == 0).alias(f"{position}_double"),
+            present.str.to_lowercase().is_in(["true", "false"]).all().alias(f"{position}_logical"),
+        ]
+    found = sample.select(checks).row(0)
+    guessed = {}
+    for position, name in enumerate(names):
+        count, integer, double, logical = found[4 * position:4 * position + 4]
+        if not count:
+            continue
+        if integer:
+            guessed[name] = pl.Int64
+        elif double:
+            guessed[name] = pl.Float64
+        elif logical:
+            guessed[name] = pl.Boolean
+    return guessed
 
 
 def _guess_types(lf: pl.LazyFrame, skip: set[str], rows: int | None) -> dict[str, str]:
@@ -200,15 +230,8 @@ def _guess_types(lf: pl.LazyFrame, skip: set[str], rows: int | None) -> dict[str
         return {}
     sample = lf.select(names)
     sample = (sample if rows is None else sample.head(rows)).collect()
-    inferred = {}
-    for name in names:
-        values = sample[name].drop_nulls()
-        if values.is_empty():
-            continue
-        dtype = _guess_dtype(values)
-        if dtype is not None:
-            inferred[name] = {pl.Boolean: "logical", pl.Int64: "integer", pl.Float64: "double"}[dtype]
-    return inferred
+    labels = {pl.Boolean: "logical", pl.Int64: "integer", pl.Float64: "double"}
+    return {name: labels[dtype] for name, dtype in _guess_dtypes(sample, names).items()}
 
 
 def _read_typed(source: Any, options: dict[str, Any], rows: int | None) -> pl.DataFrame | None:

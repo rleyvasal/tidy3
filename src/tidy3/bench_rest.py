@@ -458,8 +458,10 @@ def attach(add, Case) -> None:
 
     verb(
         "rows_patch", "rows", ["rows_patch"],
-        lambda df, extra=None: (pipe(_patch(df)[0]) >> t.rows_patch(_patch(df)[1], by="id")).collect(),
-        lambda df, extra=None: _patch(df)[0].with_columns(pl.when(pl.col("id") == 0).then(pl.lit("Z")).otherwise(pl.col("species")).alias("species")),
+        # Both tables are built once, outside the timing.
+        lambda df, extra: (pipe(extra[0]) >> t.rows_patch(extra[1], by="id")).collect(),
+        lambda df, extra: extra[0].with_columns(pl.when(pl.col("id") == 0).then(pl.lit("Z")).otherwise(pl.col("species")).alias("species")),
+        prepare=_patch,
     )
     verb(
         "rows_delete", "rows", ["rows_delete"],
@@ -772,11 +774,11 @@ def attach(add, Case) -> None:
     )
     verb(
         "pivot_wider_spec", "tidyr", ["pivot_wider_spec"],
-        lambda df, extra=None: (
-            pipe(_wide_source(df))
-            >> t.pivot_wider_spec(t.build_wider_spec(pipe(_wide_source(df)), names_from="species", values_from="mass"))
-        ).collect(),
+        # The spec is built once, outside the timing (build_wider_spec is
+        # its own case); pivot_wider_spec() widens with it.
+        lambda df, extra: (pipe(_wide_source(df)) >> t.pivot_wider_spec(extra)).collect(),
         _wider,
+        prepare=lambda df: t.build_wider_spec(pipe(_wide_source(df)), names_from="species", values_from="mass"),
     )
     verb(
         "pivot_longer_ptypes", "tidyr", [],
