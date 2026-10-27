@@ -4,11 +4,14 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.12.3 — 2026-10-27
+
+janitor's rounding helpers: `round_half_up()`, `signif_half_up()`, and `round_to_fraction()`, each matching janitor 2.2.1 to the last bit.
 
 ### Added
 
 - `round_half_up(x, digits=0)`, janitor's rounding: ties go away from zero (`round_half_up(2.5)` is 3, where `round()` gives 2), and janitor's `sqrt(.Machine$double.eps)` nudge rounds a tie stored a hair low up too (`round_half_up(2.675, 2)` is 2.68). It works in `mutate`, `summarise`, and `across` with bare column names, keeps integer and Float32 columns in their type, and matches janitor 2.2.1 to the last bit on 6,000 grid values and on ties, near-ties, huge values, overflow, NaN, missing values, and infinities, in a new R oracle case.
+- `signif_half_up(x, digits=6)` and `round_to_fraction(x, denominator, digits=None)`, janitor's other two rounding helpers. `signif_half_up(12.5, 2)` is 13; `round_to_fraction(1.3, 4)` rounds to quarters (1.25), with janitor's `digits="auto"` or a number of decimals to round the result. Both keep integer columns as integers and match janitor 2.2.1 to the last bit in a second R oracle case. The oracle's negative zero is now made at run time, since R's byte compiler pools a literal `-0` with `0`.
 
 ## 0.12.2 — 2026-10-27
 
