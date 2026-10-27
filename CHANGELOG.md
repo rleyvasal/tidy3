@@ -4,6 +4,12 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- In a notebook cell, a variable assigned inside one function no longer stops a same-named bare column from working elsewhere in the cell. With `period = ...` local to a helper, `mutate(prev = period - months(1))` in another function of the same cell read `period` as tidy3's `period()` function and failed, though the same code worked in a cell of its own. The mask now keeps each function's (and class body's) bindings to that scope, as Python does: module-level assignments and `global` names still count everywhere, a function's locals count inside it and its nested functions, and `period(...)` called as a function is still tidy3's. Exported scripts follow the same rule.
+
 ## 0.12.1 — 2026-10-26
 
 `fct_reorder()` on text finds its levels and summaries in one aggregation, and grouped reorders sort NaN summaries last with `desc=True`.

@@ -119,3 +119,33 @@ def test_a_variable_made_earlier_in_the_cell_stays_a_variable(shell):
     out = shell.user_ns["out"].collect(as_="pandas")
     assert out["cluster"].tolist() == [1, 0]
     assert out["x"].tolist() == [2.0, 3.0]
+
+
+def test_a_local_variable_in_another_function_leaves_the_column_alone(shell):
+    # One cell, two functions: helper's local ``period`` must not turn the
+    # bare ``period`` column in report into a Python name. period(...) is
+    # still tidy3's function, and running report alone gives the same answer.
+    shell.run_cell('df = tidy({"period": ["2024-02", "2024-05"]})', silent=True)
+    report = (
+        "def report(df):\n"
+        "    return df >> mutate(\n"
+        "        start = ym(period),\n"
+        "        prev = start - months(1),\n"
+        "        later = start + period(2, 'month'),\n"
+        "        label = str_c(period, '!'),\n"
+        "    )\n"
+    )
+    helper = (
+        "def helper():\n"
+        "    period = 'quarter'\n"
+        "    return period\n"
+    )
+    for cell in (report, report + helper):
+        result = shell.run_cell(cell + "out = report(df)", silent=True)
+        assert result.error_in_exec is None and result.error_before_exec is None
+        out = shell.user_ns["out"].collect(as_="pandas")
+        assert [str(d)[:10] for d in out["start"]] == ["2024-02-01", "2024-05-01"]
+        assert [str(d)[:10] for d in out["prev"]] == ["2024-01-01", "2024-04-01"]
+        assert [str(d)[:10] for d in out["later"]] == ["2024-04-01", "2024-07-01"]
+        assert out["label"].tolist() == ["2024-02!", "2024-05!"]
+    assert shell.user_ns["helper"]() == "quarter"

@@ -790,14 +790,21 @@ class MaskNames(ast.NodeTransformer):
         return node
 
 
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
 def bound_names(tree: ast.AST) -> set[str]:
-    """Names *tree* binds: assignments, imports, function and class names.
+    """Names *tree*'s own scope binds: assignments, imports, function and class names.
 
     These are variables, never columns, even where the same code then
     uses them bare in a verb (``kmeans = KMeans(...)`` then
-    ``mutate(cluster = kmeans.labels_)`` in one cell or script).
+    ``mutate(cluster = kmeans.labels_)`` in one cell or script). Pass a
+    module for its global names, or a function or class for its local
+    ones. A nested function's locals stay its own: ``period = 3`` inside
+    one function leaves bare ``period`` a column everywhere else.
     """
     names: set[str] = set()
+    declared: set[str] = set()
 
     def add(target: ast.AST) -> None:
         if isinstance(target, ast.Name):
@@ -808,7 +815,13 @@ def bound_names(tree: ast.AST) -> set[str]:
         elif isinstance(target, ast.Starred):
             add(target.value)
 
-    for node in ast.walk(tree):
+    def in_scope(parent: ast.AST):
+        for child in ast.iter_child_nodes(parent):
+            yield child
+            if not isinstance(child, _SCOPE_NODES):
+                yield from in_scope(child)
+
+    for node in in_scope(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
         elif isinstance(node, ast.Assign):
@@ -829,7 +842,18 @@ def bound_names(tree: ast.AST) -> set[str]:
             for alias in node.names:
                 if alias.name != "*":
                     names.add(alias.asname or alias.name)
-    return names
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            declared.update(node.names)
+    if isinstance(tree, ast.Module):
+        # ``global period`` in a function binds the module's name.
+        names.update(
+            name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Global)
+            for name in node.names
+        )
+        return names
+    return names - declared
 
 
 def default_known_names(extra: Iterable[str] | None = None) -> set[str]:
@@ -1045,6 +1069,9 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
         self._soft: set[str] = set()
         self._variables: dict[str, Any] = {}
         self._cell_names: set[str] = set()
+        # Enclosing function and class bodies, innermost last, with the
+        # names each binds.
+        self._scopes: list[tuple[str, set[str]]] = []
         self._cell_imports: dict[str, list[tuple[tuple[int, int], str | None]]] = {}
 
     def _owns(self, verb: str, call: ast.Call) -> bool:
@@ -1066,10 +1093,22 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
             return True
         return _owned_by_tidy3(namespace[verb])
 
+    def _local_names(self) -> set[str]:
+        """Names bound by the function bodies around the current node.
+
+        A class body's names are seen only directly inside it, not in its
+        methods, as in Python.
+        """
+        names: set[str] = set()
+        for index, (kind, bound) in enumerate(self._scopes):
+            if kind == "function" or index == len(self._scopes) - 1:
+                names |= bound
+        return names
+
     def _known(self) -> set[str]:
         if self._known_static is not None:
-            return set(self._known_static)
-        extra: set[str] = set(self._cell_names)
+            return set(self._known_static) | self._local_names()
+        extra: set[str] = set(self._cell_names) | self._local_names()
         namespace = self._namespace()
         if namespace is not None:
             extra.update(namespace.keys())
@@ -1086,9 +1125,42 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
         return getattr(ip, "user_ns", None) if ip is not None else None
 
     def _mask(self, node: ast.AST, mode: Mode) -> ast.AST:
+        local = self._local_names()
+        variables = {k: v for k, v in self._variables.items() if k not in local}
         return MaskNames(
-            mode, self._known(), self._soft, self._variables
+            mode, self._known(), self._soft - local, variables
         ).mask_root(node)
+
+    def _visit_body(self, kind: str, node: Any) -> None:
+        """Visit *node*'s body with the names it binds as local variables."""
+        self._scopes.append((kind, bound_names(node)))
+        try:
+            body: list[ast.stmt] = []
+            for statement in node.body:
+                result = self.visit(statement)
+                if result is not None:
+                    body.extend(result if isinstance(result, list) else [result])
+            node.body = body
+        finally:
+            self._scopes.pop()
+
+    def visit_FunctionDef(self, node: Any) -> ast.AST:
+        # Decorators, defaults and annotations run in the enclosing scope.
+        node.decorator_list = [self.visit(d) for d in node.decorator_list]
+        node.args = self.visit(node.args)
+        if node.returns is not None:
+            node.returns = self.visit(node.returns)
+        self._visit_body("function", node)
+        return node
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+        node.decorator_list = [self.visit(d) for d in node.decorator_list]
+        node.bases = [self.visit(base) for base in node.bases]
+        node.keywords = [self.visit(kw) for kw in node.keywords]
+        self._visit_body("class", node)
+        return node
 
     def visit_Module(self, node: ast.Module) -> ast.AST:
         # Static known names (export, tests) have no notebook to consult.
