@@ -9,6 +9,7 @@ Each helper builds a backend-neutral expression, so it runs inside
 from __future__ import annotations
 
 import math
+import sys
 from typing import Any
 
 import numpy as np
@@ -25,6 +26,7 @@ __all__ = [
     "floor",
     "ceiling",
     "round",
+    "round_half_up",
     "pmin",
     "pmax",
     "row_sums",
@@ -33,7 +35,7 @@ __all__ = [
 ]
 
 _FLAGS = ("is_na", "is_nan", "is_finite", "is_infinite")
-_MATH = {"abs", "floor", "ceiling", "round"}
+_MATH = {"abs", "floor", "ceiling", "round", "round_half_up"}
 _PAIRS = {"pmin", "pmax"}
 _ROWS = {"row_sums", "row_means"}
 FUNCTIONS = frozenset((*_FLAGS, *_MATH, *_PAIRS, *_ROWS))
@@ -183,6 +185,23 @@ def round(x: Any, digits: int = 0) -> Expr:  # noqa: A001
     if isinstance(digits, bool) or not isinstance(digits, int):
         raise TypeError("round() digits must be an integer")
     return _func("round", _value(x), digits=digits)
+
+
+def round_half_up(x: Any, digits: int = 0) -> Expr:
+    """Round *x* with ties away from zero, as janitor's ``round_half_up``.
+
+    ``round_half_up(2.5)`` is 3 and ``round_half_up(-2.5)`` is -3, where
+    :func:`round` gives 2 and -2. As in janitor, *x* is scaled by
+    ``10 ** digits``, nudged up by a half plus ``sqrt(.Machine$double.eps)``
+    (about 1.5e-8), truncated, and scaled back, in R's double arithmetic.
+    So a tie stored a hair low still rounds up: ``round_half_up(2.675, 2)``
+    is 2.68, where :func:`round` gives 2.67. Negative ``digits`` round to
+    tens, hundreds, and so on (``round_half_up(25, -1)`` is 30). Integer
+    columns stay integers; missing values, NaN, and infinities pass through.
+    """
+    if isinstance(digits, bool) or not isinstance(digits, int):
+        raise TypeError("round_half_up() digits must be an integer")
+    return _func("round_half_up", _value(x), digits=digits)
 
 
 def pmin(*args: Any, na_rm: bool = False) -> Expr:
@@ -348,22 +367,56 @@ def _round_expr(value: pl.Expr, digits: int) -> pl.Expr:
         return value.round(0, mode="half_to_even")
 
     def batch(series: pl.Series) -> pl.Series:
-        if series.dtype.is_integer() and digits >= 0:
-            return series
-        # NumPy, not Polars arithmetic: Polars divides a column by a constant
-        # through its reciprocal, so 3 / 10 would come out 0.30000000000000004.
-        # (Polars expressions were tried: at these sizes each of the twenty
-        # or so passes costs more in Polars than in NumPy.)
-        values = series.cast(pl.Float64).to_numpy()
-        rounded = pl.Series(series.name, _round_numpy(values, digits))
-        if series.null_count():
-            rounded = pl.select(
-                pl.when(series.is_null()).then(None).otherwise(rounded)
-            ).to_series()
-        return rounded if rounded.dtype == series.dtype else rounded.cast(series.dtype)
+        return _round_batch(series, digits, _round_numpy)
 
     # Integers stay integers; floats stay floats.
     return value.map_batches(batch, return_dtype=pl.dtype_of(value), is_elementwise=True)
+
+
+def _round_half_up_expr(value: pl.Expr, digits: int) -> pl.Expr:
+    from tidy3.expr import input_dtype
+
+    known = input_dtype(value)
+    if known is not None and known.is_integer() and digits >= 0:
+        return value
+
+    def batch(series: pl.Series) -> pl.Series:
+        return _round_batch(series, digits, _round_half_up_numpy)
+
+    return value.map_batches(batch, return_dtype=pl.dtype_of(value), is_elementwise=True)
+
+
+def _round_batch(series: pl.Series, digits: int, kernel: Any) -> pl.Series:
+    """Round one batch with a NumPy *kernel*, keeping nulls and the dtype."""
+    if series.dtype.is_integer() and digits >= 0:
+        return series
+    # NumPy, not Polars arithmetic: Polars divides a column by a constant
+    # through its reciprocal, so 3 / 10 would come out 0.30000000000000004.
+    # (Polars expressions were tried: at these sizes each of the twenty
+    # or so passes costs more in Polars than in NumPy.)
+    values = series.cast(pl.Float64).to_numpy()
+    rounded = pl.Series(series.name, kernel(values, digits))
+    if series.null_count():
+        rounded = pl.select(
+            pl.when(series.is_null()).then(None).otherwise(rounded)
+        ).to_series()
+    return rounded if rounded.dtype == series.dtype else rounded.cast(series.dtype)
+
+
+_SQRT_EPS = math.sqrt(sys.float_info.epsilon)  # R's sqrt(.Machine$double.eps)
+
+
+def _round_half_up_numpy(values: np.ndarray, digits: int) -> np.ndarray:
+    """janitor's ``round_half_up`` on a float array, step for step.
+
+    Each operation is one IEEE double operation in janitor's order, so the
+    result is R's to the last bit: ``(|x| * 10^digits + 0.5) + sqrt(eps)``,
+    truncated, divided by ``10^digits``, times the sign of *x*.
+    """
+    with np.errstate(over="ignore", invalid="ignore"):
+        scale = np.power(10.0, digits)
+        scaled = np.abs(values) * scale + 0.5 + _SQRT_EPS
+        return np.trunc(scaled) / scale * np.sign(values)
 
 
 def _round_numpy(values: np.ndarray, digits: int) -> np.ndarray:
@@ -483,6 +536,8 @@ def compile_polars(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> 
         return args[0].ceil()
     if name == "round":
         return _round_expr(args[0], int(kwargs["digits"]))
+    if name == "round_half_up":
+        return _round_half_up_expr(args[0], int(kwargs["digits"]))
     if name in _PAIRS:
         return _pair(name, args, bool(kwargs["na_rm"]))
     if name in _ROWS:

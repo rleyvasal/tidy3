@@ -1559,6 +1559,36 @@ def _janitor_formatting():
     return result
 
 
+def _janitor_round_half_up():
+    def exact(values):
+        # R's sprintf("%.17g") spelling of each value.
+        out = []
+        for value in values:
+            if value is None:
+                out.append("NA")
+            elif value != value:
+                out.append("NaN")
+            elif value in (float("inf"), float("-inf")):
+                out.append("Inf" if value > 0 else "-Inf")
+            else:
+                out.append("%.17g" % value)
+        return {"kind": "vector", "data": out}
+
+    grid = tidy({"x": [k / 1000 for k in range(-3000, 3001)]})
+    special = tidy({"x": [0.5, 1.5, 2.5, -0.5, -2.5, 0.125, 0.285, 2.675, 1.005, 0.0005, -1.005,
+                          2.4999999999, 2.4999999, 0.49999999999999994, 2**52 - 0.5,
+                          1e15 + 0.3, 12345.6789, -0.4, 0.0, -0.0, 5e-324, 1e300, 1.5 * 2.0**1023,
+                          None, float("nan"), float("inf"), float("-inf")]})
+    result = {}
+    for digits in range(-2, 4):
+        result[f"grid_{digits}"] = exact(grid >> mutate(r=tidy3.round_half_up("x", digits)) >> pull("r"))
+    for digits in (-3, -1, 0, 1, 2, 5, 20, 400):
+        result[f"special_{digits}"] = exact(special >> mutate(r=tidy3.round_half_up("x", digits)) >> pull("r"))
+    integers = tidy({"x": pl.Series([15, 25, -25, 149, None], dtype=pl.Int64)})
+    result["integers"] = exact(integers >> mutate(r=tidy3.round_half_up("x", -1)) >> pull("r"))
+    return result
+
+
 def _janitor_tabyl():
     import tidy3 as t3
 
@@ -2867,6 +2897,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "janitor_totals": _janitor_totals,
     "janitor_percentages": _janitor_percentages,
     "janitor_formatting": _janitor_formatting,
+    "janitor_round_half_up": _janitor_round_half_up,
     "timezone_conversion": _timezone_conversion,
     "timezone_dst": _timezone_dst,
     "timezone_resolved_repeats": _timezone_resolved_repeats,

@@ -112,7 +112,7 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 | Export | `nb_export`, `transform_source`, `python -m tidy3 export` / `run` |
 | Frame | `tidy`, `scan_parquet`, `scan_csv`, `scan_ipc`, `read_csv`, `read_tsv`, `read_delim`, `read_excel`, `excel_sheets`, `TidyFrame` |
 | Output | `collect`, `to_numpy`, `write_parquet`, `write_csv`, `write_ipc`, `write_excel` (pipe steps, functions, and `TidyFrame` methods) |
-| Helpers | `is_na`, `is_nan`, `is_finite`, `is_infinite`, `abs`, `floor`, `ceiling`, `round`, `pmin`, `pmax`, `row_sums`, `row_means` |
+| Helpers | `is_na`, `is_nan`, `is_finite`, `is_infinite`, `abs`, `floor`, `ceiling`, `round`, `round_half_up`, `pmin`, `pmax`, `row_sums`, `row_means` |
 | Convert | `as_numeric`/`as_double`, `as_integer`, `as_character`/`as_string`, `as_logical`, `as_date`, `as_datetime`, `ConversionError` |
 | Parse | `parse_double`, `parse_integer`, `parse_logical`, `parse_date`, `parse_datetime`, `parse_time`, `parse_number`, `locale`, `problems`, `stop_for_problems` |
 | Dates | `ymd`, `mdy`, `dmy`, `ym`, `ymd_hms`, `ymd_hm`, `ymd_h`, `mdy_hms`, `mdy_hm`, `mdy_h`, `dmy_hms`, `dmy_hm`, `dmy_h`, `parse_date_time`, `with_tz`, `force_tz`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `isoyear`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `round_date`, `days_in_month`, `leap_year`, `make_date`, `make_datetime`, `months`, `years`, `weeks`, `days`, `hours`, `minutes`, `seconds`, `period`, `add_with_rollback`, `dseconds`, `dminutes`, `dhours`, `ddays`, `dweeks`, `dmonths`, `dyears`, `duration`, `as_duration`, `time_length`, `today`, `now`, `excel_numeric_to_date` |
@@ -544,8 +544,21 @@ even digit: `round(0.5)` is 0, `round(1.5)` is 2, and `round(0.125, 2)` is
 0.12. Otherwise the result is the candidate nearer to the number as
 stored, so `round(2.675, 2)` is 2.67 because 2.675 is stored as
 2.67499999.... Negative `digits` round to tens (`round(123, digits=-1)` is
-120), and integer columns stay integers. `pmin` and `pmax`
-are element-wise. With `na_rm=False`, any missing input makes that row
+120), and integer columns stay integers.
+
+`round_half_up` is janitor's: a tie rounds away from zero, so
+`round_half_up(2.5)` is 3 and `round_half_up(-2.5)` is -3. Like janitor, it
+adds `sqrt(.Machine$double.eps)` (about 1.5e-8) before truncating, so a tie
+stored a hair low still rounds up: `round_half_up(2.675, 2)` is 2.68.
+Results match janitor's to the last bit, checked against janitor 2.2.1.
+Negative `digits` and integer columns work as for `round`.
+
+```python
+(tidy({"x": [0.5, 2.5, -2.5, 2.675]})
+ >> mutate(even=round("x"), up=round_half_up("x"), up2=round_half_up("x", 2)))
+```
+
+`pmin` and `pmax` are element-wise. With `na_rm=False`, any missing input makes that row
 missing. `row_sums(..., na_rm=True)` of an all-missing row is 0;
 `min_count=1` makes that row missing. `row_means` of an all-missing row is
 missing. `sum(c_across(cols))` with the defaults still skips nulls and

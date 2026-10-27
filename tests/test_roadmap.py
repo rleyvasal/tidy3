@@ -56,6 +56,7 @@ from tidy3 import (
     read_excel,
     read_tsv,
     round,
+    round_half_up,
     row_means,
     row_sums,
     scan_csv,
@@ -130,6 +131,36 @@ def test_round_is_half_to_even():
     tens = _col(out, "tens")
     assert tens[:5] == [0.0, 0.0, 0.0, 0.0, 0.0]
     assert tens[5] == 120
+
+
+def test_round_half_up_sends_ties_away_from_zero():
+    frame = tidy({"x": [0.5, 1.5, 2.5, -2.5, 1.25, 2.675, 25.0, None, float("nan")]})
+    out = frame >> mutate(
+        z=round_half_up("x"), z2=round_half_up("x", 2), tens=round_half_up("x", -1)
+    )
+    assert _col(out, "z")[:7] == [1.0, 2.0, 3.0, -3.0, 1.0, 3.0, 25.0]
+    # 2.675 is stored as 2.67499999...; janitor's nudge still rounds it up.
+    assert _col(out, "z2")[:7] == [0.5, 1.5, 2.5, -2.5, 1.25, 2.68, 25.0]
+    assert _col(out, "tens")[:7] == [0.0, 0.0, 0.0, -0.0, 0.0, 0.0, 30.0]
+    z = _col(out, "z")
+    assert z[7] is None and z[8] != z[8]
+
+
+def test_round_half_up_keeps_the_column_type():
+    frame = tidy({"n": pl.Series([15, 25, -25], dtype=pl.Int32), "f": pl.Series([0.5, 1.5, 2.5], dtype=pl.Float32)})
+    out = (frame >> mutate(n0=round_half_up("n"), tens=round_half_up("n", -1), f=round_half_up("f"))).collect()
+    assert out["n0"].dtype == pl.Int32 and out["n0"].to_list() == [15, 25, -25]
+    assert out["tens"].dtype == pl.Int32 and out["tens"].to_list() == [20, 30, -30]
+    assert out["f"].dtype == pl.Float32 and out["f"].to_list() == [1.0, 2.0, 3.0]
+
+
+def test_round_half_up_around_a_summary_and_its_digits():
+    cars = tidy({"cyl": [4, 4, 6], "hp": [93.0, 62.0, 110.0]})
+    grouped = cars >> group_by("cyl") >> summarise(m=round_half_up(mean("hp"), -1))
+    assert _col(grouped, "m") == [80.0, 110.0]
+    for digits in (1.0, True, "1"):
+        with pytest.raises(TypeError, match="digits must be an integer"):
+            round_half_up("hp", digits)
 
 
 def test_row_sums_and_means():

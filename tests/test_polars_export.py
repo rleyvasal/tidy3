@@ -97,6 +97,9 @@ def test_python_function_columns_are_refused_with_the_column_and_function_named(
     rounded = t.tidy({"x": [2.675]}) >> t.mutate(r=t.round("x", 2))
     with pytest.raises(t.ExportError, match=r"column 'r' .*round\(\)"):
         rounded.to_polars_code()
+    half_up = t.tidy({"x": [2.675]}) >> t.mutate(r=t.round_half_up("x", 2))
+    with pytest.raises(t.ExportError, match=r"column 'r' .*round_half_up\(\), which follows janitor"):
+        half_up.to_polars_code()
 
 
 def test_type_dependent_helpers_compile_to_plain_polars():

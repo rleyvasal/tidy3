@@ -96,6 +96,7 @@ from tidy3.helpers import (
     is_nan,
     pmax,
     pmin,
+    round_half_up,
     row_means,
     row_sums,
 )
@@ -652,6 +653,7 @@ __all__ = [
     "floor",
     "ceiling",
     "round",
+    "round_half_up",
     "pmin",
     "pmax",
     "row_sums",

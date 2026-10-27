@@ -180,6 +180,28 @@ run_case <- function(case_name) switch(
       result
     }
   },
+  janitor_round_half_up = {
+    if (!requireNamespace("janitor", quietly=TRUE)) {
+      list(skip=TRUE, reason="janitor is not installed")
+    } else {
+      # Every value to 17 significant digits, so a difference in the last
+      # bit shows; JSON's 15 digits would hide it. Huge inputs are built by
+      # arithmetic: R reads literals such as 1e300 a few bits off.
+      exact <- function(x) ifelse(is.nan(x), "NaN", ifelse(is.na(x), "NA", sprintf("%.17g", x)))
+      grid <- (-3000:3000) / 1000
+      special <- c(0.5, 1.5, 2.5, -0.5, -2.5, 0.125, 0.285, 2.675, 1.005, 0.0005, -1.005,
+                   2.4999999999, 2.4999999, 0.49999999999999994, 2^52 - 0.5,
+                   1e15 + 0.3, 12345.6789, -0.4, 0, -0, 5e-324, 10^300, 1.5 * 2^1023,
+                   NA, NaN, Inf, -Inf)
+      result <- list()
+      for (digits in -2:3) result[[paste0("grid_", digits)]] <- exact(janitor::round_half_up(grid, digits))
+      for (digits in c(-3, -1, 0, 1, 2, 5, 20, 400)) {
+        result[[paste0("special_", digits)]] <- exact(janitor::round_half_up(special, digits))
+      }
+      result$integers <- exact(janitor::round_half_up(c(15L, 25L, -25L, 149L, NA), -1))
+      result
+    }
+  },
   janitor_tabyl = {
     if (!requireNamespace("janitor", quietly=TRUE)) {
       list(skip=TRUE, reason="janitor is not installed")

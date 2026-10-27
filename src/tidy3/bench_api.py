@@ -708,6 +708,7 @@ def _cases() -> list[Case]:
     col("floor", "expr", ["floor"], lambda t, df: t.floor("bill"), lambda df: pl.col("bill").floor())
     col("ceiling", "expr", ["ceiling"], lambda t, df: t.ceiling("bill"), lambda df: pl.col("bill").ceil())
     col("round", "expr", ["round"], lambda t, df: t.round("bill", 1), lambda df: pl.col("bill").round(1))
+    col("round_half_up", "expr", ["round_half_up"], lambda t, df: t.round_half_up("bill"), lambda df: pl.col("bill").round(0, mode="half_away_from_zero"))
     col("pmin", "expr", ["pmin"], lambda t, df: t.pmin("mass", "bill"), lambda df: pl.min_horizontal("mass", "bill"))
     col("pmax", "expr", ["pmax"], lambda t, df: t.pmax("mass", "bill"), lambda df: pl.max_horizontal("mass", "bill"))
     col("row_sums", "expr", ["row_sums"], lambda t, df: t.row_sums("mass", "bill", na_rm=True), lambda df: pl.sum_horizontal("mass", "bill"))

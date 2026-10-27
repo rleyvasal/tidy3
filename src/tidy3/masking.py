@@ -185,7 +185,7 @@ _FIRST_COLUMN_ARG = frozenset(
         "first", "last", "nth", "lead", "lag", "cummean", "cumall", "cumany",
         "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist",
         "ntile", "case_match", "recode", "recode_values", "replace_values",
-        "replace_when", "any", "all", "abs", "round", "floor", "ceiling",
+        "replace_when", "any", "all", "abs", "round", "round_half_up", "floor", "ceiling",
         "is_na", "is_nan", "is_finite", "is_infinite",
         "as_numeric", "as_double", "as_integer", "as_character", "as_string",
         "as_logical",
