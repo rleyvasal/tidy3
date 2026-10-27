@@ -886,6 +886,34 @@ run_case <- function(case_name) switch(
       list(persistent=payload(persistent), transient=payload(transient))
     }
   },
+  factor_reorder_text = {
+    if (!requireNamespace("forcats", quietly=TRUE)) {
+      list(skip=TRUE, reason="forcats is not installed")
+    } else {
+      # Text levels within groups, a NaN summary (the mean of Inf and -Inf,
+      # last either way), nested and computed calls. forcats raises when a
+      # text level loses every x to .na_rm, so each level keeps one value.
+      d <- tibble(g=c(2L, 2L, 2L, 2L, 2L, 1L, 1L, 1L, 1L, 1L), s=c("a", "b", "a", "c", "b", "b", "c", "c", "a", "a"),
+                  x=c(3, NA, 1, Inf, 4, 2, -Inf, Inf, NA, 5))
+      calls <- list(
+        mean_remove=quote(forcats::fct_reorder(s, x, mean, .na_rm=TRUE)),
+        mean_desc=quote(forcats::fct_reorder(s, x, mean, .na_rm=TRUE, .desc=TRUE)),
+        keep=quote(forcats::fct_reorder(s, x, mean, .na_rm=FALSE)),
+        max_desc=quote(forcats::fct_reorder(s, x, max, .na_rm=TRUE, .desc=TRUE)),
+        nested=quote(forcats::fct_rev(forcats::fct_reorder(s, x, median, .na_rm=TRUE))),
+        computed=quote(forcats::fct_reorder(s, x * 2 + 1, sum, .na_rm=TRUE, .desc=TRUE))
+      )
+      payload <- function(df) list(values=as.character(df$species), levels=levels(df$species))
+      result <- list()
+      for (name in names(calls)) {
+        call <- calls[[name]]
+        result[[paste0("persistent_", name)]] <- payload(suppressWarnings(d |> group_by(g) |> mutate(species=!!call)))
+        result[[paste0("transient_", name)]] <- payload(suppressWarnings(d |> mutate(species=!!call, .by=g)))
+        result[[paste0("ungrouped_", name)]] <- payload(suppressWarnings(d |> mutate(species=!!call)))
+      }
+      result
+    }
+  },
   factor_missing = {
     if (!requireNamespace("forcats", quietly=TRUE)) {
       list(skip=TRUE, reason="forcats is not installed")

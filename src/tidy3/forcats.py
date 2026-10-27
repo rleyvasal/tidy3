@@ -308,14 +308,29 @@ class Factor:
     dtype, String or an Enum, until a function changes them, so a function
     that only reorders levels never rewrites 100,000 values; ``to_enum``
     recasts an Enum straight to the new levels.
+
+    Text's levels are its distinct values, sorted. They are read when first
+    needed (``levels=None``), so a function that groups the rows by value
+    anyway, as fct_reorder does, finds them in the same pass.
     """
 
-    __slots__ = ("values", "levels", "ordered")
+    __slots__ = ("values", "_levels", "ordered")
 
-    def __init__(self, values: pl.Series, levels: list[str], ordered: bool) -> None:
+    def __init__(self, values: pl.Series, levels: list[str] | None, ordered: bool) -> None:
         self.values = values
-        self.levels = list(levels)
+        self._levels = None if levels is None else list(levels)
         self.ordered = bool(ordered)
+
+    @property
+    def levels(self) -> list[str]:
+        if self._levels is None:
+            self._levels = sorted(self.strings().drop_nulls().unique().to_list())
+        return self._levels
+
+    @property
+    def unread(self) -> bool:
+        """Text whose levels have not been read yet."""
+        return self._levels is None
 
     def __len__(self) -> int:
         return len(self.values)
@@ -424,8 +439,7 @@ def _factor(value: Any, levels: list[str] | None = None, *, ordered: bool | None
         series = series.cast(pl.String)
     if series.dtype != pl.String:
         raise TypeError("factor input must be a character or categorical column")
-    categories = sorted(series.drop_nulls().unique().to_list()) if levels is None else levels
-    return Factor(series, categories, False if ordered is None else ordered)
+    return Factor(series, levels, False if ordered is None else ordered)
 
 
 def _as_factor(value: Any) -> Factor:
@@ -567,6 +581,77 @@ def _reorder_scores(
     ]
 
 
+def _fusable(fun: Any, kwargs: dict[str, Any]) -> bool:
+    """A tidy3 aggregation whose other arguments read no columns.
+
+    Such a summary can drop missing x inside the aggregation; an argument
+    that reads a column (``order_by=``) needs the rows filtered first, so the
+    two stay aligned.
+    """
+    return _tidy3_summary(fun) and not any(isinstance(value, (Expr, pl.Expr)) for value in kwargs.values())
+
+
+def _reorder_pairs(
+    rows: pl.DataFrame, by: list[str], fun: Any, kwargs: dict[str, Any], na_rm: bool | None, default: Any,
+    desc: bool,
+) -> pl.DataFrame:
+    """fct_reorder on text in one aggregation over *rows* (*by*, ``__level``, ``x``).
+
+    Grouping the rows by value finds each group's levels and summarises x
+    in the same pass. Missing x values are dropped inside the aggregation,
+    so a level whose x values are all missing still appears; its count of
+    kept rows, zero, tells it apart from a summary that is missing itself,
+    and it takes *default*, as forcats' ``tapply(default=)`` gives it. The
+    result has the *by* columns, ``__level``, ``__count`` (the level's rows),
+    and ``__key`` (its score), sorted once into its final order: by group,
+    then by score with missing and NaN last, ties by level (text's level
+    order).
+    """
+    from tidy3.expr import to_polars
+
+    x = pl.col("x")
+    kept = x if na_rm is False else x.drop_nulls()
+    fallback = pl.lit(None if _scalar_missing(default) else float(default), dtype=pl.Float64)
+    pairs = rows.group_by([*by, "__level"]).agg(
+        pl.len().cast(pl.Float64).alias("__count"),
+        (pl.len() if na_rm is False else x.count()).alias("__kept"),
+        to_polars(fun(kept, **kwargs)).alias("__score"),
+    )
+    if isinstance(pairs.schema["__score"], pl.List):
+        raise ValueError("fct_reorder() fun must return one value per level")
+    key = pl.when(pl.col("__kept") == 0).then(fallback).otherwise(pl.col("__score").cast(pl.Float64))
+    return pairs.select(*by, "__level", "__count", __key=key.fill_nan(None)).sort(
+        [*by, "__key", "__level"], descending=[False] * len(by) + [desc, False], nulls_last=True,
+    )
+
+
+def _by_score(pairs: pl.DataFrame, desc: bool) -> pl.DataFrame:
+    """*pairs* by ``__key``, ties in their existing order.
+
+    Missing and NaN scores sort last in either direction, as R's ``order()``
+    puts NA and NaN.
+    """
+    return pairs.with_columns(pl.col("__key").fill_nan(None)).sort(
+        "__key", descending=desc, nulls_last=True, maintain_order=True
+    )
+
+
+def _reorder(source: Factor, x: pl.Series, kw: dict[str, Any]) -> Factor:
+    """fct_reorder on one factor (ungrouped, or one group's rows)."""
+    if not (x.dtype.is_numeric() or x.dtype == pl.Boolean) and not x.drop_nulls().is_empty():
+        raise TypeError("fct_reorder() x must be numeric")
+    if kw["na_rm"] is None and x.null_count():
+        warnings.warn("fct_reorder(): removing missing x values; set na_rm=True to silence", UserWarning, stacklevel=4)
+    if source.unread and _fusable(kw["fun"], kw["fun_kwargs"]):
+        rows = pl.DataFrame({"__level": source.strings(), "x": x}).drop_nulls("__level")
+        pairs = _reorder_pairs(rows, [], kw["fun"], kw["fun_kwargs"], kw["na_rm"], kw["default"], kw["desc"])
+        return source.with_levels(pairs["__level"].to_list())
+    levels = source.levels
+    keep = x.is_not_null() if kw["na_rm"] is not False else None
+    scores = _reorder_scores(source, x, keep, kw["fun"], kw["fun_kwargs"], kw["default"])
+    return source.with_levels([levels[i] for i in _score_order(scores, kw["desc"])])
+
+
 def _reorder2_levels(source: Factor, x: pl.Series, y: pl.Series, kw: dict[str, Any]) -> list[str]:
     missing = x.is_null() | y.is_null()
     na_rm = kw["na_rm"]
@@ -666,6 +751,8 @@ def _apply(name: str, source: Factor, args: tuple[Any, ...], kw: dict[str, Any])
     """Run one factor function on *source*; *args* are Series of its length."""
     if name not in _ORDERING_FUNCTIONS:
         return _change_levels(name, source, args, kw)
+    if name == "fct_reorder":
+        return _reorder(source, args[0], kw)
     levels = source.levels
     ordered = source.ordered
     if name == "fct_rev":
@@ -689,15 +776,6 @@ def _apply(name: str, source: Factor, args: tuple[Any, ...], kw: dict[str, Any])
         scores = _level_totals(source, _weights("fct_infreq", len(source), args, finite=False))
         result = [levels[i] for i in sorted(range(len(levels)), key=lambda i: -scores[i])]
         ordered = ordered if kw["ordered"] is None else kw["ordered"]
-    else:
-        x = args[0]
-        if not (x.dtype.is_numeric() or x.dtype == pl.Boolean) and not x.drop_nulls().is_empty():
-            raise TypeError("fct_reorder() x must be numeric")
-        if kw["na_rm"] is None and x.null_count():
-            warnings.warn("fct_reorder(): removing missing x values; set na_rm=True to silence", UserWarning, stacklevel=3)
-        keep = x.is_not_null() if kw["na_rm"] is not False else None
-        scores = _reorder_scores(source, x, keep, kw["fun"], kw["fun_kwargs"], kw["default"])
-        result = [levels[i] for i in _score_order(scores, kw["desc"])]
     return source.with_levels(result, ordered)
 
 
@@ -789,12 +867,17 @@ def _g_union(g: _Grouped, ctx: _Context) -> list[str]:
     """The groups' level lists joined in group order, each adding new levels."""
     if g.uniform is not None:
         return list(g.uniform)
+    # A level table keeps each group's rows in position order (see
+    # _g_order), so a stable sort by group alone gives the group-then-
+    # position order, at a third of the cost of sorting by both.
     if ctx.sort_groups:
-        ordered = g.levels.sort([*g.by, "__pos"], nulls_last=True)
+        ordered = g.levels.sort(g.by, nulls_last=True, maintain_order=True)
     else:
         # Appearance order: the rows' first group first.
         order = g.keys.unique(maintain_order=True).with_row_index("__tidy3_gid")
-        ordered = g.levels.join(order, on=g.by, how="left", nulls_equal=True).sort(["__tidy3_gid", "__pos"])
+        ordered = g.levels.join(order, on=g.by, how="left", nulls_equal=True, maintain_order="left").sort(
+            "__tidy3_gid", maintain_order=True
+        )
     return ordered["__level"].unique(maintain_order=True).to_list()
 
 
@@ -817,6 +900,9 @@ class _Grouped:
         self, keys: pl.DataFrame, values: pl.Series, levels: pl.DataFrame | None, ordered: bool,
         *, uniform: list[str] | None = None,
     ) -> None:
+        # ``levels`` None with no ``uniform`` list is text whose level table
+        # is built when first needed: each group's distinct values, sorted,
+        # with their row counts. fct_reorder builds it with its scores.
         self.keys = keys
         self.by = keys.columns
         self.values = values
@@ -835,8 +921,21 @@ class _Grouped:
     @property
     def levels(self) -> pl.DataFrame:
         if self._levels is None:
-            self._levels = _g_all_levels(self.keys.unique(), self.uniform or [])
+            if self.uniform is not None:
+                self._levels = _g_all_levels(self.keys.unique(), self.uniform)
+            else:
+                counts = (
+                    self.rows().drop_nulls("__level")
+                    .group_by(self.on).agg(pl.len().cast(pl.Float64).alias("__count"))
+                    .sort("__level")
+                )
+                self._levels = _g_order(counts, self.by, counts=True)
         return self._levels
+
+    @property
+    def unread(self) -> bool:
+        """Text whose level table has not been built yet."""
+        return self._levels is None and self.uniform is None
 
     @property
     def on(self) -> list[str]:
@@ -871,7 +970,9 @@ def _g_order(levels: pl.DataFrame, by: list[str], *, counts: bool = False) -> pl
     """Fix the levels' current row order as ``__pos``.
 
     Positions are row numbers over the whole table: within a group they
-    order its levels, which is all later sorts need.
+    order its levels, which is all later sorts need. Every level table
+    except a uniform one passes through here, so its rows are always in
+    position order; _g_union relies on that.
     """
     kept = ["__count"] if counts and "__count" in levels.columns else []
     return levels.select(*by, "__level", *kept).with_row_index("__pos").with_columns(pl.col("__pos").cast(pl.Int64))
@@ -910,13 +1011,7 @@ def _g_source(name: str, value: Any, keys: pl.DataFrame) -> _Grouped:
     if series.dtype != pl.String:
         raise TypeError("factor input must be a character or categorical column")
     _g_lengths(name, keys, series)
-    by = keys.columns
-    counts = (
-        keys.with_columns(__level=series).drop_nulls("__level")
-        .group_by([*by, "__level"]).agg(pl.len().cast(pl.Float64).alias("__count"))
-        .sort("__level")
-    )
-    return _Grouped(keys, series, _g_order(counts, by, counts=True), False)
+    return _Grouped(keys, series, None, False)
 
 
 def _g_as_factor(value: Any, keys: pl.DataFrame) -> _Grouped:
@@ -1032,8 +1127,8 @@ def _g_requested(groups: pl.DataFrame, levels: list[str]) -> pl.DataFrame:
 
 
 def _g_sort_scores(pairs: pl.DataFrame, desc: bool) -> pl.DataFrame:
-    """Each group's levels by ``__key``, missing last, ties in their existing order."""
-    return pairs.sort("__pos").sort("__key", descending=desc, nulls_last=True, maintain_order=True)
+    """Each group's levels by ``__key``, missing and NaN last, ties in their existing order."""
+    return _by_score(pairs.sort("__pos"), desc)
 
 
 def _g_summaries(
@@ -1270,6 +1365,10 @@ def _g_apply(name: str, g: _Grouped, args: tuple[pl.Series, ...], kw: dict[str, 
         raise TypeError("fct_reorder() x must be numeric")
     if kw["na_rm"] is None and x.null_count():
         warnings.warn("fct_reorder(): removing missing x values; set na_rm=True to silence", UserWarning, stacklevel=5)
+    if g.unread and _fusable(kw["fun"], kw["fun_kwargs"]):
+        rows = g.rows(x=x).drop_nulls("__level")
+        pairs = _reorder_pairs(rows, g.by, kw["fun"], kw["fun_kwargs"], kw["na_rm"], kw["default"], kw["desc"])
+        return g.with_levels(pairs, counts=True)
     values = g.rows(x=x).drop_nulls("__level")
     if kw["na_rm"] is not False:
         values = values.filter(pl.col("x").is_not_null())

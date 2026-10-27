@@ -115,6 +115,57 @@ def test_reorder_summary_and_missing_values():
     assert levels(frame >> t.mutate(species=t.fct_reorder("species", "mass", na_rm=False, desc=True))) == ["Adelie", "Gentoo"]
 
 
+@pytest.mark.parametrize("by", [None, "g"])
+def test_reorder_puts_nan_summaries_last_in_either_direction(by):
+    # mean(c(Inf, -Inf)) is NaN. R's order() puts NaN last whether or not it
+    # is decreasing, so forcats gives c, b, a and b, c, a.
+    frame = t.tidy({"g": [1, 1, 1, 1], "species": ["a", "a", "b", "c"], "mass": [math.inf, -math.inf, 2.0, 1.0]})
+    if by:
+        frame = frame >> t.group_by(by)
+    for desc, expected in [(False, ["c", "b", "a"]), (True, ["b", "c", "a"])]:
+        assert levels(frame >> t.mutate(species=t.fct_reorder("species", "mass", t.mean, desc=desc))) == expected
+
+
+@pytest.mark.parametrize("by", [None, "g"])
+def test_text_reorder_tells_an_empty_level_from_a_missing_summary(by):
+    # "b" keeps no mass once missing values are removed, so it takes the
+    # default; "c" keeps one value, whose standard deviation is missing, so
+    # it sorts last despite the default being lower than every score.
+    frame = t.tidy({"g": [1] * 5, "species": ["a", "a", "b", "c", "a"], "mass": [1.0, 3.0, None, 4.0, 2.0]})
+    if by:
+        frame = frame >> t.group_by(by)
+    call = t.fct_reorder("species", "mass", t.sd, na_rm=True, default=-1.0)
+    assert levels(frame >> t.mutate(species=call)) == ["b", "a", "c"]
+
+
+@pytest.mark.parametrize("call", [
+    t.fct_reorder("species", "mass", t.mean, na_rm=True),
+    t.fct_reorder("species", "mass", t.median, na_rm=False, desc=True),
+    t.fct_reorder("species", t.col("mass") * -1, t.max, na_rm=True),
+    t.fct_rev(t.fct_reorder("species", "mass", t.sum, na_rm=True, min_count=2, default=0.0)),
+    t.fct_reorder(t.str_to_upper("species"), "mass", t.min, na_rm=True),
+    t.fct_reorder("species", "mass", lambda x: x.max(), na_rm=True),
+], ids=["mean", "median_keep", "computed_x", "nested", "computed_source", "callable"])
+def test_grouped_text_reorder_joins_each_groups_own_levels(call):
+    data = {
+        "g": [2, 2, 2, 2, 1, 1, 1, 1, 1, 3],
+        "species": ["b", "a", "c", "a", "c", "c", "b", "d", None, "a"],
+        "mass": [4.0, 1.0, None, 2.0, 5.0, 1.0, 3.0, None, 9.0, 7.0],
+    }
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        grouped = levels(t.tidy(data) >> t.group_by("g") >> t.mutate(species=call))
+        expected: list[str] = []
+        for group in sorted(set(data["g"])):
+            rows = {name: [v for v, g in zip(values, data["g"]) if g == group] for name, values in data.items()}
+            for level in levels(t.tidy(rows) >> t.mutate(species=call)):
+                if level not in expected:
+                    expected.append(level)
+    assert grouped == expected
+
+
 @pytest.mark.parametrize("transient", [False, True])
 def test_grouped_character_factors_reconcile_in_group_order(transient):
     frame = t.tidy({"island": ["b", "a", "b", "a"], "species": ["Gentoo", "Adelie", "Gentoo", "Adelie"]})

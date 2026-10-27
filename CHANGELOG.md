@@ -4,6 +4,17 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- `fct_reorder()` on a text column finds the levels and computes their summaries in one aggregation, where it made one pass to find the levels and another to summarise. Missing x values are dropped inside the aggregation, and each level's count of kept rows tells a level whose x values are all missing, which takes `default`, from a summary that is itself missing, so results are unchanged. This applies grouped and ungrouped, inside nested calls such as `fct_rev(fct_reorder(...))`, and with a computed x. On 100,000 rows: 200 groups 3.4 to 2.2 ms, 20,000 groups 11.2 to 6.6 ms, ungrouped 2.2 to 1.7 ms; on 1,000,000 rows with 200 groups 17.8 to 12.6 ms. A Python callable, a factor (Enum) source, or a summary with an argument that reads a column (`order_by=`) runs as before.
+- Joining the groups' levels sorts the level table by group alone, since each group's levels are already in position order: a third of the cost of sorting by group and position.
+
+### Fixed
+
+- Grouped `fct_reorder()` and `fct_reorder2()` put a level whose summary is NaN (the mean of `Inf` and `-Inf`) first with `desc=True`; it now sorts last in either direction, as forcats does through R's `order()`, and as ungrouped calls already did. Checked against forcats in a new R oracle case of grouped, transient, and ungrouped text reorders.
+
 ## 0.12.0 — 2026-10-26
 
 pandas is now optional: tidy3 runs on Polars alone, and pandas is needed only to move data to and from pandas.

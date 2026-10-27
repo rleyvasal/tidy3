@@ -2399,6 +2399,30 @@ def _factor_grouped():
     }
 
 
+def _factor_reorder_text():
+    import tidy3 as t3
+
+    inf = float("inf")
+    frame = tidy({"g": [2, 2, 2, 2, 2, 1, 1, 1, 1, 1], "s": ["a", "b", "a", "c", "b", "b", "c", "c", "a", "a"],
+                  "x": [3., None, 1., inf, 4., 2., -inf, inf, None, 5.]})
+    calls = {
+        "mean_remove": t3.fct_reorder("s", "x", t3.mean, na_rm=True),
+        "mean_desc": t3.fct_reorder("s", "x", t3.mean, na_rm=True, desc=True),
+        "keep": t3.fct_reorder("s", "x", t3.mean, na_rm=False),
+        "max_desc": t3.fct_reorder("s", "x", t3.max, na_rm=True, desc=True),
+        "nested": t3.fct_rev(t3.fct_reorder("s", "x", t3.median, na_rm=True)),
+        "computed": t3.fct_reorder("s", col("x") * 2 + 1, t3.sum, na_rm=True, desc=True),
+    }
+    result = {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for name, expr in calls.items():
+            result[f"persistent_{name}"] = _factor_payload(frame >> group_by("g") >> mutate(species=expr))
+            result[f"transient_{name}"] = _factor_payload(frame >> mutate(species=expr, by="g"))
+            result[f"ungrouped_{name}"] = _factor_payload(frame >> mutate(species=expr))
+    return result
+
+
 def _factor_missing():
     import tidy3 as t3
 
@@ -2862,6 +2886,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "factor_values": _factor_values,
     "factor_levels": _factor_levels,
     "factor_grouped": _factor_grouped,
+    "factor_reorder_text": _factor_reorder_text,
     "factor_missing": _factor_missing,
     "filter_missing": _filter_missing,
     "filter_out_missing": _filter_out_missing,
