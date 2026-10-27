@@ -4,7 +4,9 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.12.1 — 2026-10-26
+
+`fct_reorder()` on text finds its levels and summaries in one aggregation, and grouped reorders sort NaN summaries last with `desc=True`.
 
 ### Changed
 
