@@ -53,10 +53,16 @@ def tabyl(
     if not isinstance(column, (str, Expr, pl.Expr, Selector)):
         if column2 is not None or column3 is not None:
             raise TypeError("tabyl() with two or three variables requires frame column selections")
-        import pandas as pd
-
         name = str(getattr(column, "name", None) or "x")
-        source = tidy(column.rename(name).to_frame()) if isinstance(column, pl.Series) else tidy(pd.DataFrame({name: column}))
+        if isinstance(column, pl.Series):
+            source = tidy(column.rename(name).to_frame())
+        else:
+            pd = sys.modules.get("pandas")
+            if pd is not None and isinstance(column, (pd.Series, pd.Categorical, pd.Index)):
+                # A pandas frame keeps a categorical's levels and ordered flag.
+                source = tidy(pd.DataFrame({name: column}))
+            else:
+                source = tidy({name: list(column)})
         return source >> tabyl(
             name, show_na=show_na, show_missing_levels=show_missing_levels,
         )
@@ -820,17 +826,12 @@ def _bool(name: str, value: Any) -> None:
 def _missing(value: Any) -> bool:
     if value is None:
         return True
-    if isinstance(value, float) and math.isnan(value):
+    if isinstance(value, (float, np.floating)) and math.isnan(value):
         return True
-    try:
-        import pandas as pd
-
-        if value is pd.NA or value is pd.NaT:
-            return True
-        flag = pd.isna(value)
-    except (TypeError, ValueError):
-        return False
-    return bool(flag) if isinstance(flag, bool) else False
+    if isinstance(value, (np.datetime64, np.timedelta64)):
+        return bool(np.isnat(value))
+    pd = sys.modules.get("pandas")
+    return pd is not None and (value is pd.NA or value is pd.NaT)
 
 
 def _which(which: Any) -> tuple[str, ...]:

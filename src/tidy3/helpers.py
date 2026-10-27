@@ -1,8 +1,8 @@
 """Column helpers for missing values, math, and row-wise totals.
 
 Each helper builds a backend-neutral expression, so it runs inside
-``mutate``, ``filter``, ``summarise``, and ``across`` on Polars and on
-pandas. ``abs`` and ``round`` share names with Python built-ins, as
+``mutate``, ``filter``, ``summarise``, and ``across``. ``abs`` and
+``round`` share names with Python built-ins, as
 ``sum``, ``min``, ``max``, ``any``, and ``all`` already do.
 """
 
@@ -12,7 +12,6 @@ import math
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import polars as pl
 
 from tidy3.expr import Expr, _func, col
@@ -139,9 +138,8 @@ def is_na(x: Any) -> Expr:
 def is_nan(x: Any) -> Expr:
     """True only for NaN, not for null.
 
-    On the pandas backend a missing float is stored as one value, so a
-    missing float is both ``is_na`` and ``is_nan``. Polars keeps them apart:
-    null is not NaN.
+    pandas stores a missing float as NaN, so there a missing float is both
+    ``is_na`` and ``is_nan``. Polars keeps them apart: null is not NaN.
     """
     return _func("is_nan", _value(x))
 
@@ -266,37 +264,6 @@ def _polars_flag(name: str, series: pl.Series) -> pl.Series:
         return series.is_not_null()
     return pl.repeat(False, series.len(), dtype=pl.Boolean, eager=True)
 
-
-def _pandas_flags(series: pd.Series) -> dict[str, pd.Series]:
-    index = series.index
-    false = pd.Series(False, index=index)
-    missing = series.isna()
-    if pd.api.types.is_float_dtype(series):
-        values = series.to_numpy(dtype=float, na_value=np.nan)
-        nan_values = np.isnan(values)
-        if isinstance(series.dtype, pd.api.extensions.ExtensionDtype):
-            # A nullable Float64 keeps NA apart from NaN: NA is not NaN.
-            nan_values &= ~missing.to_numpy()
-        nan = pd.Series(nan_values, index=index)
-        infinite = pd.Series(np.isinf(values), index=index)
-        finite = pd.Series(np.isfinite(values), index=index)
-        # float64 stores null as NaN, so those rows are both is_na and is_nan.
-        return {
-            "is_na": missing | nan,
-            "is_nan": nan,
-            "is_finite": finite,
-            "is_infinite": infinite,
-        }
-    if pd.api.types.is_bool_dtype(series):
-        return {"is_na": missing, "is_nan": false, "is_finite": false, "is_infinite": false}
-    if pd.api.types.is_integer_dtype(series) or pd.api.types.is_numeric_dtype(series):
-        return {
-            "is_na": missing,
-            "is_nan": false,
-            "is_finite": ~missing,
-            "is_infinite": false,
-        }
-    return {"is_na": missing, "is_nan": false, "is_finite": false, "is_infinite": false}
 
 
 def _native_flag(name: str, value: pl.Expr, dtype: Any) -> pl.Expr:
@@ -528,101 +495,3 @@ def compile_polars(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> 
     raise ValueError(f"unknown helper: {name}")
 
 
-def _as_series(value: Any, index: pd.Index) -> pd.Series:
-    if isinstance(value, pd.Series):
-        return value.reindex(index)
-    return pd.Series(value, index=index)
-
-
-def _nan_as_missing(frame: pd.DataFrame) -> pd.DataFrame:
-    """NaN counts as missing, as in R.
-
-    NumPy float and object columns already treat NaN as missing; only a
-    nullable Float64 column keeps NaN apart from NA, so only it changes.
-    """
-    positions = [
-        position for position, dtype in enumerate(frame.dtypes)
-        if isinstance(dtype, pd.api.extensions.ExtensionDtype) and pd.api.types.is_float_dtype(dtype)
-    ]
-    if not positions:
-        return frame
-    frame = frame.copy()
-    for position in positions:
-        column = frame.iloc[:, position]
-        frame.isetitem(position, column.mask(np.isnan(column.to_numpy(dtype=float, na_value=np.nan))))
-    return frame
-
-
-def _pandas_pair(name: str, args: tuple[Any, ...], na_rm: bool, index: pd.Index) -> pd.Series:
-    frame = _nan_as_missing(pd.concat([_as_series(arg, index) for arg in args], axis=1))
-    result = frame.min(axis=1, skipna=na_rm) if name == "pmin" else frame.max(axis=1, skipna=na_rm)
-    return result
-
-
-def _pandas_rows(
-    operation: str,
-    args: tuple[Any, ...],
-    *,
-    na_rm: bool,
-    min_count: int | None,
-    index: pd.Index,
-) -> pd.Series:
-    if not args:
-        fill = np.nan if operation == "mean" or min_count else 0
-        return pd.Series(fill, index=index)
-    frame = _nan_as_missing(pd.concat([_as_series(arg, index) for arg in args], axis=1))
-    present = frame.notna().sum(axis=1)
-    if na_rm:
-        total = frame.sum(axis=1, min_count=0)
-    else:
-        total = frame.sum(axis=1, min_count=frame.shape[1])
-    if operation == "mean":
-        result = total / present.replace(0, np.nan)
-        result = result.mask(present == 0)
-    else:
-        result = total
-        if min_count:
-            result = result.mask(present < min_count)
-    return result
-
-
-def eval_pandas(
-    name: str,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    df: pd.DataFrame,
-) -> Any:
-    """Evaluate a helper against a pandas frame."""
-    # Inputs keep their own index: inside a grouped summarise, mean(hp) has
-    # one value per group, indexed by group, not one per row of *df*.
-    index = next((arg.index for arg in args if isinstance(arg, pd.Series)), df.index)
-    if name in _FLAGS:
-        series = _as_series(args[0], index)
-        return _pandas_flags(series)[name]
-    series = _as_series(args[0], index) if args else None
-    if name == "abs":
-        return series.abs()
-    if name == "floor":
-        return np.floor(series)
-    if name == "ceiling":
-        return np.ceil(series)
-    if name == "round":
-        digits = int(kwargs["digits"])
-        if pd.api.types.is_integer_dtype(series) and digits >= 0:
-            return series
-        values = series.to_numpy(dtype=float, na_value=np.nan)
-        rounded = pd.Series(_round_numpy(values, digits), index=series.index)
-        if pd.api.types.is_integer_dtype(series):
-            return rounded.astype(series.dtype)
-        return rounded
-    if name in _PAIRS:
-        return _pandas_pair(name, args, bool(kwargs["na_rm"]), index)
-    if name in _ROWS:
-        return _pandas_rows(
-            "sum" if name == "row_sums" else "mean",
-            args,
-            na_rm=bool(kwargs["na_rm"]),
-            min_count=kwargs.get("min_count"),
-            index=index,
-        )
-    raise ValueError(f"unknown helper: {name}")

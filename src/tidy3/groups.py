@@ -14,11 +14,11 @@ first group's rows. Subtract 1 to index a pandas frame or NumPy array.
 from __future__ import annotations
 
 import inspect
+import sys
 
 from typing import Any, Callable
 
 import numpy as np
-import pandas as pd
 import polars as pl
 
 from tidy3.eda import _MISSING, _pipeable
@@ -52,7 +52,10 @@ def _levels(tf: Any, name: str) -> list[Any] | None:
 
 
 def _missing(value: Any) -> bool:
-    return value is None or value is pd.NA or (isinstance(value, float) and value != value)
+    if value is None or (isinstance(value, float) and value != value):
+        return True
+    pd = sys.modules.get("pandas")
+    return pd is not None and (value is pd.NA or value is pd.NaT)
 
 
 def _key(values: Any) -> tuple:

@@ -159,9 +159,11 @@ performance matters.
 
 ## pandas input and output
 
-tidy3 runs on Polars. A pandas DataFrame is accepted wherever a frame is, and
-becomes a lazy Polars frame that keeps its factor levels and ordered flags.
-`collect(as_="pandas")` hands a result back to pandas, restoring those levels:
+tidy3 runs on Polars, and pandas is an optional dependency: install it with
+`pip install "tidy3[pandas]"`. With it, a pandas DataFrame is accepted
+wherever a frame is, and becomes a lazy Polars frame that keeps its factor
+levels and ordered flags. `collect(as_="pandas")` hands a result back to
+pandas, restoring those levels:
 
 ```python
 import pandas as pd
@@ -553,8 +555,8 @@ does the same for a group.
 
 `as_double` (also `as_numeric`), `as_integer`, `as_character` (also
 `as_string`), `as_logical`, `as_date`, and `as_datetime` share one
-converter. `strict=True` raises `ConversionError` at collect time on Polars
-and when `mutate` runs on pandas. The message names the function you
+converter. `strict=True` raises `ConversionError` at collect time. The
+message names the function you
 called (`as_numeric` or `as_double`, `as_string` or `as_character`), the
 column, and up to five bad values.
 `strict=False` turns those values into missing and records them for
@@ -1085,11 +1087,17 @@ mutations; `as_factor` also covers numeric and logical columns, and
 `fct_reorder2` covers `last2` and `first2`. **Other factor mutations compute a
 snapshot**, including the source frame, and later verbs build a lazy plan on
 that snapshot: nested calls, factor (Enum) inputs, grouped value changes,
-callables, and float columns holding NaN. That path uses Python callbacks.
-Other mutations stay lazy.
+callables, and float columns holding NaN. Grouped calls compute every
+group's levels at once. A tidy3 aggregation passed as `fun=` (`median`,
+`mean`, `sum`, `min`, `max`, and the others) runs as one Polars aggregation
+over every group and level; any other Python callable runs once per group
+and level on the Polars Series collected for it, so prefer the aggregation
+when one fits. Other mutations stay lazy.
 
-A list, pandas categorical/Series, or Polars Series runs immediately and
-returns a pandas categorical. Character input starts with levels sorted in
+A list, pandas categorical/Series, or Polars Series runs immediately. A
+Polars Series returns a Polars Enum Series; a list or pandas input returns a
+pandas categorical when pandas is installed, and a Polars Enum Series
+otherwise. Character input starts with levels sorted in
 Unicode order; R's character-to-factor sorting depends on locale. Existing
 categorical input preserves its order. `fct_infreq(ordered=)` controls the
 pandas ordered flag; Polars Enums always carry an explicit sort order. The

@@ -256,12 +256,10 @@ def test_parse_time_strict_stop_for_problems_and_validation():
 
 
 def test_pandas_columns_use_the_same_rules():
-    from tidy3.convert import eval_pandas
-
     df = pd.DataFrame({"x": ["12:34", "bad", None]})
-    times = eval_pandas("parse_time", (df["x"],), {"format": ""}, df, column="x")
+    times = (t.tidy(df) >> t.mutate(p=t.parse_time("x"))).collect(as_="pandas")["p"]
     assert times.tolist() == [time(12, 34), None, None]
-    df = pd.DataFrame({"x": ["2024-02-29 12", 20240229, None]}, dtype=object)
-    parsed = eval_pandas("parse_date_time", (df["x"],), {"orders": ["ymd H", "ymd"]}, df, column="x")
+    df = pd.DataFrame({"x": ["2024-02-29 12", "20240229", None]})
+    parsed = (t.tidy(df) >> t.mutate(p=t.parse_date_time("x", orders=["ymd H", "ymd"]))).collect(as_="pandas")["p"]
     assert str(parsed.dtype) == "datetime64[us, UTC]"
     assert parsed.tolist()[:2] == [pd.Timestamp("2024-02-29 12:00", tz="UTC"), pd.Timestamp("2024-02-29", tz="UTC")]

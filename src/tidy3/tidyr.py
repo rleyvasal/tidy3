@@ -295,23 +295,12 @@ def _factor_units(tf: Any, specs: tuple[Any, ...]) -> dict[str, Any]:
     while ``nesting()`` keeps only combinations that occur. Values are the
     Polars Enum dtype, or the pandas categorical dtype.
     """
-    import pandas as pd
-
     bare = [
         name for spec in specs if not isinstance(spec, Nesting)
         for name in resolve_selection(tf, [spec])
     ]
     schema = tf._lf.collect_schema()
     return {name: schema[name] for name in bare if isinstance(schema[name], pl.Enum)}
-
-
-def _pandas_levels(series: Any) -> Any:
-    import pandas as pd
-
-    values = list(series.cat.categories)
-    if series.isna().any():
-        values.append(None)
-    return pd.DataFrame({series.name: pd.Categorical(values, dtype=series.dtype)})
 
 
 def _polars_levels(tf: Any, name: str, dtype: Any) -> pl.LazyFrame:
@@ -636,8 +625,7 @@ _PTYPES = {int: pl.Int64, float: pl.Float64, str: pl.String, bool: pl.Boolean}
 def _ptype_dtype(ptype: Any, what: str) -> Any:
     """The Polars type for one ``names_ptypes``/``values_ptypes`` entry."""
     import datetime
-
-    import pandas as pd
+    import sys
 
     if ptype in _PTYPES:
         return _PTYPES[ptype]
@@ -645,7 +633,8 @@ def _ptype_dtype(ptype: Any, what: str) -> Any:
         return pl.Date
     if ptype is datetime.datetime:
         return pl.Datetime("us")
-    if isinstance(ptype, pd.CategoricalDtype):
+    pd = sys.modules.get("pandas")
+    if pd is not None and isinstance(ptype, pd.CategoricalDtype):
         if ptype.categories is None:
             raise TypeError(f"{what}: a categorical prototype needs its categories")
         return pl.Enum([str(level) for level in ptype.categories])
@@ -2698,8 +2687,6 @@ def pack(name: str, *cols: Any) -> Verb:
 def unpack(column: str) -> Verb:
     """Expand a structured dictionary column into ordinary columns."""
     def _apply(tf):
-        import pandas as pd
-
         return tf >> unnest_wider(column)
     return Verb(_apply, "unpack")
 

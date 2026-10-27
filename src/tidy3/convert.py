@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import re
+import sys
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import date, datetime, time, timedelta, timezone
@@ -21,7 +22,7 @@ from functools import lru_cache
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
-import pandas as pd
+import numpy as np
 import polars as pl
 
 from tidy3.expr import Expr, _func, col
@@ -294,12 +295,13 @@ def _literal(name: str, key: str, kwargs: dict[str, Any], default: Any) -> Any:
 
 
 def _is_na_sentinel(value: Any) -> bool:
-    if value is None or value is pd.NA:
+    """None, NumPy's NaT, or a pandas missing-value sentinel (not NaN)."""
+    if value is None:
         return True
-    try:
-        return bool(pd.isna(value)) and not isinstance(value, (float, int, bool))
-    except TypeError:
-        return False
+    if isinstance(value, (np.datetime64, np.timedelta64)):
+        return bool(np.isnat(value))
+    pd = sys.modules.get("pandas")
+    return pd is not None and (value is pd.NA or value is pd.NaT)
 
 
 def _original(value: Any) -> str:
@@ -2264,110 +2266,6 @@ def compile_polars(
 
     return args[0].map_batches(batch, return_dtype=dtype)
 
-
-def _pandas_fast(
-    source: pd.Series, name: str, options: dict[str, Any], column: str
-) -> pd.Series | None:
-    """The native Polars path for a pandas column, or None for per-value.
-
-    The column goes to Polars with its own type (NaN becomes missing, as
-    pandas means it), converts there, and comes back without Python lists.
-    Failures are recorded for problems() exactly as the per-value path does.
-    """
-    kind = options["kind"]
-    if kind not in _FAST_KINDS:
-        return None
-    try:
-        series = pl.from_pandas(source)
-    except (OverflowError, TypeError, ValueError, pl.exceptions.PolarsError):
-        return None
-    if isinstance(series.dtype, (pl.Categorical, pl.Enum)):
-        series = series.cast(pl.String)
-    fast = _fast_apply(series, name, options, column)
-    if fast is None:
-        return None
-    converted, failed = fast
-    sink = _SINK.get()
-    if sink is not None and not options["strict"] and failed.any():
-        originals = _failed_originals(series, failed)
-        rows = failed.arg_true()
-        sink.extend(
-            {"row": int(row) + 1, "column": column, "original": original, "expected": options["expected"]}
-            for row, original in zip(rows.to_list(), originals.gather(rows).to_list())
-        )
-    if kind in _DATE_KINDS or kind == "parse_time":
-        # Dates and times stay Python objects in an object column, as before.
-        return pd.Series(converted.to_list(), index=source.index, dtype="object")
-    if kind in _INTEGER_KINDS:
-        target: Any = "Int64"
-    elif kind in _NUMBER_KINDS:
-        target = "Float64"
-    elif kind in _LOGICAL_KINDS:
-        target = "boolean"
-    else:  # datetimes keep their NumPy datetime64 type and any time zone
-        out = converted.to_pandas().dt.as_unit("us")
-        out.index = source.index
-        return out
-    out = converted.to_pandas(use_pyarrow_extension_array=True).astype(target)
-    out.index = source.index
-    return out
-
-
-def eval_pandas(
-    name: str,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    df: pd.DataFrame,
-    *,
-    column: str,
-) -> pd.Series:
-    """Evaluate a conversion against a pandas frame."""
-    options = _options(name, kwargs)
-    source = args[0]
-    if not isinstance(source, pd.Series):
-        source = pd.Series(source, index=df.index)
-    if options["kind"] == "character":
-        # The same text as on Polars: convert the column with its own type
-        # (a float32 stays float32; NaN becomes missing, as pandas means it),
-        # and fall back to value-by-value text when the values mix types.
-        try:
-            text = _text_series(
-                pl.from_pandas(source), options["true_text"], options["false_text"]
-            )
-        except (OverflowError, TypeError, ValueError, pl.exceptions.PolarsError):
-            text = None
-        if text is not None:
-            return pd.Series(text.to_list(), index=source.index, dtype="string")
-    fast = _pandas_fast(source, name, options, column)
-    if fast is not None:
-        return fast
-    # pandas marks a missing value with NaN, in float and object columns
-    # alike, so NaN here is missing, not a failure: as_integer(c(2, NA)) is
-    # c(2L, NA), and as_date(c("2010-01-31", NA)) is a date and NA.
-    values = [
-        None if isinstance(value, float) and value != value else value
-        for value in source.tolist()
-    ]
-    converted, problems = _apply(values, name, options, column)
-    sink = _SINK.get()
-    if sink is not None and problems and not options["strict"]:
-        sink.extend(problems)
-    kind = options["kind"]
-    if kind in {"integer", "parse_integer"}:
-        return pd.Series(converted, index=source.index, dtype="Int64")
-    if kind in {"double", "parse_double", "parse_number"}:
-        return pd.Series(converted, index=source.index, dtype="Float64")
-    if kind in {"logical", "parse_logical"}:
-        return pd.Series(converted, index=source.index, dtype="boolean")
-    if kind == "character":
-        return pd.Series(converted, index=source.index, dtype="string")
-    if kind in {"datetime", "parse_datetime"}:
-        return pd.Series(pd.to_datetime(converted), index=source.index).dt.as_unit("us")
-    if kind in _ZONED_KINDS:
-        return pd.Series(
-            converted, index=source.index, dtype=pd.DatetimeTZDtype("us", options["tz"])
-        )
-    return pd.Series(converted, index=source.index, dtype="object")
 
 
 # ── lazy problems ───────────────────────────────────────────────────────
