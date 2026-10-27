@@ -21,34 +21,30 @@ Contents: [In a notebook](#in-a-notebook) · [From R](#if-you-know-dplyr) ·
 
 ## In a notebook
 
-Load the extension once, in a cell of its own:
+An ordinary import is all the core API needs, and a pipe can follow it in
+the same cell. Wrap a pipe that spans lines in parentheses and quote column
+names, as in any Python code:
 
 ```python
-%load_ext tidy3.jupyter
 from tidy3 import *
-```
 
-From the next cell on, a pipe runs over as many lines as you like, each
-line starting with `>>`, comments and blank lines included, and column
-names go bare, as in R. (The cell that loads the extension can't use them
-yet: IPython reads a whole cell before running any of it.)
-
-```python
 penguins = scan_csv(
     "https://raw.githubusercontent.com/allisonhorst/palmerpenguins/main/inst/extdata/penguins.csv",
     null_values="NA",
 ) >> compute()
 
 # Heaviest groups first
-penguins
->> drop_na(sex)                        # 11 penguins have no recorded sex
->> group_by(species, sex)
->> summarise(
-    n = n(),
-    bill_mm = mean(bill_length_mm).round(1),
-    mass_kg = (mean(body_mass_g) / 1000).round(2),
+(
+    penguins
+    >> drop_na("sex")                    # 11 penguins have no recorded sex
+    >> group_by("species", "sex")
+    >> summarise(
+        n=n(),
+        bill_mm=mean("bill_length_mm").round(1),
+        mass_kg=(mean("body_mass_g") / 1000).round(2),
+    )
+    >> arrange(desc("mass_kg"))
 )
->> arrange(desc(mass_kg))
 ```
 
 ```text
@@ -70,7 +66,41 @@ shape: (6, 5)
 
 Every table shows each column's type under its name, and the caption
 keeps the grouping that's left (`summarise` drops the last group, as in
-dplyr). `glimpse(penguins)` prints one line per column. To check part of a
+dplyr). `glimpse(penguins)` prints one line per column.
+
+### Shorter notebook syntax, from the next cell on
+
+A notebook also takes a shorter form: a pipe over as many lines as you
+like with no outer parentheses, each line starting with `>>`, comments and
+blank lines included, and bare column names, as in R. That isn't Python,
+so tidy3 rewrites each cell before it runs, and the rewriting must already
+be on when the cell starts. A cell can't turn it on for itself: IPython
+parses the whole cell before it runs the import inside it. Once a cell that
+imports tidy3 has run, the rewriting is on in Jupyter and IPython. To turn
+it on explicitly, run this in a cell of its own:
+
+```python
+%load_ext tidy3.jupyter
+```
+
+In any later cell, the same summary reads:
+
+```python
+# Heaviest groups first
+penguins
+>> drop_na(sex)                        # 11 penguins have no recorded sex
+>> group_by(species, sex)
+>> summarise(
+    n = n(),
+    bill_mm = mean(bill_length_mm).round(1),
+    mass_kg = (mean(body_mass_g) / 1000).round(2),
+)
+>> arrange(desc(mass_kg))
+```
+
+The table is the same. The rest of this README uses this form, and the
+[bare-name rules](docs/notebooks.md#r-style-bare-names--backticks) cover
+columns that share a name with a variable or a builtin. To check part of a
 long pipe, run its first lines with `%%tidy3_run`.
 
 ## If you know dplyr

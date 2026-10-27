@@ -96,19 +96,35 @@ python analysis.py
 
 1. Create `analysis.ipynb` (or open the Interactive Window).
 2. Pick the same `.venv` kernel (**Select Kernel** → your tidy3 venv).
-3. In the first cell, either import normally or load the pipe rewriter:
+3. Import tidy3. An ordinary import is all the core API needs, and ordinary
+   Python syntax (parentheses around a multi-line pipe, quoted column names)
+   works in the same cell as the import:
 
 ```python
-# Option A — plain Python (parentheses required)
-from tidy3 import tidy, filter, col
+from tidy3 import tidy, filter, mutate, col
 
-# Option B — multi-line >> without outer parentheses
+(
+    tidy(cars)
+    >> filter(col("mpg") > 20)
+    >> mutate(km=col("mpg") * 1.609)
+)
+```
+
+#### Shorter notebook syntax needs an earlier cell
+
+Multi-line `>>` pipes without the outer parentheses and bare column names
+are not Python, so tidy3 rewrites each cell before IPython runs it. The
+rewriting has to be on before the cell starts, and a cell can't turn it on
+for itself: IPython parses the whole cell first, and the import inside it
+runs too late. Once any cell that imports tidy3 has run, the rewriting is
+on for the cells after it. To turn it on explicitly, run this in a cell of
+its own:
+
+```python
 %load_ext tidy3.jupyter
 ```
 
-Run that first cell on its own. From the next cell on, with the extension
-loaded (a cell that loads it can't use multi-line pipes yet, because IPython
-reads a whole cell before running any of it):
+From the next cell on:
 
 ```python
 tidy(cars)
@@ -204,8 +220,14 @@ describe(cars)    # alias of summary (pandas-style name)
 
 ### R-style bare names & backticks
 
-With the extension loaded (CRAFT addon or `%load_ext tidy3.jupyter`), cells may
-omit many `col("…")` / quotes:
+Once the rewriting is on (an earlier cell imported tidy3 or ran
+`%load_ext tidy3.jupyter`, or the CRAFT addon is loaded), later cells may
+omit many `col("…")` / quotes. The cell that turns it on can't use them yet:
+
+```python notest
+from tidy3 import *
+cars >> filter(mpg > 20)     # NameError: mpg; the rewriting starts next cell
+```
 
 ```python
 cars >> filter(mpg > 20) >> mutate(z = if_else(cyl > 4, 1, 0))
