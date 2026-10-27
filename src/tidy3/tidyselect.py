@@ -351,7 +351,7 @@ def is_numeric(dtype: Any) -> bool:
         from pandas.api.types import is_bool_dtype, is_numeric_dtype
 
         return bool(is_numeric_dtype(dtype) and not is_bool_dtype(dtype))
-    except TypeError:
+    except (ImportError, TypeError):
         return False
 
 
@@ -367,7 +367,7 @@ def is_integer(dtype: Any) -> bool:
         from pandas.api.types import is_integer_dtype
 
         return bool(is_integer_dtype(dtype))
-    except TypeError:
+    except (ImportError, TypeError):
         return False
 
 
@@ -383,7 +383,7 @@ def is_float(dtype: Any) -> bool:
         from pandas.api.types import is_float_dtype
 
         return bool(is_float_dtype(dtype))
-    except TypeError:
+    except (ImportError, TypeError):
         return False
 
 
@@ -398,7 +398,7 @@ def is_string(dtype: Any) -> bool:
         from pandas.api.types import is_string_dtype
 
         return bool(is_string_dtype(dtype))
-    except TypeError:
+    except (ImportError, TypeError):
         return False
 
 
@@ -416,7 +416,7 @@ def is_boolean(dtype: Any) -> bool:
         from pandas.api.types import is_bool_dtype
 
         return bool(is_bool_dtype(dtype))
-    except TypeError:
+    except (ImportError, TypeError):
         return False
 
 
@@ -436,7 +436,7 @@ def is_datetime(dtype: Any) -> bool:
 
         if is_datetime64_any_dtype(dtype):
             return True
-    except TypeError:
+    except (ImportError, TypeError):
         pass
     return False
 
@@ -458,7 +458,7 @@ def is_temporal(dtype: Any) -> bool:
         )
 
         return bool(is_datetime64_any_dtype(dtype) or is_timedelta64_dtype(dtype))
-    except TypeError:
+    except (ImportError, TypeError):
         return False
 
 

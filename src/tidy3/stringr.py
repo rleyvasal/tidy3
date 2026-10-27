@@ -1,8 +1,7 @@
-"""stringr for tidy3: ``str_*`` helpers that run inside verbs on either backend.
+"""stringr for tidy3: ``str_*`` helpers that run inside verbs.
 
 Each helper builds a backend-neutral :class:`~tidy3.expr.Expr`; the Polars
-compiler and the pandas engine call :func:`compile_polars` and
-:func:`eval_pandas` here for any ``str_*`` node. A plain string as the
+compiler calls :func:`compile_polars` here for any ``str_*`` node. A plain string as the
 first argument is a column name, as in the other helpers (``mean("x")``);
 in a notebook, bare column names work as in R. A list, tuple, or Series
 instead runs at once and returns a list, like stringr on a character
@@ -22,7 +21,6 @@ import textwrap
 import unicodedata
 from typing import Any
 
-import pandas as pd
 import polars as pl
 
 from tidy3.expr import Expr, _func, _node, col, to_polars
@@ -187,15 +185,13 @@ _AGGREGATES = {"str_flatten"}
 def _is_vector(x: Any) -> bool:
     if isinstance(x, (str, Expr, pl.Expr)):
         return False
-    return isinstance(x, (list, tuple, pd.Series, pl.Series)) or (
-        type(x).__name__ == "ndarray"
-    )
+    return isinstance(x, (list, tuple, pl.Series)) or type(x).__name__ in {"ndarray", "Series", "Index"}
 
 
 def _values(x: Any) -> list:
     if isinstance(x, pl.Series):
         return x.to_list()
-    return [None if pd.api.types.is_scalar(v) and pd.isna(v) else v for v in x]
+    return [None if _missing(v) else v for v in x]
 
 
 def _eager(expr: Expr, columns: dict[str, Any], aggregate: bool = False) -> Any:
@@ -209,7 +205,7 @@ def _vector_frame(string: Any) -> pl.DataFrame:
     """One string column, without a Python pass over an ordinary list."""
     if isinstance(string, pl.Series):
         return string.to_frame(_X)
-    if isinstance(string, pd.Series) or type(string).__name__ == "ndarray":
+    if type(string).__name__ in {"ndarray", "Series"}:
         return pl.DataFrame({_X: _values(string)})
     try:
         frame = pl.DataFrame({_X: list(string)})
@@ -1105,8 +1101,8 @@ def _word(value: str, kw: dict) -> Any:
 
 def _flatten(values: list, kw: dict) -> Any:
     if kw["na_rm"]:
-        values = [v for v in values if v is not None and v is not pd.NA]
-    elif builtins.any(v is None or v is pd.NA for v in values):
+        values = [v for v in values if not _missing(v)]
+    elif builtins.any(_missing(v) for v in values):
         return None
     last = kw["last"]
     if last is None or len(values) < 2:
@@ -1442,231 +1438,10 @@ def compile_polars(name: str, args: tuple, kw: dict) -> pl.Expr:
     raise ValueError(f"unknown string function: {name}")
 
 
-# ── pandas ──────────────────────────────────────────────────────────────
-
-_NA = pd.NA
-_PANDAS_3 = int(pd.__version__.split(".")[0]) >= 3
-
-
 def _missing(value: Any) -> bool:
-    return value is None or value is _NA or (isinstance(value, float) and math.isnan(value))
+    """None, NaN, or a pandas missing-value sentinel."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return True
+    pd = sys.modules.get("pandas")
+    return pd is not None and (value is pd.NA or value is pd.NaT)
 
-
-def _map(series: Any, fn: Any) -> Any:
-    """Apply *fn* to each present value; missing values stay missing (strings)."""
-    return series.map(lambda v: _NA if _missing(v) else fn(v)).astype("string")
-
-
-def _map_object(series: Any, fn: Any) -> Any:
-    """Like :func:`_map` for lists and dicts."""
-    return series.astype(object).map(lambda v: None if _missing(v) else fn(v))
-
-
-def _to_str(series: Any) -> Any:
-    """A string result in pandas' default string dtype, missing as missing."""
-    if _PANDAS_3:
-        return series.astype("str")
-    # pandas 2 has no missing-aware "str" dtype (it would write "<NA>"):
-    # keep text in an object column with None for missing, as pandas 2 does.
-    series = series.astype("string")
-    return series.astype(object).where(series.notna(), None)
-
-
-def _text(value: Any, index: Any) -> Any:
-    """A value as a nullable string Series, or a scalar string."""
-    if isinstance(value, pd.Series):
-        return value.reindex(index).astype("string")
-    return _NA if _missing(value) else str(value)
-
-
-def _nfc_text(value: Any, ignore_case: bool) -> Any:
-    """Lowercase when requested, then Unicode NFC. Missing stays missing."""
-    if isinstance(value, pd.Series):
-        text = value.str.lower() if ignore_case else value
-        return _map(text, lambda item: unicodedata.normalize("NFC", item))
-    if _missing(value):
-        return value
-    text = value.lower() if ignore_case else str(value)
-    return unicodedata.normalize("NFC", text)
-
-
-def eval_pandas(
-    name: str,
-    args: tuple,
-    kw: dict,
-    df: Any,
-    groups: list[str] | None,
-    mode: str,
-) -> Any:
-    """pandas result for the ``str_*`` node *name*; *args* are evaluated values."""
-    from tidy3.pandas_engine import _as_series, _grouped
-
-    # Reduced inputs carry a group index, rather than the source row index.
-    index = next((arg.index for arg in args if isinstance(arg, pd.Series)), df.index)
-    if name in {"str_c", "str_glue"}:
-        sep = kw.get("sep", "")
-        out: Any = None
-        for arg in args:
-            part = _text(arg, index)
-            if name == "str_glue":
-                part = part.fillna("NA") if isinstance(part, pd.Series) else (
-                    "NA" if part is _NA else part
-                )
-            out = part if out is None else out + sep + part
-        if not isinstance(out, pd.Series):
-            out = pd.Series(out, index=index, dtype="string")
-        return _to_str(out)
-    if name == "str_conv":
-        series = _as_series(args[0], index)
-        return _to_str(_map(series.astype(object), lambda v: _decode(v, kw["encoding"])))
-
-    x = _as_series(args[0], index).astype("string")
-    if name in {"str_detect", "str_starts", "str_ends"}:
-        if _plain(kw) and name == "str_starts":
-            found = x.str.startswith(kw["pattern"])
-        elif _plain(kw) and name == "str_ends":
-            found = x.str.endswith(kw["pattern"])
-        elif _plain(kw):
-            found = x.str.contains(kw["pattern"], regex=False)
-        else:
-            wrap = {"str_detect": "{}", "str_starts": "^(?:{})", "str_ends": r"(?:{})\Z"}
-            found = x.str.contains(_regex(kw, wrap[name]), regex=True)
-        found = found.astype("boolean")
-        return ~found if kw["negate"] else found
-    if name == "str_equal":
-        y = _text(args[1], index)
-        return (
-            _nfc_text(x, kw["ignore_case"]) == _nfc_text(y, kw["ignore_case"])
-        ).astype("boolean")
-    if name == "str_count":
-        return x.str.count(_regex(kw)).astype("Int64")
-    if name == "str_locate":
-        rx = _compiled(kw)
-
-        def locate(value: Any) -> dict:
-            m = None if _missing(value) else rx.search(value)
-            if m is None:
-                return {"start": None, "end": None}
-            return {"start": m.start() + 1, "end": m.end()}
-
-        return x.astype(object).map(locate)
-    if name == "str_locate_all":
-        rx = _compiled(kw)
-        return _map_object(x, lambda v: _locate_all(v, rx))
-    if name == "str_length":
-        return x.str.len().astype("Int64")
-    if name == "str_width":
-        return x.astype(object).map(lambda v: _NA if _missing(v) else _width(v)).astype("Int64")
-    if name == "str_sub":
-        return _to_str(_map(x, lambda v: _sub(v, kw["start"], kw["end"])))
-    if name == "str_sub_all":
-        pairs = list(zip(kw["starts"], kw["ends"]))
-        return x.astype(object).map(
-            lambda v: [None if _missing(v) else _sub(v, s, e) for s, e in pairs]
-        )
-    if name == "str_trunc":
-        return _to_str(
-            _map(x, lambda v: _trunc(v, kw["width"], kw["side"], kw["ellipsis"]))
-        )
-    if name == "str_word":
-        return _to_str(_map(x, lambda v: _word(v, kw)).fillna(_NA))
-    if name in {"str_replace", "str_replace_all"}:
-        n = -1 if name == "str_replace_all" else 1
-        if _plain(kw):
-            out = x.str.replace(kw["pattern"], kw["replacement"], n=n, regex=False)
-        else:
-            out = x.str.replace(_regex(kw), kw["replacement"], n=n, regex=True)
-        return _to_str(out)
-    if name == "str_replace_na":
-        return _to_str(x.fillna(kw["replacement"]))
-    if name == "str_to_upper":
-        return _to_str(x.str.upper())
-    if name == "str_to_lower":
-        return _to_str(x.str.lower())
-    if name == "str_to_title":
-        return _to_str(x.str.title())
-    if name == "str_to_sentence":
-        return _to_str(_map(x, lambda v: v[:1].upper() + v[1:].lower()))
-    if name in {"str_to_snake", "str_to_kebab"}:
-        sep = "_" if name == "str_to_snake" else "-"
-        return _to_str(_map(x, lambda v: _words(v).replace(" ", sep)))
-    if name == "str_to_camel":
-        return _to_str(_map(x, lambda v: _camel(v, kw["first_upper"])))
-    if name == "str_rank":
-        if mode == "agg":
-            raise ValueError("str_rank() is not valid inside summarise()")
-
-        def rank(values: Any) -> Any:
-            if kw["numeric"]:
-                ranks = _natural_ranks([None if _missing(v) else v for v in values])
-                return pd.Series(ranks, index=values.index, dtype="Int64")
-            return values.rank(method="min", na_option="keep").astype("Int64")
-
-        if groups:
-            return _grouped(x, df, groups).transform(rank).astype("Int64")
-        return rank(x)
-    if name == "str_trim":
-        side = {"both": "strip", "left": "lstrip", "right": "rstrip"}[kw["side"]]
-        return _to_str(getattr(x.str, side)())
-    if name == "str_squish":
-        return _to_str(x.str.strip().str.replace(r"\s+", " ", regex=True))
-    if name == "str_pad":
-        if kw["side"] == "both":
-            out = _map(x, lambda v: _pad_both(v, kw["width"], kw["pad"]))
-        else:
-            out = x.str.pad(kw["width"], side=kw["side"], fillchar=kw["pad"])
-        return _to_str(out)
-    if name == "str_dup":
-        return _to_str(x.str.repeat(kw["times"]))
-    if name == "str_wrap":
-        return _to_str(_map(x, lambda v: _wrap(v, kw)))
-    if name == "str_extract":
-        rx = _compiled(kw)
-
-        def extract(value: str) -> Any:
-            found = rx.search(value)
-            if found is None or found.group(kw["group"]) is None:
-                return _NA
-            return found.group(kw["group"])
-
-        return _to_str(_map(x, extract))
-    if name == "str_extract_all":
-        rx = _compiled(kw)
-        return _map_object(x, lambda v: [m.group(0) for m in rx.finditer(v)])
-    if name == "str_match":
-        rx = _compiled(kw)
-        return x.astype(object).map(
-            lambda v: _match_row(None if _missing(v) else rx.search(v), kw["names"])
-        )
-    if name == "str_match_all":
-        rx = _compiled(kw)
-        return _map_object(
-            x, lambda v: [_match_row(m, kw["names"]) for m in rx.finditer(v)]
-        )
-    if name == "str_split":
-        return _map_object(x, lambda v: _split_row(v, kw, kw["n"]))
-    if name == "str_split_i":
-        out = _map(x, lambda v: _split_i(_split_row(v, kw, None), kw["i"]))
-        return _to_str(out.fillna(_NA))
-    if name == "str_split_fixed":
-        n = kw["n"]
-        return _map_object(
-            x, lambda v: (_split_row(v, kw, n) + [""] * n)[:n]
-        )
-    if name == "str_flatten":
-        def join(values: Any) -> Any:
-            out = _flatten([None if _missing(v) else v for v in values], kw)
-            return _NA if out is None else out
-
-        if groups:
-            grouped = _grouped(x, df, groups)
-            if mode == "agg":
-                return _to_str(grouped.agg(join).astype("string"))
-            return _to_str(grouped.transform(join).astype("string"))
-        result = join(x)
-        if mode == "agg":
-            return None if result is _NA else result
-        return _to_str(pd.Series(result, index=df.index, dtype="string"))
-    if name == "str_escape":
-        return _to_str(_map(x, _escape))
-    raise ValueError(f"unknown string function: {name}")

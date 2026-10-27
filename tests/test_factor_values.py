@@ -196,7 +196,7 @@ def test_level_helpers_on_vectors_keep_values_and_ordered_flag():
     for out in (t.fct_drop(f), t.fct_expand(f, "e"), t.fct_inorder(f)):
         assert out.ordered and [None if pd.isna(v) else v for v in out] == ["b", "a", None, "b"]
     series = t.fct_inorder(pl.Series(["y", "x", "y"]))
-    assert series.categories.tolist() == ["y", "x"]
+    assert series.dtype == pl.Enum(["y", "x"]) and series.to_list() == ["y", "x", "y"]
 
 
 def test_missing_value_conversions():
@@ -244,7 +244,7 @@ def test_reorder2_summaries_missing_values_and_custom_functions():
     with pytest.warns(UserWarning, match="removing 1 missing value;"):
         out = t.fct_reorder2(f, [1, None, 1, 2, 5], y)
     assert len(out) == 5 and out.categories.tolist() == ["a", "b", "c", "d"]
-    kept = t.fct_reorder2(f, [1, None, 1, 2, 5], y, lambda x, y: float(x.isna().sum()), na_rm=False)
+    kept = t.fct_reorder2(f, [1, None, 1, 2, 5], y, lambda x, y: float(x.is_null().sum()), na_rm=False)
     assert kept.categories.tolist() == ["a", "b", "c", "d"]
     assert t.last2([None, 3, 3], [1, 2, 5]) == 2 and t.first2([None], [1]) is None
 
@@ -324,14 +324,11 @@ def _native_cases():
 
 
 @pytest.mark.parametrize("case", sorted(_native_cases()))
-def test_string_columns_compute_levels_in_polars_with_the_same_results(case, monkeypatch):
+def test_string_columns_compute_levels_in_polars_with_the_same_results(case):
     s = ["b", "a", None, "c", "a", "b", "a", None]
     w = [1., 5., 2., 1., 1., 1., 1., 3.]
     make = _native_cases()[case]
     expected = make(s, w)
-    import tidy3.pandas_engine as engine
-
-    monkeypatch.setattr(engine, "eval_expr", lambda *a, **k: pytest.fail("used the pandas path"))
     out = t.tidy({"s": s, "w": w}) >> t.mutate(f=make("s", "w"))
     data = out.collect()
     assert data["f"].to_list() == [None if pd.isna(v) else v for v in expected]
@@ -345,10 +342,7 @@ def test_string_columns_compute_levels_in_polars_with_the_same_results(case, mon
     ([2.5, 1.0, None], ["1", "2.5"]),
     ([True, None, True], ["FALSE", "TRUE"]),
 ])
-def test_as_factor_numbers_and_logical_values_in_polars(values, levels, monkeypatch):
-    import tidy3.pandas_engine as engine
-
-    monkeypatch.setattr(engine, "eval_expr", lambda *a, **k: pytest.fail("used the pandas path"))
+def test_as_factor_numbers_and_logical_values_in_polars(values, levels):
     data = (t.tidy({"x": values}) >> t.mutate(x=t.as_factor("x"))).collect()
     assert data.schema["x"] == pl.Enum(levels)
     assert data["x"].to_list() == [None if pd.isna(v) else v for v in t.as_factor(values)]
@@ -357,16 +351,13 @@ def test_as_factor_numbers_and_logical_values_in_polars(values, levels, monkeypa
 @pytest.mark.parametrize("fun, na_rm, desc", [
     (t.last2, True, True), (t.first2, True, False), (t.last2, False, True), (t.first2, None, True),
 ])
-def test_reorder2_with_last2_or_first2_runs_in_polars(fun, na_rm, desc, monkeypatch):
+def test_reorder2_with_last2_or_first2_runs_in_polars(fun, na_rm, desc):
     s = ["a", "a", "b", "b", "c", None, "d"]
     x = [1., 2., 1., None, 5., 3., None]
     y = [10., 1., 3., 4., 2., 9., 1.]
     with warnings.catch_warnings(record=True) as expected_warnings:
         warnings.simplefilter("always")
         expected = t.fct_reorder2(s, x, y, fun, na_rm=na_rm, desc=desc)
-    import tidy3.pandas_engine as engine
-
-    monkeypatch.setattr(engine, "eval_expr", lambda *a, **k: pytest.fail("used the pandas path"))
     with warnings.catch_warnings(record=True) as found:
         warnings.simplefilter("always")
         out = (t.tidy({"s": s, "x": x, "y": y}) >> t.mutate(f=t.fct_reorder2("s", "x", "y", fun, na_rm=na_rm, desc=desc))).collect()

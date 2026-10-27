@@ -11,6 +11,9 @@ NumPy, or pandas without leaving the pipe.
 pip install tidy3
 ```
 
+pandas is optional: `pip install "tidy3[pandas]"` adds pandas input and
+output (`tidy(df)`, `collect(as_="pandas")`).
+
 Contents: [In a notebook](#in-a-notebook) · [From R](#if-you-know-dplyr) ·
 [Lazy and fast](#lazy-until-you-need-rows) · [Reshape](#reshape-for-plotting) ·
 [Plot](#plot-with-plot3) · [scikit-learn](#hand-off-to-scikit-learn-numpy-and-pandas) ·
