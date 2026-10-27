@@ -4,7 +4,9 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.12.4 — 2026-10-27
+
+Four more janitor functions: `single_value()`, `get_one_to_one()`, `adorn_rounding()`, and `adorn_title()`, checked against janitor 2.2.1.
 
 ### Added
 
