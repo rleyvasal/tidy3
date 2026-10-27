@@ -107,7 +107,7 @@ def tabyl(
                 .otherwise(pl.col("n") / _per_row(pl.lit(valid_total))).alias("valid_percent")
             )
         result = data.with_columns(expressions)
-        return snapshot._with_lf(result.lazy(), rowwise=False, tabyl=("one_way", result))
+        return snapshot._with_lf(result.lazy(), rowwise=False, tabyl=("one_way", result, (name, None)))
 
     return Verb(_apply, "tabyl")
 
@@ -203,7 +203,7 @@ def _tabyl_wide(
     if rows is None or columns is None:
         result = data.select(row)
         return snapshot._with_lf(result.lazy(), rowwise=False, category_levels=row_levels,
-                                 tabyl=("two_way", result))
+                                 tabyl=("two_way", result, (row, col)))
     labels = [_tabyl_column_label(value) for value in columns]
     if len(set([row, *labels])) != len(labels) + 1:
         raise ValueError("tabyl() column labels conflict; rename the row column or recode the column values")
@@ -218,7 +218,7 @@ def _tabyl_wide(
     result = rows.to_frame().join(wide, on=row, how="left", nulls_equal=True, maintain_order="left")
     result = result.with_columns(pl.col([label for _, label in ordered]).fill_null(0).cast(pl.Float64))
     return snapshot._with_lf(result.lazy(), rowwise=False, category_levels=row_levels,
-                             tabyl=("two_way", result))
+                             tabyl=("two_way", result, (row, col)))
 
 
 def _tabyl_three_way(tf: Any, selections: list[Any], show_na: bool, show_missing_levels: bool) -> dict[str, Any]:
@@ -431,6 +431,117 @@ def adorn_percentages(denominator: str = "row", *, na_rm: bool = True, cols: Any
     return _ReportVerb(_apply, "adorn_percentages")
 
 
+def adorn_rounding(digits: int = 1, rounding: str = "half to even", *, cols: Any = None) -> Verb:
+    """Round a table's numbers and keep them numbers, as janitor does.
+
+    Use it after :func:`adorn_percentages` when the result should stay
+    numeric (to plot, sort, or export) rather than become
+    :func:`adorn_pct_formatting`'s text. ``rounding="half to even"`` is R's
+    ``round()``; ``"half up"`` is :func:`round_half_up`. By default numeric
+    columns after the first are rounded; ``cols=`` selects others,
+    including the first, and skips text and factor columns. Rounded
+    integer columns become doubles, as in janitor. Totals and the tabyl's
+    counts are kept, so :func:`adorn_ns` still works afterwards.
+    """
+    from tidy3.helpers import _round_expr, _round_half_up_expr
+    from tidy3.tidyselect import resolve_selection
+
+    if isinstance(digits, bool) or not isinstance(digits, int):
+        raise TypeError("adorn_rounding() digits must be an integer")
+    if rounding not in _ROUNDING:
+        raise ValueError('adorn_rounding() rounding must be "half to even" or "half up"')
+    rounder = _round_expr if rounding == "half to even" else _round_half_up_expr
+
+    def _apply(tf):
+        schema = tf._schema()
+        names = schema.names()
+        numeric = [column for column in names
+                   if schema[column].is_numeric() and column not in tf._category_levels]
+        if cols is None:
+            chosen = [column for column in numeric if column != names[0]]
+        else:
+            chosen = [column for column in resolve_selection(tf, [cols]) if column in numeric]
+        lf = tf._lf.with_columns(
+            rounder(pl.col(column).cast(pl.Float64), digits) for column in chosen
+        )
+        return tf._with_lf(lf, rowwise=False, category_levels=_levels(tf, names),
+                           totals=tf._totals, tabyl=tf._tabyl)
+
+    return _ReportVerb(_apply, "adorn_rounding")
+
+
+def adorn_title(placement: str = "top", row_name: str | None = None, col_name: str | None = None) -> Verb:
+    """Name the column variable of a two-way tabyl, as janitor does.
+
+    ``placement="top"`` adds a first row holding the column headers and puts
+    the column variable's name above them, so a table of ``species`` by
+    ``sex`` reads like a printed crosstab; every cell becomes text, as in
+    janitor, which makes this the last step. ``"combined"`` keeps the table
+    and renames the first column ``species/sex``. ``row_name`` and
+    ``col_name`` replace the variable names; a table that is not a
+    two-way tabyl (or whose tabyl details a data-changing step cleared)
+    needs ``col_name``. A frame cannot repeat a column name, so the other
+    blank headers of ``"top"`` are runs of spaces, where janitor repeats
+    ``""``.
+    """
+    from tidy3.verbs import rename
+
+    if placement not in {"top", "combined"}:
+        raise ValueError('adorn_title() placement must be "top" or "combined"')
+    for label, value in (("row_name", row_name), ("col_name", col_name)):
+        if value is not None and not isinstance(value, str):
+            raise TypeError(f"adorn_title() {label} must be a string")
+
+    def _apply(tf):
+        names = tf._schema().names()
+        if len(names) < 2:
+            raise ValueError("adorn_title() needs a table with at least two columns")
+        variables = tf._tabyl[2] if tf._tabyl is not None else (None, None)
+        if tf._tabyl is not None and tf._tabyl[0] == "one_way":
+            warnings.warn(
+                "adorn_title is meant for two-way tabyls, calling it on a one-way tabyl "
+                "may not yield a meaningful result",
+                stacklevel=2,
+            )
+        column_variable = col_name if col_name is not None else variables[1]
+        if column_variable is None:
+            raise ValueError(
+                "adorn_title() needs col_name= for a table that is not a two-way tabyl"
+            )
+        if row_name is not None and row_name != names[0]:
+            tf = tf >> rename(**{row_name: names[0]})
+            names = [row_name, *names[1:]]
+        row_variable = row_name if row_name is not None else (variables[0] or names[0])
+        if placement == "combined":
+            return tf >> rename(**{f"{row_variable}/{column_variable}": names[0]})
+        headers = ["", column_variable]
+        while len(headers) < len(names):
+            blank = " " * (len(headers) - 1)
+            while blank in headers:
+                blank += " "
+            headers.append(blank)
+        texts = [
+            pl.col(column).map_batches(_title_text, return_dtype=pl.String, is_elementwise=True)
+            for column in names
+        ]
+        top = pl.LazyFrame({column: [column] for column in names}, schema={column: pl.String for column in names})
+        body = pl.concat([top, tf._lf.select(texts)])
+        return tf._with_lf(body.rename(dict(zip(names, headers))), groups=None, rowwise=False,
+                           category_levels={})
+
+    return _ReportVerb(_apply, "adorn_title")
+
+
+def _title_text(series: pl.Series) -> pl.Series:
+    """R's ``as.character()`` of a column, keeping missing values missing."""
+    if series.dtype == pl.String:
+        return series
+    if isinstance(series.dtype, (pl.Enum, pl.Categorical)):
+        return series.cast(pl.String)
+    text = _character_text(series)
+    return pl.select(pl.when(series.is_null()).then(None).otherwise(text)).to_series().alias(series.name)
+
+
 def adorn_pct_formatting(
     digits: int = 1, rounding: str = "half to even", affix_sign: bool = True, *, cols: Any = None,
 ) -> Verb:
@@ -599,7 +710,7 @@ def adorn_ns(
                     "adorn_ns() needs a tabyl's counts, which data-changing steps clear; "
                     "call it right after tabyl() and the other adorn_* steps, or pass ns="
                 )
-            kind, counts = tf._tabyl
+            kind, counts, _ = tf._tabyl
             if kind == "one_way":
                 warnings.warn(
                     "adorn_ns() is meant for a two-variable tabyl; for a one-variable tabyl "
@@ -1360,6 +1471,51 @@ def _header_text(value: Any) -> str:
     if isinstance(value, date):
         return value.isoformat()
     return str(value)
+
+
+def get_one_to_one(data: Any = None) -> Any:
+    """Groups of columns that map one to one, as janitor's ``get_one_to_one``.
+
+    Two columns map one to one when each value of one always appears with
+    the same value of the other, and the other way round, such as an id
+    column and a name column that encode the same thing. The result is a
+    list of lists of column names, in column order; columns that map to no
+    other are left out, and ``[]`` means none do. A missing value counts
+    as a value. Values are compared exactly. This reads the data.
+    ``frame >> get_one_to_one()`` is the pipe form. No message is printed
+    when nothing maps.
+    """
+    if data is None:
+        return Verb(_one_to_one, "get_one_to_one")
+    return _one_to_one(_as_frame(data))
+
+
+def _one_to_one(tf: Any) -> list[list[str]]:
+    from tidy3.frame import note_data_read
+
+    names = tf._schema().names()
+    if not names:
+        raise ValueError("get_one_to_one() needs at least one column")
+    note_data_read("get_one_to_one() compares the columns' values")
+    # Each value replaced by the row where it first appears: two columns
+    # map one to one exactly when these positions agree on every row.
+    # Adding 0.0 makes -0.0 and 0.0 one value, as in R.
+    schema = tf._schema()
+    row = "__tidy3_row"
+    while row in names:
+        row += "_"
+    first = tf._lf.with_row_index(row).select(
+        pl.col(row).first().over(pl.col(name) + 0.0 if schema[name].is_float() else pl.col(name)).alias(name)
+        for name in names
+    ).collect()
+    groups, remaining = [], list(names)
+    while remaining:
+        name = remaining.pop(0)
+        matches = [other for other in remaining if first[other].equals(first[name])]
+        remaining = [other for other in remaining if other not in matches]
+        if matches:
+            groups.append([name, *matches])
+    return groups
 
 
 def find_header(

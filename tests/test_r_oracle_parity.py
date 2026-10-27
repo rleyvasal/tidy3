@@ -1618,6 +1618,100 @@ def _janitor_signif_fraction():
     return result
 
 
+def _janitor_values():
+    import tidy3 as t3
+
+    def fails(run):
+        try:
+            run()
+        except ValueError as error:
+            # Polars adds the expression it was running; R has no such note.
+            return str(error).split("\n\nThis error occurred")[0]
+        return "no error"
+
+    def one(values, **options):
+        frame = tidy({"x": values}) if not isinstance(values, pl.Series) else tidy(values.alias("x").to_frame())
+        return (frame >> t3.summarise(v=t3.single_value("x", **options)) >> pull("v"))[0]
+
+    d = tidy({"g": ["a", "a", "b", "c", "c", "d"], "site": ["N", None, "S", None, None, "E"],
+              "x": [1.5, 1.5, 0.0, -0.0, 0.0, float("nan")]})
+    result = {
+        "summarise": d >> group_by("g") >> t3.summarise(site=t3.single_value("site"), x=t3.single_value("x")),
+        "mutate": d >> group_by("g") >> mutate(s=t3.single_value("site")) >> t3.ungroup(),
+        "skip_blank": one(["", None, "x"], missing=[None, ""]),
+        "all_blank": one(["", None], missing=["", None]),
+        "null_is_value": fails(lambda: one(["x", None], missing="")),
+        "all_missing": one([None, None]),
+        "conflict": fails(lambda: one([1.5, None, 1 / 3], info="x")),
+        "conflict_text": fails(lambda: one(["a", "b", "a", "c"])),
+        "conflict_grouped": fails(lambda: (d >> t3.summarise(site=t3.single_value("site"))).collect()),
+        "nan_skipped": one([float("nan"), 2.0, None], missing=[None, float("nan")]),
+        "factor": one(pd.Series(pd.Categorical(["u", "u", None], categories=["v", "u"]))),
+    }
+    frame = tidy(pd.DataFrame({
+        "id": [1, 2, 3, 4, 5, 6], "name": ["a", "b", "c", "d", "e", "f"], "half": [1.0, 1.0, 2.0, 2.0, 3.0, 3.0],
+        "label": ["p", "p", "q", "q", "r", "r"], "gap": [None, None, 2.0, 2.0, 5.0, 5.0],
+        "zero": [0.0, -0.0, 1.0, 1.0, 2.0, 2.0],
+        "level": pd.Categorical(["lo", "lo", "hi", "hi", "mid", "mid"]), "constant": ["k"] * 6, "other": [7.0] * 6,
+        "day": pd.to_datetime(["2024-01-01", "2024-01-01", "2024-02-01", "2024-02-01", "2024-03-01", "2024-03-01"]).date,
+    }))
+    # NaN and logical columns go in through Polars: pandas would make NaN missing.
+    frame = frame >> mutate(
+        nan=pl.Series([float("nan"), float("nan"), 1.0, 1.0, None, None]),
+        flag=pl.Series([True, True, False, False, None, None]),
+    ) >> t3.relocate("nan", after="gap") >> t3.relocate("flag", after="zero")
+    groups = t3.get_one_to_one(frame)
+    result["one_to_one"] = [{"kind": "vector", "data": group} for group in groups]
+    result["one_to_one_none"] = t3.get_one_to_one(tidy({"a": [1, 2, 3], "b": [1.0, 1.0, 2.0]}))
+    result["one_to_one_single"] = tidy({"a": [1, 2, 3]}) >> t3.get_one_to_one()
+    return result
+
+
+def _titled(frame):
+    """A titled table as R sees it: the blank headers are all ``""`` there."""
+    out = _normalise(frame)
+    if isinstance(out, dict) and out.get("kind") == "dataframe":
+        out["columns"] = [name if name.strip() else "" for name in out["columns"]]
+    return out
+
+
+def _janitor_rounding_title():
+    import tidy3 as t3
+
+    counts = tidy({"g": ["b", "a", "b", "a", "b", "c", "a", "a"],
+                   "h": ["x", "y", "x", "x", "y", "y", "y", "z"],
+                   "k": ["u", "u", "v", "v", "u", "v", "u", "u"]})
+    report = counts >> t3.tabyl("g", "h")
+    shares = report >> t3.adorn_totals("both") >> t3.adorn_percentages("row")
+    result = {}
+    for digits in (-1, 0, 1, 2):
+        for rounding in ("half to even", "half up"):
+            result[f"round_{digits}_{rounding.replace(' ', '_')}"] = shares >> t3.adorn_rounding(digits, rounding)
+    result["selected"] = shares >> t3.adorn_rounding(1, "half up", cols="x")
+    numbers = tidy({"p": [0.125, 0.375, -2.5], "q": [1.25, 2.5, 1 / 3], "n": [1, 2, 3], "note": ["a", "b", "c"]})
+    result["first_skipped"] = numbers >> t3.adorn_rounding(1)
+    result["first_selected"] = numbers >> t3.adorn_rounding(1, "half up", cols=t3.everything())
+    one_way = counts >> t3.tabyl("g")
+    result["one_way"] = one_way >> t3.adorn_rounding(2)
+    result["with_ns"] = shares >> t3.adorn_rounding(1) >> t3.adorn_ns()
+    result["three_way"] = counts >> t3.tabyl("g", "h", "k") >> t3.adorn_percentages() >> t3.adorn_rounding(2)
+    result["title_top"] = _titled(report >> t3.adorn_title())
+    result["title_combined"] = report >> t3.adorn_title("combined")
+    result["title_names"] = _titled(report >> t3.adorn_title("top", "group", "answer"))
+    result["title_combined_names"] = report >> t3.adorn_title("combined", row_name="group", col_name="answer")
+    result["title_report"] = _titled(shares >> t3.adorn_pct_formatting() >> t3.adorn_ns() >> t3.adorn_title())
+    result["title_numbers"] = _titled(shares >> t3.adorn_title())
+    plain = tidy({"a": ["r1", "r2", "r3"], "b": [1 / 3, 100000.0, None], "c": [None, 1e-4, 2.5], "d": [True, False, None]})
+    result["title_plain"] = _titled(plain >> t3.adorn_title(col_name="cols"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result["title_one_way"] = _titled(one_way >> t3.adorn_title(col_name="share"))
+    three = counts >> t3.tabyl("g", "h", "k") >> t3.adorn_title("combined")
+    result["title_three_way"] = three
+    result["title_two_columns"] = _titled(counts >> filter(col("h") == "x") >> t3.tabyl("g", "h") >> t3.adorn_title())
+    return result
+
+
 def _janitor_tabyl():
     import tidy3 as t3
 
@@ -2928,6 +3022,8 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "janitor_formatting": _janitor_formatting,
     "janitor_round_half_up": _janitor_round_half_up,
     "janitor_signif_fraction": _janitor_signif_fraction,
+    "janitor_values": _janitor_values,
+    "janitor_rounding_title": _janitor_rounding_title,
     "timezone_conversion": _timezone_conversion,
     "timezone_dst": _timezone_dst,
     "timezone_resolved_repeats": _timezone_resolved_repeats,

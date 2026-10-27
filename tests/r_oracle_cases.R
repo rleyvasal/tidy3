@@ -233,6 +233,77 @@ run_case <- function(case_name) switch(
       result
     }
   },
+  janitor_values = {
+    if (!requireNamespace("janitor", quietly=TRUE)) {
+      list(skip=TRUE, reason="janitor is not installed")
+    } else {
+      # dplyr wraps an error in its own context; compare janitor's message.
+      fails <- function(expr) tryCatch({ force(expr); "no error" }, error=function(e) {
+        conditionMessage(if (is.null(e$parent)) e else e$parent)
+      })
+      d <- data.frame(g=c("a", "a", "b", "c", "c", "d"), site=c("N", NA, "S", NA, NA, "E"),
+                      x=c(1.5, 1.5, 0, negative_zero(), 0, NaN))
+      result <- list(
+        summarise=d |> group_by(g) |> summarise(site=janitor::single_value(site), x=janitor::single_value(x)),
+        mutate=d |> group_by(g) |> mutate(s=janitor::single_value(site)) |> ungroup(),
+        skip_blank=janitor::single_value(c("", NA, "x"), missing=c(NA, "")),
+        all_blank=janitor::single_value(c("", NA), missing=c("", NA)),
+        null_is_value=fails(janitor::single_value(c("x", NA), missing="")),
+        all_missing=janitor::single_value(c(NA_character_, NA)),
+        conflict=fails(janitor::single_value(c(1.5, NA, 1/3), info="x")),
+        conflict_text=fails(janitor::single_value(c("a", "b", "a", "c"))),
+        conflict_grouped=fails(d |> summarise(site=janitor::single_value(site))),
+        nan_skipped=janitor::single_value(c(NaN, 2, NA), missing=c(NA, NaN)),
+        factor=janitor::single_value(factor(c("u", "u", NA), levels=c("v", "u")))
+      )
+      frame <- data.frame(
+        id=1:6, name=c("a", "b", "c", "d", "e", "f"), half=c(1, 1, 2, 2, 3, 3),
+        label=c("p", "p", "q", "q", "r", "r"), gap=c(NA, NA, 2, 2, 5, 5), nan=c(NaN, NaN, 1, 1, NA, NA),
+        zero=c(0, negative_zero(), 1, 1, 2, 2), flag=c(TRUE, TRUE, FALSE, FALSE, NA, NA),
+        level=factor(c("lo", "lo", "hi", "hi", "mid", "mid")), constant=rep("k", 6), other=rep(7, 6),
+        day=as.Date(c("2024-01-01", "2024-01-01", "2024-02-01", "2024-02-01", "2024-03-01", "2024-03-01"))
+      )
+      result$one_to_one <- janitor::get_one_to_one(frame)
+      result$one_to_one_none <- suppressMessages(janitor::get_one_to_one(data.frame(a=1:3, b=c(1, 1, 2))))
+      result$one_to_one_single <- suppressMessages(janitor::get_one_to_one(data.frame(a=1:3)))
+      result
+    }
+  },
+  janitor_rounding_title = {
+    if (!requireNamespace("janitor", quietly=TRUE)) {
+      list(skip=TRUE, reason="janitor is not installed")
+    } else {
+      counts <- data.frame(g=c("b", "a", "b", "a", "b", "c", "a", "a"),
+                           h=c("x", "y", "x", "x", "y", "y", "y", "z"),
+                           k=c("u", "u", "v", "v", "u", "v", "u", "u"))
+      report <- janitor::tabyl(counts, g, h)
+      shares <- janitor::adorn_percentages(janitor::adorn_totals(report, c("row", "col")), "row")
+      result <- list()
+      for (digits in c(-1, 0, 1, 2)) for (rounding in c("half to even", "half up")) {
+        result[[paste0("round_", digits, "_", gsub(" ", "_", rounding))]] <- janitor::adorn_rounding(shares, digits, rounding)
+      }
+      result$selected <- janitor::adorn_rounding(shares, 1, "half up", x)
+      numbers <- data.frame(p=c(0.125, 0.375, -2.5), q=c(1.25, 2.5, 1/3), n=c(1L, 2L, 3L), note=c("a", "b", "c"))
+      result$first_skipped <- janitor::adorn_rounding(numbers, 1)
+      result$first_selected <- suppressMessages(janitor::adorn_rounding(numbers, 1, "half up", dplyr::everything()))
+      one_way <- janitor::tabyl(counts, g)
+      result$one_way <- janitor::adorn_rounding(one_way, 2)
+      result$with_ns <- janitor::adorn_ns(janitor::adorn_rounding(shares, 1))
+      result$three_way <- janitor::adorn_rounding(janitor::adorn_percentages(janitor::tabyl(counts, g, h, k)), 2)
+      result$title_top <- janitor::adorn_title(report)
+      result$title_combined <- janitor::adorn_title(report, "combined")
+      result$title_names <- janitor::adorn_title(report, "top", "group", "answer")
+      result$title_combined_names <- janitor::adorn_title(report, "combined", row_name="group", col_name="answer")
+      result$title_report <- janitor::adorn_title(janitor::adorn_ns(janitor::adorn_pct_formatting(shares)))
+      result$title_numbers <- janitor::adorn_title(shares)
+      plain <- data.frame(a=c("r1", "r2", "r3"), b=c(1/3, 100000, NA), c=c(NA, 1e-4, 2.5), d=c(TRUE, FALSE, NA))
+      result$title_plain <- janitor::adorn_title(plain, col_name="cols")
+      result$title_one_way <- suppressWarnings(janitor::adorn_title(one_way, col_name="share"))
+      result$title_three_way <- janitor::adorn_title(janitor::tabyl(counts, g, h, k), "combined")
+      result$title_two_columns <- janitor::adorn_title(janitor::tabyl(counts[counts$h == "x", ], g, h))
+      result
+    }
+  },
   janitor_tabyl = {
     if (!requireNamespace("janitor", quietly=TRUE)) {
       list(skip=TRUE, reason="janitor is not installed")

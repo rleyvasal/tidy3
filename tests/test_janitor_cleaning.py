@@ -445,3 +445,15 @@ def test_excel_vector_path_divides_exactly_at_day_boundaries():
     ).collect()["d"].to_list()
     assert out[:3] == [date(1899, 6, 19), date(1899, 6, 20), date(1900, 4, 9)]
     assert out == out[:3] * 4000
+
+
+
+def test_get_one_to_one_groups_columns_that_encode_the_same_thing():
+    import tidy3 as t3
+
+    frame = t3.tidy({"id": [1, 2, 3, 4], "name": ["a", "b", "c", "d"], "size": [1.0, 1.0, 2.0, None],
+                     "label": ["s", "s", "m", "?"], "other": [5, 5, 5, 5]})
+    assert t3.get_one_to_one(frame) == [["id", "name"], ["size", "label"]]
+    assert (frame >> t3.select("id", "other") >> t3.get_one_to_one()) == []
+    with pytest.raises(ValueError, match="at least one column"):
+        t3.get_one_to_one(pl.DataFrame())

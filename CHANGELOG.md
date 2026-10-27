@@ -4,6 +4,16 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- `single_value(x)`, janitor's check for a value that should be constant within each group: in `summarise` it gives that value, and collecting fails with janitor's message (`More than one (2) value found (North, South)`, plus `info=`) when a group has two. `missing=` lists values to skip, as in janitor; in `mutate` the value fills its group's rows.
+- `get_one_to_one(data)`, the groups of columns that map one to one (an id column and a name column, say), as a list of lists of names; `frame >> get_one_to_one()` works too.
+- `adorn_rounding(digits=1, rounding="half to even")` rounds a tabyl's numbers and keeps them numeric, with `"half up"` and `cols=`, and keeps the counts so `adorn_ns()` still works.
+- `adorn_title(placement="top")` puts a two-way tabyl's column variable above the headers, or `"combined"` names the first column `row/col`, with `row_name=` and `col_name=`. A tabyl now records its row and column variables for this. A frame cannot repeat a column name, so the extra blank headers are runs of spaces, where janitor repeats `""`.
+- All four are checked against janitor 2.2.1 in two new R oracle cases, including errors, missing values, NaN, signed zero, factors, three-way tabyls, and plain frames.
+
 ## 0.12.3 — 2026-10-27
 
 janitor's rounding helpers: `round_half_up()`, `signif_half_up()`, and `round_to_fraction()`, each matching janitor 2.2.1 to the last bit.

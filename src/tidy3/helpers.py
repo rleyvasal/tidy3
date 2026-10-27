@@ -29,6 +29,7 @@ __all__ = [
     "round_half_up",
     "signif_half_up",
     "round_to_fraction",
+    "single_value",
     "pmin",
     "pmax",
     "row_sums",
@@ -40,7 +41,8 @@ _FLAGS = ("is_na", "is_nan", "is_finite", "is_infinite")
 _MATH = {"abs", "floor", "ceiling", "round", "round_half_up", "signif_half_up", "round_to_fraction"}
 _PAIRS = {"pmin", "pmax"}
 _ROWS = {"row_sums", "row_means"}
-FUNCTIONS = frozenset((*_FLAGS, *_MATH, *_PAIRS, *_ROWS))
+_SUMMARIES = {"single_value"}
+FUNCTIONS = frozenset((*_FLAGS, *_MATH, *_PAIRS, *_ROWS, *_SUMMARIES))
 
 
 def _bool(name: str, value: bool) -> None:
@@ -246,6 +248,46 @@ def round_to_fraction(x: Any, denominator: float, digits: int | str | None = Non
         raise TypeError('round_to_fraction() digits must be an integer, "auto", or None')
     return _func(
         "round_to_fraction", _value(x), denominator=float(denominator), digits=digits
+    )
+
+
+def single_value(
+    x: Any, missing: Any = None, *, warn_if_all_missing: bool = False, info: str | None = None,
+) -> Expr:
+    """The one value *x* takes in each group, as janitor's ``single_value``.
+
+    ``summarise(site = single_value(site_name))`` carries a column that
+    should be constant within each group, and fails at collect time,
+    naming the values, when a group has two: ``More than one (2) value
+    found (North, South)``, followed by ``: info`` when *info* is given.
+    Unlike :func:`first`, it never hides a conflict. Values in *missing*
+    are skipped (``None``, a null, by default; a list such as
+    ``[None, ""]`` skips several), and a group with nothing else gets the
+    first of them. NaN is a value unless *missing* lists it, as in R.
+    ``warn_if_all_missing=True`` warns for such a group. In ``mutate`` the
+    value fills its group's rows.
+    """
+    _bool("single_value() warn_if_all_missing", warn_if_all_missing)
+    if info is not None and not isinstance(info, str):
+        raise TypeError("single_value() info must be a string or None")
+    choices = list(missing) if isinstance(missing, (list, tuple, set, frozenset)) else [missing]
+    if not choices:
+        raise ValueError("single_value() missing must name at least one value")
+    others = tuple(
+        value for value in choices
+        if value is not None and not (isinstance(value, float) and math.isnan(value))
+    )
+    if len({type(value) for value in others}) > 1:
+        raise TypeError("single_value() missing values other than None and NaN must share one type")
+    return _func(
+        "single_value",
+        _value(x),
+        missing_values=others or None,
+        missing_null=any(value is None for value in choices),
+        missing_nan=any(isinstance(value, float) and math.isnan(value) for value in choices),
+        default=choices[0],
+        warn=warn_if_all_missing,
+        info=info,
     )
 
 
@@ -470,6 +512,42 @@ def _round_batch(series: pl.Series, kernel: Any, *, keep_integers: bool = False)
     return rounded if rounded.dtype == series.dtype else rounded.cast(series.dtype)
 
 
+def _single_value_expr(value: pl.Expr, options: dict[str, Any]) -> pl.Expr:
+    def batch(series: pl.Series) -> pl.Series:
+        return _single_value(series, options)
+
+    # A whole column, or each group's rows under summarise() and mutate().
+    return value.map_batches(batch, return_dtype=pl.dtype_of(value), returns_scalar=True)
+
+
+def _single_value(series: pl.Series, options: dict[str, Any]) -> pl.Series:
+    """janitor's ``single_value`` on one group's values."""
+    import warnings
+
+    skip = pl.Series(series.name, [False] * len(series), dtype=pl.Boolean)
+    if options["missing_null"]:
+        skip = skip | series.is_null()
+    if options["missing_nan"] and series.dtype.is_float():
+        skip = skip | series.is_nan().fill_null(False)
+    if options["missing_values"]:
+        skip = skip | series.is_in(list(options["missing_values"])).fill_null(False)
+    # R's %in% matches NA only to NA: with missing=[""], a null is a value.
+    found = series.filter(~skip)
+    if options["warn"] and found.is_empty():
+        warnings.warn("All values are missing", stacklevel=2)
+    # 0 and -0 are one value in R; NaN is one value too.
+    distinct = (found + 0.0 if found.dtype.is_float() else found).unique(maintain_order=True)
+    if distinct.is_empty():
+        return pl.Series(series.name, [options["default"]]).cast(series.dtype)
+    if len(distinct) == 1:
+        return found.head(1)
+    from tidy3.janitor import _character_text
+
+    values = ", ".join(_character_text(distinct).to_list())
+    info = f": {options['info']}" if options["info"] is not None else ""
+    raise ValueError(f"More than one ({len(distinct)}) value found ({values}){info}")
+
+
 _SQRT_EPS = math.sqrt(sys.float_info.epsilon)  # R's sqrt(.Machine$double.eps)
 
 
@@ -636,6 +714,8 @@ def compile_polars(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> 
         return _round_to_fraction_expr(
             args[0], float(kwargs["denominator"]), None if digits is None else int(digits)
         )
+    if name == "single_value":
+        return _single_value_expr(args[0], kwargs)
     if name in _PAIRS:
         return _pair(name, args, bool(kwargs["na_rm"]))
     if name in _ROWS:

@@ -548,6 +548,7 @@ _WINDOW_FUNCTIONS = {
     "cumany",
     "n_distinct",
     "nth",
+    "single_value",
     "consecutive_id",
     "str_rank",
 }
@@ -587,7 +588,7 @@ def _is_aggregate_node(node: tuple) -> bool:
     return (
         node[0] == "n"
         or (node[0] == "call" and node[1] in _AGGREGATE_CALLS)
-        or (node[0] == "func" and node[1] in {"n_distinct", "nth", "str_flatten"})
+        or (node[0] == "func" and node[1] in {"n_distinct", "nth", "str_flatten", "single_value"})
     )
 
 

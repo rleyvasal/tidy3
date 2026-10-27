@@ -200,6 +200,24 @@ def test_signif_and_fraction_check_their_arguments():
         round_to_fraction("x", 4, "two")
 
 
+def test_single_value_carries_a_constant_and_fails_on_a_conflict():
+    import tidy3 as t3
+
+    frame = tidy({"g": ["a", "a", "b"], "site": ["N", None, "S"], "code": ["", "x", ""]})
+    out = frame >> t3.group_by("g") >> t3.summarise(site=t3.single_value("site"), code=t3.single_value("code", [None, ""]))
+    assert _col(out, "site") == ["N", "S"]
+    # A group with only missing values gets the first of them: None here.
+    assert _col(out, "code") == ["x", None]
+    filled = frame >> t3.group_by("g") >> mutate(s=t3.single_value("site"))
+    assert _col(filled, "s") == ["N", "N", "S"]
+    with pytest.raises(ValueError, match=r"More than one \(2\) value found \(N, S\): sites"):
+        (frame >> t3.summarise(s=t3.single_value("site", info="sites"))).collect()
+    with pytest.warns(UserWarning, match="All values are missing"):
+        (tidy({"v": [None, None]}) >> t3.summarise(v=t3.single_value("v", warn_if_all_missing=True))).collect()
+    with pytest.raises(TypeError, match="share one type"):
+        t3.single_value("v", [None, "", 0])
+
+
 def test_row_sums_and_means():
     frame = tidy(
         {"a": [1.0, None, None], "b": [None, None, 4.0], "c": [2.0, None, 6.0]},

@@ -185,6 +185,7 @@ def test_builtin_and_helper_names_mean_columns_where_only_a_column_fits():
         "mutate(s = signif_half_up(id, 2), f = round_to_fraction(max, 4))"
     )
     assert f"summarise(m=mean({c}('max')), k=n())" in _norm("summarise(m = mean(max), k = n())")
+    assert f"summarise(s=single_value({c}('type')))" in _norm("summarise(s = single_value(type))")
     assert "count('type')" in _norm("count(type)")
 
 

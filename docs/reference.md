@@ -112,13 +112,13 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 | Export | `nb_export`, `transform_source`, `python -m tidy3 export` / `run` |
 | Frame | `tidy`, `scan_parquet`, `scan_csv`, `scan_ipc`, `read_csv`, `read_tsv`, `read_delim`, `read_excel`, `excel_sheets`, `TidyFrame` |
 | Output | `collect`, `to_numpy`, `write_parquet`, `write_csv`, `write_ipc`, `write_excel` (pipe steps, functions, and `TidyFrame` methods) |
-| Helpers | `is_na`, `is_nan`, `is_finite`, `is_infinite`, `abs`, `floor`, `ceiling`, `round`, `round_half_up`, `signif_half_up`, `round_to_fraction`, `pmin`, `pmax`, `row_sums`, `row_means` |
+| Helpers | `is_na`, `is_nan`, `is_finite`, `is_infinite`, `abs`, `floor`, `ceiling`, `round`, `round_half_up`, `signif_half_up`, `round_to_fraction`, `single_value`, `pmin`, `pmax`, `row_sums`, `row_means` |
 | Convert | `as_numeric`/`as_double`, `as_integer`, `as_character`/`as_string`, `as_logical`, `as_date`, `as_datetime`, `ConversionError` |
 | Parse | `parse_double`, `parse_integer`, `parse_logical`, `parse_date`, `parse_datetime`, `parse_time`, `parse_number`, `locale`, `problems`, `stop_for_problems` |
 | Dates | `ymd`, `mdy`, `dmy`, `ym`, `ymd_hms`, `ymd_hm`, `ymd_h`, `mdy_hms`, `mdy_hm`, `mdy_h`, `dmy_hms`, `dmy_hm`, `dmy_h`, `parse_date_time`, `with_tz`, `force_tz`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `isoyear`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `round_date`, `days_in_month`, `leap_year`, `make_date`, `make_datetime`, `months`, `years`, `weeks`, `days`, `hours`, `minutes`, `seconds`, `period`, `add_with_rollback`, `dseconds`, `dminutes`, `dhours`, `ddays`, `dweeks`, `dmonths`, `dyears`, `duration`, `as_duration`, `time_length`, `today`, `now`, `excel_numeric_to_date` |
 | Factors | `as_factor`, `fct_relevel`, `fct_reorder`, `fct_reorder2` (`last2`, `first2`), `fct_infreq`, `fct_inorder`, `fct_rev`, `fct_recode`, `fct_collapse`, `fct_lump_n`, `fct_lump_prop`, `fct_lump_min`, `fct_drop`, `fct_expand`, `fct_na_value_to_level`, `fct_na_level_to_value` |
-| Cleaning | `clean_names`, `make_clean_names`, `set_names`, `get_dupes`, `remove_empty`, `remove_constant`, `row_to_names`, `find_header`, `compare_df_cols`, `compare_df_cols_same`, `describe_class` |
-| Reporting | `tabyl` (one-variable frequencies, two-variable count tables, and three-variable dicts of tables), `adorn_totals`, `adorn_percentages`, `adorn_pct_formatting`, `adorn_ns` |
+| Cleaning | `clean_names`, `make_clean_names`, `set_names`, `get_dupes`, `remove_empty`, `remove_constant`, `row_to_names`, `find_header`, `get_one_to_one`, `compare_df_cols`, `compare_df_cols_same`, `describe_class` |
+| Reporting | `tabyl` (one-variable frequencies, two-variable count tables, and three-variable dicts of tables), `adorn_totals`, `adorn_percentages`, `adorn_rounding`, `adorn_pct_formatting`, `adorn_ns`, `adorn_title` |
 | Rows | `filter`, `filter_out`, `arrange`, `distinct`, `slice`, `slice_head`, `slice_tail`, `slice_min`, `slice_max`, `slice_sample`, `head`, `sample_n`, `sample_frac` |
 | Columns | `mutate`, `transmute`, `select`, `drop`, `rename`, `rename_with`, `relocate`, `pull`, `glimpse` |
 | Groups | `group_by`, `rowwise`, `ungroup`, `with_groups`, `group_split`, `group_map`, `group_modify`, `group_walk`, `group_nest`, `nest_by`, `group_data`, `group_keys`, `group_rows`, `group_size`, `group_indices`, `group_vars`, `groups`, `n_groups`, `group_trim`, `summarise`, `reframe`, `count`, `tally`, `add_count`, `add_tally` |
@@ -435,6 +435,33 @@ names. Behavior is checked against janitor's
 [`adorn_pct_formatting`](https://sfirke.github.io/janitor/reference/adorn_pct_formatting.html)
 and [`adorn_ns`](https://sfirke.github.io/janitor/reference/adorn_ns.html).
 
+`adorn_rounding(digits=1)` rounds the numbers instead and keeps them
+numbers, for a table you still want to plot, sort, or export.
+`rounding="half to even"` (the default) is R's `round()`, and `"half up"`
+is `round_half_up()`. Numeric columns after the first are rounded unless
+`cols=` selects others; rounded integer columns become doubles, as in
+janitor. `adorn_ns()` still works afterwards.
+
+`adorn_title()` names the column variable of a two-way tabyl.
+`placement="top"` (the default) adds the column headers as a first row and
+puts the variable's name above them, as a printed crosstab reads. Every
+cell becomes text (numbers as R's `as.character()` writes them), so it is
+the last step. `placement="combined"` keeps the table and renames the first
+column `species/sex`. `row_name=` and `col_name=` replace the variable
+names; a table that is not a two-way tabyl needs `col_name=`. A frame cannot
+repeat a column name, so the blank headers after the first are runs of
+spaces, where janitor repeats `""`.
+
+```python
+crosstab = penguins >> tabyl("species", "sex")
+crosstab >> adorn_percentages("row") >> adorn_rounding(2) >> adorn_title()
+crosstab >> adorn_title("combined")
+```
+
+Both are checked against janitor's
+[`adorn_rounding`](https://sfirke.github.io/janitor/reference/adorn_rounding.html)
+and [`adorn_title`](https://sfirke.github.io/janitor/reference/adorn_title.html).
+
 ### Empty columns, headers, and class checks
 
 `remove_empty` drops rows and columns that are entirely missing. `""` is a
@@ -459,6 +486,20 @@ is global, not per group.
 ```python
 raw = tidy({"a": ["id", "a", None], "b": [None, None, None], "c": ["n", "", "x"]})
 raw >> row_to_names(1) >> remove_empty()
+```
+
+`get_one_to_one(data)` finds columns that encode the same thing, such as
+an id column and a name column: each value of one always appears with the
+same value of the other, and the other way round. It returns a list of
+lists of column names in column order, or `[]` when no columns map; a
+missing value counts as a value. `frame >> get_one_to_one()` is the pipe
+form. It reads the data. Checked against janitor's
+[`get_one_to_one`](https://sfirke.github.io/janitor/reference/get_one_to_one.html).
+
+```python
+sites = tidy({"site_id": [1, 2, 2, 3], "site": ["North", "South", "South", "East"],
+              "region": ["N", "S", "S", "E"], "visits": [5, 3, 3, 9]})
+get_one_to_one(sites)  # [["site_id", "site", "region"]]
 ```
 
 `row_to_names(row_number)` uses that 1-based row as the column names.
@@ -566,6 +607,14 @@ last bit, checked against janitor 2.2.1.
  >> mutate(even=round("x"), up=round_half_up("x"), up2=round_half_up("x", 2),
            sig=signif_half_up("x", 2), thirds=round_to_fraction("x", 3, "auto")))
 ```
+
+`single_value(x)` is janitor's check for a value that should be constant
+within each group: `summarise(site=single_value("site_name"))` carries it
+along, and collecting fails with `More than one (2) value found (North,
+South)` when a group has two, where `first` would hide the conflict.
+Missing values are skipped (`missing=[None, ""]` skips blanks too), and a
+group with nothing else gets the first of them; `info=` adds context to
+the error. In `mutate` the value fills its group's rows.
 
 `pmin` and `pmax` are element-wise. With `na_rm=False`, any missing input makes that row
 missing. `row_sums(..., na_rm=True)` of an all-missing row is 0;

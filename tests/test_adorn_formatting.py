@@ -180,3 +180,44 @@ def test_notebook_cols_accepts_bare_column_names(cell, expected):
     finally:
         shell.run_line_magic("unload_ext", "tidy3.jupyter")
         InteractiveShell.clear_instance()
+
+
+def test_rounding_keeps_numbers_and_the_counts_for_adorn_ns():
+    shares = report() >> t.adorn_totals("both") >> t.adorn_percentages("row")
+    out = (shares >> t.adorn_rounding(2)).collect()
+    assert out.schema["yes"] == pl.Float64
+    assert out["yes"].to_list() == [0.5, 0.67, 0.0, 0.5]
+    # Ties: 0.5 rounds up with "half up", to even (0) by default.
+    assert (shares >> t.adorn_rounding(0, "half up")).collect()["no"].to_list() == [1.0, 0.0, 1.0, 1.0]
+    assert (shares >> t.adorn_rounding(0)).collect()["no"].to_list() == [0.0, 0.0, 1.0, 0.0]
+    assert (shares >> t.adorn_rounding(1) >> t.adorn_ns()).collect()["yes"].to_list()[:2] == ["0.5 (1)", "0.7 (2)"]
+    with pytest.raises(ValueError, match="rounding must be"):
+        t.adorn_rounding(1, "up")
+    with pytest.raises(TypeError, match="digits must be an integer"):
+        t.adorn_rounding(1.0)
+
+
+def test_rounding_integer_columns_become_doubles_as_in_janitor():
+    out = (t.tidy({"g": ["a"], "n": [3]}) >> t.adorn_rounding(1)).collect()
+    assert out.schema["n"] == pl.Float64
+
+
+def test_title_puts_the_column_variable_above_the_headers():
+    out = (report() >> t.adorn_title()).collect()
+    assert out.columns == ["", "answer", " "]
+    assert out.row(0) == ("g", "no", "yes")
+    assert out.row(1) == ("a", "1", "1")
+    combined = (report() >> t.adorn_title("combined", row_name="group")).collect()
+    assert combined.columns == ["group/answer", "no", "yes"]
+
+
+def test_title_needs_a_column_name_off_a_tabyl():
+    plain = t.tidy({"a": ["x", None], "b": [1 / 3, 100000.0]})
+    with pytest.raises(ValueError, match="needs col_name"):
+        (plain >> t.adorn_title()).collect()
+    out = (plain >> t.adorn_title(col_name="cols")).collect()
+    # Numbers are written as R's as.character() writes them; missing stays missing.
+    assert out[""].to_list() == ["a", "x", None]
+    assert out["cols"].to_list() == ["b", "0.333333333333333", "1e+05"]
+    with pytest.raises(ValueError, match="placement must be"):
+        t.adorn_title("left")

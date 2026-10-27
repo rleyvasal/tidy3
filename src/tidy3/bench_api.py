@@ -826,6 +826,7 @@ def _cases() -> list[Case]:
     add(_summary("var", ["var"], lambda t, df: t.var("mass"), lambda df: pl.col("mass").var(ddof=1)))
     add(_summary("n", ["n"], lambda t, df: t.n(), lambda df: pl.len()))
     add(_summary("n_distinct", ["n_distinct"], lambda t, df: t.n_distinct("species"), lambda df: pl.col("species").n_unique()))
+    add(_summary("single_value", ["single_value"], lambda t, df: t.single_value(t.col("id") * 0), lambda df: (pl.col("id") * 0).first()))
     add(_summary("first", ["first"], lambda t, df: t.first("mass"), lambda df: pl.col("mass").sort_by("id").first()))
     add(_summary("last", ["last"], lambda t, df: t.last("mass"), lambda df: pl.col("mass").sort_by("id").last()))
     add(_summary("nth", ["nth"], lambda t, df: t.nth("mass", 2), lambda df: pl.col("mass").sort_by("id").get(1)))

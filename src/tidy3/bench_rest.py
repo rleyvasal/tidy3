@@ -1062,6 +1062,19 @@ def attach(add, Case) -> None:
         ),
     )
     verb(
+        "adorn_rounding", "janitor", ["adorn_rounding"],
+        lambda df, extra=None: (pipe(extra) >> t.adorn_rounding(1, "half up")).collect(),
+        lambda df, extra=None: extra.with_columns(pl.col("share").round(1, mode="half_away_from_zero")),
+        prepare=lambda df: df.select("species", share=pl.col("bill") / (pl.col("mass") + pl.col("bill"))),
+    )
+    verb(
+        "adorn_title", "janitor", ["adorn_title"],
+        lambda df, extra=None: (pipe(extra) >> t.adorn_title(col_name="where")).collect(),
+        lambda df, extra=None: pl.concat([pl.DataFrame({"species": ["species"], "island": ["island"]}), extra])
+        .rename({"species": "", "island": "where"}),
+        prepare=lambda df: df.select("species", "island"),
+    )
+    verb(
         "get_dupes", "janitor", ["get_dupes"],
         lambda df, extra=None: (pipe(df.select("species", "id")) >> t.get_dupes("species")).collect(),
         lambda df, extra=None: (
@@ -1113,6 +1126,12 @@ def attach(add, Case) -> None:
         "compare_df_cols_same", "janitor", ["compare_df_cols_same"],
         lambda df, extra=None: t.compare_df_cols_same(pipe(df.select("id")), pipe(df.select("id"))),
         lambda df, extra=None: True,
+    )
+    verb(
+        "get_one_to_one", "janitor", ["get_one_to_one"],
+        lambda df, extra=None: t.get_one_to_one(pipe(extra)),
+        lambda df, extra=None: [["species", "code"]],
+        prepare=lambda df: df.select("species", "mass", code=pl.col("species").rank("dense")),
     )
     verb(
         "find_header", "janitor", ["find_header"],
