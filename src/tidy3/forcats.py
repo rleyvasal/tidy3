@@ -35,6 +35,12 @@ _ORDERING_FUNCTIONS = frozenset({"fct_relevel", "fct_reorder", "fct_infreq", "fc
 # Calls whose values are their source's values; only the levels change.
 _SAME_VALUES = _ORDERING_FUNCTIONS | {"fct_drop", "fct_expand", "fct_inorder", "fct_reorder2", "as_factor"}
 _LUMPS = frozenset({"fct_lump_n", "fct_lump_prop", "fct_lump_min"})
+# Calls that read only the levels, never the values: on a factor source every
+# group gets the same result.
+_LEVEL_ONLY = frozenset({
+    "as_factor", "fct_rev", "fct_relevel", "fct_expand", "fct_recode", "fct_collapse",
+    "fct_na_level_to_value", "fct_na_value_to_level",
+})
 
 
 def _column(value: Any) -> Any:
@@ -296,9 +302,12 @@ def as_factor(x: Any) -> Any:
 
 
 class Factor:
-    """A string Series with its levels and ordered flag.
+    """A Series of level names with its levels and ordered flag.
 
-    Values are level names or null; every value is one of the levels.
+    Every value is one of the levels or null. The values keep their input
+    dtype, String or an Enum, until a function changes them, so a function
+    that only reorders levels never rewrites 100,000 values; ``to_enum``
+    recasts an Enum straight to the new levels.
     """
 
     __slots__ = ("values", "levels", "ordered")
@@ -318,7 +327,14 @@ class Factor:
         return set(self.values.drop_nulls().unique().to_list())
 
     def to_enum(self) -> pl.Series:
+        dtype = self.values.dtype
+        if isinstance(dtype, pl.Enum) and dtype.categories.to_list() == self.levels:
+            return self.values
         return self.values.cast(pl.Enum(self.levels))
+
+    def strings(self) -> pl.Series:
+        """The values as a String Series, for a function that rewrites them."""
+        return self.values if self.values.dtype == pl.String else self.values.cast(pl.String)
 
     def to_pandas(self) -> Any:
         import pandas as pd
@@ -373,9 +389,9 @@ def _categorical_source(value: Any) -> tuple[pl.Series, list[Any], bool] | None:
         return value.values, value.levels, value.ordered
     if isinstance(value, pl.Series):
         if isinstance(value.dtype, pl.Enum):
-            return value.cast(pl.String), value.dtype.categories.to_list(), True
+            return value, value.dtype.categories.to_list(), True
         if isinstance(value.dtype, pl.Categorical):
-            return value.cast(pl.String), value.cat.get_categories().to_list(), False
+            return value, value.cat.get_categories().to_list(), False
         return None
     pd = _pandas()
     if pd is None:
@@ -399,7 +415,7 @@ def _factor(value: Any, levels: list[str] | None = None, *, ordered: bool | None
         if not all(isinstance(level, str) for level in found_levels):
             raise TypeError("factor levels must be strings")
         flag = found_ordered if ordered is None else ordered
-        return Factor(values.cast(pl.String), found_levels if levels is None else levels, flag)
+        return Factor(values, found_levels if levels is None else levels, flag)
     try:
         series = _vector_series(value)
     except TypeError:
@@ -451,7 +467,7 @@ def _revalue(source: Factor, mapping: dict[str, str | None]) -> Factor:
     categories = list(dict.fromkeys(level for level in renamed if level is not None))
     values = source.values
     if any(old != new for old, new in zip(source.levels, renamed)):
-        values = values.replace_strict(source.levels, renamed, default=None, return_dtype=pl.String)
+        values = source.strings().replace_strict(source.levels, renamed, default=None, return_dtype=pl.String)
     return Factor(values, categories, source.ordered)
 
 
@@ -599,7 +615,7 @@ def _change_levels(name: str, source: Factor, args: tuple[Any, ...], kw: dict[st
     if name == "fct_na_value_to_level":
         level = kw["level"]
         new_levels = levels if level in levels else levels + [level]
-        return Factor(source.values.fill_null(level), new_levels, source.ordered)
+        return Factor(source.strings().fill_null(level), new_levels, source.ordered)
     if name == "fct_na_level_to_value":
         removed = set(kw["extra_levels"])
         return _revalue(source, {level: None for level in levels if level in removed})
@@ -730,7 +746,7 @@ def _column_value(frame: pl.DataFrame, name: str, ctx: _Context) -> Any:
     series = frame[name]
     if isinstance(series.dtype, pl.Enum):
         # An Enum without a recorded flag is ordered, as it is when collected to pandas.
-        return Factor(series.cast(pl.String), series.dtype.categories.to_list(), ctx.flags.get(name, True))
+        return Factor(series, series.dtype.categories.to_list(), ctx.flags.get(name, True))
     return series
 
 
@@ -754,21 +770,6 @@ def _factor_node(node: tuple, frame: pl.DataFrame, ctx: _Context) -> Factor:
     return _run(name, args[0], tuple(args[1:]), kw)
 
 
-def _group_keys(frame: pl.DataFrame, ctx: _Context) -> pl.DataFrame:
-    """The distinct group keys in group order, numbered by ``__tidy3_gid``."""
-    keys = frame.select(ctx.groups).unique(maintain_order=True)
-    if ctx.sort_groups:
-        keys = keys.sort(ctx.groups, nulls_last=True)
-    return keys.with_row_index("__tidy3_gid")
-
-
-def _group_ids(frame: pl.DataFrame, ctx: _Context) -> pl.Series:
-    keys = _group_keys(frame, ctx)
-    return frame.select(ctx.groups).join(
-        keys, on=ctx.groups, how="left", nulls_equal=True, maintain_order="left"
-    )["__tidy3_gid"].cast(pl.Int64)
-
-
 def _grouped_factor(node: tuple, frame: pl.DataFrame, ctx: _Context) -> Factor:
     """A factor call per group, the groups' levels joined in group order.
 
@@ -780,9 +781,21 @@ def _grouped_factor(node: tuple, frame: pl.DataFrame, ctx: _Context) -> Factor:
     """
     if frame.height == 0:
         return _factor_node(node, frame, ctx.ungrouped())
-    result = _grouped_node(node, frame, _group_ids(frame, ctx), ctx)
-    levels = result.levels.sort(["__gid", "__pos"])["__level"].unique(maintain_order=True).to_list()
-    return Factor(result.values, levels, result.ordered)
+    result = _grouped_node(node, frame, frame.select(ctx.groups), ctx)
+    return Factor(result.values, _g_union(result, ctx), result.ordered)
+
+
+def _g_union(g: _Grouped, ctx: _Context) -> list[str]:
+    """The groups' level lists joined in group order, each adding new levels."""
+    if g.uniform is not None:
+        return list(g.uniform)
+    if ctx.sort_groups:
+        ordered = g.levels.sort([*g.by, "__pos"], nulls_last=True)
+    else:
+        # Appearance order: the rows' first group first.
+        order = g.keys.unique(maintain_order=True).with_row_index("__tidy3_gid")
+        ordered = g.levels.join(order, on=g.by, how="left", nulls_equal=True).sort(["__tidy3_gid", "__pos"])
+    return ordered["__level"].unique(maintain_order=True).to_list()
 
 
 # ── group-wise factors ──────────────────────────────────────────────────
@@ -791,68 +804,103 @@ def _grouped_factor(node: tuple, frame: pl.DataFrame, ctx: _Context) -> Factor:
 class _Grouped:
     """A factor whose levels are per group.
 
-    ``gid`` numbers each row's group, ``values`` are the rows' level names,
-    and ``levels`` has one row per group and level with columns ``__gid``,
-    ``__level`` and ``__pos``, the level's position in its group's list.
+    ``keys`` holds the group columns of every row, ``values`` the rows' level
+    names, and ``levels`` one row per group and level: the group columns,
+    ``__level``, and ``__pos``, the level's position in its group's list.
+    Nothing numbers the groups until the end; within a group, order is a
+    sort of its own rows.
     """
 
-    __slots__ = ("gid", "values", "levels", "ordered", "counts")
+    __slots__ = ("keys", "by", "values", "_levels", "ordered", "uniform")
 
     def __init__(
-        self, gid: pl.Series, values: pl.Series, levels: pl.DataFrame, ordered: bool,
-        counts: pl.DataFrame | None = None,
+        self, keys: pl.DataFrame, values: pl.Series, levels: pl.DataFrame | None, ordered: bool,
+        *, uniform: list[str] | None = None,
     ) -> None:
-        self.gid = gid
+        self.keys = keys
+        self.by = keys.columns
         self.values = values
-        self.levels = levels
+        # Building the levels from text counts each level's rows; that
+        # ``__count`` column travels with the levels while the values are
+        # unchanged, so an unweighted fct_infreq or lump reads it instead of
+        # passing over the rows again.
+        self._levels = levels
         self.ordered = bool(ordered)
-        # Rows per group and level (``__gid``, ``__level``, ``__count``), when
-        # building the levels counted them; an unweighted fct_infreq or lump
-        # then needs no second pass over the rows.
-        self.counts = counts
+        # A factor source gives every group the same level list. A function
+        # that reads only the levels then gives every group the same result,
+        # so it runs once on that list; the table is built only when a
+        # function reads the data.
+        self.uniform = list(uniform) if uniform is not None else None
+
+    @property
+    def levels(self) -> pl.DataFrame:
+        if self._levels is None:
+            self._levels = _g_all_levels(self.keys.unique(), self.uniform or [])
+        return self._levels
+
+    @property
+    def on(self) -> list[str]:
+        """The join keys of the level table: the group columns and the level."""
+        return [*self.by, "__level"]
 
     def rows(self, **columns: pl.Series) -> pl.DataFrame:
-        """The rows as a frame: ``__gid``, ``__level`` (the value), and *columns*."""
-        return pl.DataFrame({"__gid": self.gid, "__level": self.values, **columns})
+        """The rows as a frame: the group columns, ``__level`` (the value), and *columns*."""
+        return self.keys.with_columns(__level=self.strings(), **columns)
 
-    def with_levels(self, levels: pl.DataFrame, ordered: bool | None = None) -> _Grouped:
-        return _Grouped(self.gid, self.values, _g_order(levels), self.ordered if ordered is None else ordered, self.counts)
+    def strings(self) -> pl.Series:
+        return self.values if self.values.dtype == pl.String else self.values.cast(pl.String)
+
+    def with_levels(self, levels: pl.DataFrame, ordered: bool | None = None, *, counts: bool = False) -> _Grouped:
+        """*levels* in their row order; ``counts`` keeps ``__count`` when the values did not change."""
+        return _Grouped(self.keys, self.values, _g_order(levels, self.by, counts=counts), self.ordered if ordered is None else ordered)
 
     def groups(self) -> pl.DataFrame:
-        return pl.DataFrame({"__gid": self.gid.unique().sort()})
+        """Every group, including those whose values are all missing."""
+        return self.keys.unique()
+
+    def level_groups(self) -> pl.DataFrame:
+        """The groups that have at least one level."""
+        return self.levels.select(self.by).unique()
+
+    def join_levels(self, table: pl.DataFrame, columns: list[str]) -> pl.DataFrame:
+        """The level table with *columns* of *table* joined on group and level."""
+        return self.levels.join(table.select([*self.on, *columns]), on=self.on, how="left", nulls_equal=True)
 
 
-def _g_order(levels: pl.DataFrame) -> pl.DataFrame:
-    """Number each group's levels in their current row order."""
-    return levels.select("__gid", "__level").with_columns(
-        __pos=(pl.col("__level").cum_count().over("__gid") - 1).cast(pl.Int64)
-    )
+def _g_order(levels: pl.DataFrame, by: list[str], *, counts: bool = False) -> pl.DataFrame:
+    """Fix the levels' current row order as ``__pos``.
+
+    Positions are row numbers over the whole table: within a group they
+    order its levels, which is all later sorts need.
+    """
+    kept = ["__count"] if counts and "__count" in levels.columns else []
+    return levels.select(*by, "__level", *kept).with_row_index("__pos").with_columns(pl.col("__pos").cast(pl.Int64))
 
 
-def _g_all_levels(gid: pl.Series, levels: list[str]) -> pl.DataFrame:
+def _g_all_levels(groups: pl.DataFrame, levels: list[str]) -> pl.DataFrame:
     """Every level for every group, in level order."""
     table = pl.DataFrame({
         "__level": pl.Series(levels, dtype=pl.String),
         "__pos": pl.Series(range(len(levels)), dtype=pl.Int64),
     })
-    return pl.DataFrame({"__gid": gid.unique().sort()}).join(table, how="cross")
+    return groups.join(table, how="cross")
 
 
-def _g_lengths(name: str, gid: pl.Series, series: pl.Series) -> pl.Series:
-    if len(series) != len(gid):
+def _g_lengths(name: str, keys: pl.DataFrame, series: pl.Series) -> pl.Series:
+    if len(series) != keys.height:
         raise ValueError(f"{name}() inputs must have the same length")
     return series
 
 
-def _g_source(name: str, value: Any, gid: pl.Series) -> _Grouped:
+def _g_source(name: str, value: Any, keys: pl.DataFrame) -> _Grouped:
     """*value* as a group-wise factor: a factor keeps all its levels in
     every group; text gives each group the levels present in it, sorted."""
     if isinstance(value, _Grouped):
         return value
     if _is_factor(value):
         factor = _factor(value)
-        _g_lengths(name, gid, factor.values)
-        return _Grouped(gid, factor.values, _g_all_levels(gid, factor.levels), factor.ordered)
+        _g_lengths(name, keys, factor.values)
+        return _Grouped(keys, factor.values, None, factor.ordered, uniform=factor.levels)
     try:
         series = _vector_series(value)
     except TypeError:
@@ -861,51 +909,54 @@ def _g_source(name: str, value: Any, gid: pl.Series) -> _Grouped:
         series = series.cast(pl.String)
     if series.dtype != pl.String:
         raise TypeError("factor input must be a character or categorical column")
-    _g_lengths(name, gid, series)
+    _g_lengths(name, keys, series)
+    by = keys.columns
     counts = (
-        pl.DataFrame({"__gid": gid, "__level": series}).drop_nulls("__level")
-        .group_by("__gid", "__level").agg(pl.len().cast(pl.Float64).alias("__count"))
-        .sort(["__gid", "__level"])
+        keys.with_columns(__level=series).drop_nulls("__level")
+        .group_by([*by, "__level"]).agg(pl.len().cast(pl.Float64).alias("__count"))
+        .sort("__level")
     )
-    return _Grouped(gid, series, _g_order(counts), False, counts)
+    return _Grouped(keys, series, _g_order(counts, by, counts=True), False)
 
 
-def _g_as_factor(value: Any, gid: pl.Series) -> _Grouped:
+def _g_as_factor(value: Any, keys: pl.DataFrame) -> _Grouped:
     """forcats::as_factor per group: appearance order for text, sorted for numbers."""
     if isinstance(value, _Grouped) or _is_factor(value):
-        return _g_source("as_factor", value, gid)
+        return _g_source("as_factor", value, keys)
     try:
         series = _vector_series(value)
     except TypeError:
         raise TypeError("as_factor() input must be text, numbers, logical values, or a factor; "
                         "convert other types with as_character() first") from None
-    _g_lengths("as_factor", gid, series)
+    _g_lengths("as_factor", keys, series)
+    by = keys.columns
     if series.dtype == pl.Null:
         series = series.cast(pl.String)
     if series.dtype == pl.String:
         first = (
-            pl.DataFrame({"__gid": gid, "__level": series}).with_row_index("__row")
-            .drop_nulls("__level").group_by("__gid", "__level").agg(pl.col("__row").min())
-            .sort(["__gid", "__row"])
+            keys.with_columns(__level=series).with_row_index("__row")
+            .drop_nulls("__level").group_by([*by, "__level"]).agg(pl.col("__row").min())
+            .sort("__row")
         )
-        return _Grouped(gid, series, _g_order(first), False)
+        return _Grouped(keys, series, _g_order(first, by), False)
     from tidy3.janitor import _header_text
 
     if series.dtype == pl.Boolean:
         values = series.replace_strict({False: "FALSE", True: "TRUE"}, default=None, return_dtype=pl.String)
-        return _Grouped(gid, values, _g_all_levels(gid, ["FALSE", "TRUE"]), False)
+        return _Grouped(keys, values, None, False, uniform=["FALSE", "TRUE"])
     if series.dtype.is_numeric():
         distinct = series.drop_nulls().unique().sort().to_list()
         labels = [_header_text(item) for item in distinct]
         if len(set(labels)) != len(labels):
             raise ValueError("as_factor() numbers must have distinct text")
         if not distinct:
-            return _Grouped(gid, series.cast(pl.String), _g_order(pl.DataFrame(schema={"__gid": pl.Int64, "__level": pl.String})), False)
-        pairs = pl.DataFrame({"__gid": gid, "__number": series}).drop_nulls("__number").unique().sort(["__gid", "__number"])
+            empty = keys.clear().with_columns(__level=pl.lit(None, dtype=pl.String))
+            return _Grouped(keys, series.cast(pl.String), _g_order(empty, by), False)
+        pairs = keys.with_columns(__number=series).drop_nulls("__number").unique().sort("__number")
         mapping = dict(zip(distinct, labels))
-        levels = pairs.select("__gid", __level=pl.col("__number").replace_strict(mapping, default=None, return_dtype=pl.String))
+        levels = pairs.select(*by, __level=pl.col("__number").replace_strict(mapping, default=None, return_dtype=pl.String))
         values = series.replace_strict(mapping, default=None, return_dtype=pl.String)
-        return _Grouped(gid, values, _g_order(levels), False)
+        return _Grouped(keys, values, _g_order(levels, by), False)
     raise TypeError("as_factor() input must be text, numbers, logical values, or a factor; "
                     "convert other types with as_character() first")
 
@@ -917,14 +968,14 @@ def _g_revalue(g: _Grouped, mapping: dict[str, str | None]) -> _Grouped:
     if all(old == new for old, new in full.items()):
         return g
     old, new = list(full), [full[name] for name in full]
-    values = g.values.replace_strict(old, new, default=None, return_dtype=pl.String)
+    values = g.strings().replace_strict(old, new, default=None, return_dtype=pl.String)
     levels = (
-        g.levels.sort(["__gid", "__pos"])
+        g.levels.sort("__pos")
         .with_columns(pl.col("__level").replace_strict(old, new, default=None, return_dtype=pl.String))
         .drop_nulls("__level")
-        .unique(subset=["__gid", "__level"], keep="first", maintain_order=True)
+        .unique(subset=g.on, keep="first", maintain_order=True)
     )
-    return _Grouped(g.gid, values, _g_order(levels), g.ordered)
+    return _Grouped(g.keys, values, _g_order(levels, g.by), g.ordered)
 
 
 def _g_keep_levels(g: _Grouped, pairs: pl.DataFrame, other_level: str) -> _Grouped:
@@ -934,68 +985,72 @@ def _g_keep_levels(g: _Grouped, pairs: pl.DataFrame, other_level: str) -> _Group
     """
     if bool(pairs["__keep"].all()):
         return g
-    pairs = pairs.sort(["__gid", "__pos"]).with_columns(
-        __changed=(~pl.col("__keep")).any().over("__gid"),
+    pairs = pairs.sort("__pos").with_columns(
+        __changed=(~pl.col("__keep")).any().over(g.by),
         __new=pl.when(pl.col("__keep")).then(pl.col("__level")).otherwise(pl.lit(other_level)),
     )
     values = g.rows().join(
-        pairs.select("__gid", "__level", "__new"), on=["__gid", "__level"], how="left", maintain_order="left"
+        pairs.select(*g.on, "__new"), on=g.on, how="left", nulls_equal=True, maintain_order="left"
     )["__new"]
     levels = (
-        pairs.select("__gid", "__changed", __level=pl.col("__new"))
-        .unique(subset=["__gid", "__level"], keep="first", maintain_order=True)
+        pairs.select(*g.by, "__changed", __level=pl.col("__new"))
+        .unique(subset=g.on, keep="first", maintain_order=True)
         .with_columns(__band=((pl.col("__level") == other_level) & pl.col("__changed")).cast(pl.Int64))
-        .with_columns(__pos=(pl.col("__level").cum_count().over("__gid") - 1).cast(pl.Int64))
-        .sort(["__gid", "__band", "__pos"])
+        .with_row_index("__pos")
+        .sort(["__band", "__pos"])
     )
-    return _Grouped(g.gid, values, _g_order(levels), g.ordered)
+    return _Grouped(g.keys, values, _g_order(levels, g.by), g.ordered)
 
 
-def _g_distinct_lists(table: pl.DataFrame) -> list[list[str]]:
+def _g_distinct_lists(table: pl.DataFrame, by: list[str]) -> list[list[str]]:
     """The distinct per-group lists of ``__level`` in *table*, ordered by ``__index``."""
     if table.is_empty():
         return []
-    lists = table.sort(["__gid", "__index"]).group_by("__gid", maintain_order=True).agg(pl.col("__level"))["__level"].to_list()
+    lists = (
+        table.sort([*by, "__index"], nulls_last=True).group_by(by, maintain_order=True)
+        .agg(pl.col("__level"))["__level"].to_list()
+    )
     return [list(item) for item in dict.fromkeys(tuple(item) for item in lists)]
 
 
 def _g_unknown(g: _Grouped, requested: pl.DataFrame) -> list[list[str]]:
     """Requested levels absent from a group, one list per distinct list.
 
-    *requested* has ``__gid``, ``__level`` and ``__index`` columns.
+    *requested* has the group columns, ``__level`` and ``__index``.
     """
-    return _g_distinct_lists(requested.join(g.levels.select("__gid", "__level"), on=["__gid", "__level"], how="anti"))
+    absent = requested.join(g.levels.select(g.on), on=g.on, how="anti", nulls_equal=True)
+    return _g_distinct_lists(absent, g.by)
 
 
-def _g_requested(g: _Grouped, levels: list[str]) -> pl.DataFrame:
-    """The same requested levels for every group, in order."""
+def _g_requested(groups: pl.DataFrame, levels: list[str]) -> pl.DataFrame:
+    """The same requested levels for every group in *groups*, in order."""
     table = pl.DataFrame({
         "__level": pl.Series(levels, dtype=pl.String),
         "__index": pl.Series(range(len(levels)), dtype=pl.Int64),
     })
-    return g.groups().join(table, how="cross")
+    return groups.join(table, how="cross")
 
 
 def _g_sort_scores(pairs: pl.DataFrame, desc: bool) -> pl.DataFrame:
     """Each group's levels by ``__key``, missing last, ties in their existing order."""
-    return pairs.sort(["__gid", "__pos"]).sort(
-        ["__gid", "__key"], descending=[False, desc], nulls_last=True, maintain_order=True
-    )
+    return pairs.sort("__pos").sort("__key", descending=desc, nulls_last=True, maintain_order=True)
 
 
-def _g_summaries(values: pl.DataFrame, fun: Any, kwargs: dict[str, Any], message: str, pair: bool) -> pl.DataFrame:
-    """A summary per group and level: ``__gid``, ``__level``, ``__score``.
+def _g_summaries(
+    values: pl.DataFrame, by: list[str], fun: Any, kwargs: dict[str, Any], message: str, pair: bool
+) -> pl.DataFrame:
+    """A summary per group and level: *by* columns and ``__score``.
 
     A tidy3 aggregation (or :func:`last2`/:func:`first2`) runs as one Polars
-    aggregation; any other callable runs once per group and level.
+    aggregation; any other callable runs once per group and level on the
+    Series collected for it.
     """
-    by = ["__gid", "__level"]
     if pair and fun in {last2, first2}:
         # The y value at the largest (smallest) x among rows with both values;
         # a level whose rows all lack one has no value, so it sorts last.
         pick = pl.col("x").arg_max() if fun is last2 else pl.col("x").arg_min()
         both = values.filter(~pl.col("__missing")).group_by(by).agg(pl.col("y").get(pick).cast(pl.Float64).alias("__score"))
-        return values.select(by).unique().join(both, on=by, how="left")
+        return values.select(by).unique().join(both, on=by, how="left", nulls_equal=True)
     if not pair and _tidy3_summary(fun):
         from tidy3.expr import to_polars
 
@@ -1003,24 +1058,22 @@ def _g_summaries(values: pl.DataFrame, fun: Any, kwargs: dict[str, Any], message
         if isinstance(summary.schema["__score"], pl.List):
             raise ValueError(message)
         return summary.with_columns(pl.col("__score").cast(pl.Float64))
-    parts = values.partition_by(by, maintain_order=True, as_dict=True)
+    collected = values.group_by(by, maintain_order=True).agg(pl.col("x"), *([pl.col("y")] if pair else []))
     scores = []
-    for part in parts.values():
-        result = fun(part["x"], part["y"], **kwargs) if pair else _summary(part["x"], fun, kwargs)
+    for index, x in enumerate(collected["x"]):
+        result = fun(x, collected["y"][index], **kwargs) if pair else _summary(x, fun, kwargs)
         if not _is_scalar(result):
             raise ValueError(message)
         scores.append(result)
-    return pl.DataFrame({
-        "__gid": pl.Series([key[0] for key in parts], dtype=pl.Int64),
-        "__level": pl.Series([key[1] for key in parts], dtype=pl.String),
-        "__score": pl.Series([None if _scalar_missing(s) else float(s) for s in scores], dtype=pl.Float64),
-    })
+    return collected.select(by).with_columns(
+        __score=pl.Series([None if _scalar_missing(s) else float(s) for s in scores], dtype=pl.Float64)
+    )
 
 
 def _g_scored(g: _Grouped, scores: pl.DataFrame, default: Any) -> pl.DataFrame:
     """The level table with ``__key``: the level's score, or *default* without one."""
     fallback = pl.lit(None if _scalar_missing(default) else float(default), dtype=pl.Float64)
-    return g.levels.join(scores.with_columns(__found=pl.lit(True)), on=["__gid", "__level"], how="left").with_columns(
+    return g.join_levels(scores.with_columns(__found=pl.lit(True)), ["__score", "__found"]).with_columns(
         __key=pl.when(pl.col("__found")).then(pl.col("__score")).otherwise(fallback)
     )
 
@@ -1031,13 +1084,12 @@ def _g_totals(g: _Grouped, weights: pl.Series | None) -> pl.DataFrame:
     *weights* None means one per row, read from the counts recorded when the
     levels were built where there are any.
     """
-    if weights is None and g.counts is not None:
-        counts = g.counts
-    else:
-        if weights is None:
-            weights = pl.repeat(1.0, len(g.gid), dtype=pl.Float64, eager=True)
-        counts = g.rows(__w=weights).drop_nulls("__level").group_by("__gid", "__level").agg(pl.col("__w").sum().alias("__count"))
-    return g.levels.join(counts, on=["__gid", "__level"], how="left").with_columns(pl.col("__count").fill_null(0.0))
+    if weights is None and "__count" in g.levels.columns:
+        return g.levels
+    if weights is None:
+        weights = pl.repeat(1.0, g.keys.height, dtype=pl.Float64, eager=True)
+    counts = g.rows(__w=weights).drop_nulls("__level").group_by(g.on).agg(pl.col("__w").sum().alias("__count"))
+    return g.join_levels(counts, ["__count"]).with_columns(pl.col("__count").fill_null(0.0))
 
 
 def _g_change_levels(name: str, g: _Grouped, args: tuple[pl.Series, ...], kw: dict[str, Any]) -> _Grouped:
@@ -1045,42 +1097,39 @@ def _g_change_levels(name: str, g: _Grouped, args: tuple[pl.Series, ...], kw: di
         return g
     if name == "fct_drop":
         used = g.rows().drop_nulls("__level").unique().with_columns(__used=pl.lit(True))
-        pairs = g.levels.join(used, on=["__gid", "__level"], how="left").with_columns(pl.col("__used").fill_null(False))
+        pairs = g.join_levels(used, ["__used"]).with_columns(pl.col("__used").fill_null(False))
         only = kw["only"]
         keep = pl.col("__used") if only is None else pl.col("__used") | ~pl.col("__level").is_in(list(only))
-        return g.with_levels(pairs.filter(keep).sort(["__gid", "__pos"]))
+        return g.with_levels(pairs.filter(keep).sort("__pos"), counts=True)
     if name == "fct_expand":
         new = list(dict.fromkeys(kw["levels"]))
         if not new:
             return g
-        counts = g.levels.group_by("__gid").agg(pl.len().alias("__n"))
-        groups = g.groups().join(counts, on="__gid", how="left").with_columns(pl.col("__n").fill_null(0).cast(pl.Int64))
+        counts = g.levels.group_by(g.by).agg(pl.len().alias("__n"))
+        groups = g.groups().join(counts, on=g.by, how="left", nulls_equal=True).with_columns(
+            pl.col("__n").fill_null(0).cast(pl.Int64)
+        )
         after = kw["after"]
         groups = groups.with_columns(
             __at=pl.col("__n") if math.isinf(after) else pl.min_horizontal(pl.lit(int(after)), pl.col("__n"))
         )
-        table = pl.DataFrame({
-            "__level": pl.Series(new, dtype=pl.String),
-            "__index": pl.Series(range(len(new)), dtype=pl.Int64),
-        })
         additions = (
-            groups.select("__gid").join(table, how="cross")
-            .join(g.levels.select("__gid", "__level"), on=["__gid", "__level"], how="anti")
-            .select("__gid", "__level", __band=pl.lit(1, dtype=pl.Int64), __key=pl.col("__index"))
+            _g_requested(groups.select(g.by), new)
+            .join(g.levels.select(g.on), on=g.on, how="anti", nulls_equal=True)
+            .select(*g.by, "__level", __band=pl.lit(1, dtype=pl.Int64), __key=pl.col("__index"))
         )
-        existing = g.levels.join(groups.select("__gid", "__at"), on="__gid", how="left").select(
-            "__gid", "__level",
-            __band=pl.when(pl.col("__pos") < pl.col("__at")).then(0).otherwise(2).cast(pl.Int64),
+        existing = g.levels.sort("__pos").with_columns(
+            __local=(pl.col("__level").cum_count().over(g.by) - 1).cast(pl.Int64)
+        ).join(groups.select(*g.by, "__at"), on=g.by, how="left", nulls_equal=True).select(
+            *g.by, "__level",
+            __band=pl.when(pl.col("__local") < pl.col("__at")).then(0).otherwise(2).cast(pl.Int64),
             __key=pl.col("__pos"),
         )
-        return g.with_levels(pl.concat([existing, additions]).sort(["__gid", "__band", "__key"]))
+        return g.with_levels(pl.concat([existing, additions]).sort(["__band", "__key"]))
     if name == "fct_inorder":
-        first = (
-            g.rows().with_row_index("__row").drop_nulls("__level")
-            .group_by("__gid", "__level").agg(pl.col("__row").min())
-        )
-        pairs = g.levels.join(first, on=["__gid", "__level"], how="left").sort(["__gid", "__row", "__pos"], nulls_last=True)
-        return g.with_levels(pairs, g.ordered if kw["ordered"] is None else kw["ordered"])
+        first = g.rows().with_row_index("__row").drop_nulls("__level").group_by(g.on).agg(pl.col("__row").min())
+        pairs = g.join_levels(first, ["__row"]).sort(["__row", "__pos"], nulls_last=True)
+        return g.with_levels(pairs, g.ordered if kw["ordered"] is None else kw["ordered"], counts=True)
     if name == "fct_reorder2":
         x, y = args
         missing = x.is_null() | y.is_null()
@@ -1095,16 +1144,16 @@ def _g_change_levels(name: str, g: _Grouped, args: tuple[pl.Series, ...], kw: di
         values = g.rows(x=x, y=y, __missing=missing).drop_nulls("__level")
         if na_rm:
             values = values.filter(~pl.col("__missing"))
-        scores = _g_summaries(values, kw["fun"], kw["fun_kwargs"], "fct_reorder2() fun must return one value per level", pair=True)
-        return g.with_levels(_g_sort_scores(_g_scored(g, scores, kw["default"]), kw["desc"]))
+        scores = _g_summaries(values, g.on, kw["fun"], kw["fun_kwargs"], "fct_reorder2() fun must return one value per level", pair=True)
+        return g.with_levels(_g_sort_scores(_g_scored(g, scores, kw["default"]), kw["desc"]), counts=True)
     if name == "fct_na_value_to_level":
         level = kw["level"]
-        have = g.levels.filter(pl.col("__level") == level).select("__gid")
-        additions = g.groups().join(have, on="__gid", how="anti").with_columns(
+        have = g.levels.filter(pl.col("__level") == level).select(g.by)
+        additions = g.groups().join(have, on=g.by, how="anti", nulls_equal=True).with_columns(
             __level=pl.lit(level), __pos=pl.lit(len(g.levels) + 1, dtype=pl.Int64)
         )
-        levels = pl.concat([g.levels, additions.select("__gid", "__level", "__pos")]).sort(["__gid", "__pos"])
-        return _Grouped(g.gid, g.values.fill_null(level), _g_order(levels), g.ordered)
+        levels = pl.concat([g.levels.select(*g.by, "__level", "__pos"), additions.select(*g.by, "__level", "__pos")]).sort("__pos")
+        return _Grouped(g.keys, g.strings().fill_null(level), _g_order(levels, g.by), g.ordered)
     if name == "fct_na_level_to_value":
         removed = set(kw["extra_levels"])
         return _g_revalue(g, {level: None for level in removed})
@@ -1117,10 +1166,10 @@ def _g_change_levels(name: str, g: _Grouped, args: tuple[pl.Series, ...], kw: di
                 continue
             for level in ([old] if isinstance(old, str) else old):
                 mapping[level] = new
-        requested = _g_requested(g, list(mapping))
-        absent = requested.join(g.levels.select("__gid", "__level"), on=["__gid", "__level"], how="anti")
+        requested = _g_requested(g.level_groups(), list(mapping))
+        absent = requested.join(g.levels.select(g.on), on=g.on, how="anti", nulls_equal=True)
         unknown = pl.concat([absent, requested.filter(pl.col("__level").is_in(removed))]).unique()
-        for levels in _g_distinct_lists(unknown):
+        for levels in _g_distinct_lists(unknown, g.by):
             warnings.warn(f"{name}(): unknown levels: {levels}", UserWarning, stacklevel=5)
         mapping.update({level: None for level in removed})
         result = _g_revalue(g, mapping)
@@ -1129,25 +1178,23 @@ def _g_change_levels(name: str, g: _Grouped, args: tuple[pl.Series, ...], kw: di
             return _g_keep_levels(result, pairs, kw["other_level"])
         return result
 
-    weights = _weights(name, len(g.gid), args, finite=True) if args else None
+    weights = _weights(name, g.keys.height, args, finite=True) if args else None
     pairs = _g_totals(g, weights)
     threshold = kw["threshold"]
     if name == "fct_lump_n":
         score = pl.col("__count") if threshold < 0 else -pl.col("__count")
         method = kw["ties_method"]
         if method == "last":
-            pairs = pairs.sort(["__gid", "__pos"], descending=[False, True]).with_columns(
-                __rank=score.rank(method="ordinal").over("__gid")
-            )
+            pairs = pairs.sort("__pos", descending=True).with_columns(__rank=score.rank(method="ordinal").over(g.by))
         else:
-            pairs = pairs.sort(["__gid", "__pos"]).with_columns(
-                __rank=score.rank(method="ordinal" if method == "first" else method).over("__gid")
+            pairs = pairs.sort("__pos").with_columns(
+                __rank=score.rank(method="ordinal" if method == "first" else method).over(g.by)
             )
         pairs = pairs.with_columns(__keep=pl.col("__rank") <= abs(threshold))
     elif name == "fct_lump_prop":
-        row_weights = pl.repeat(1.0, len(g.gid), dtype=pl.Float64, eager=True) if weights is None else weights
-        totals = g.rows(__w=row_weights).group_by("__gid").agg(pl.col("__w").sum().alias("__total"))
-        pairs = pairs.join(totals, on="__gid", how="left")
+        row_weights = pl.repeat(1.0, g.keys.height, dtype=pl.Float64, eager=True) if weights is None else weights
+        totals = g.rows(__w=row_weights).group_by(g.by).agg(pl.col("__w").sum().alias("__total"))
+        pairs = pairs.join(totals, on=g.by, how="left", nulls_equal=True)
         if bool((pairs["__total"] == 0).any()):
             raise ValueError("fct_lump_prop() requires a positive total weight when levels exist")
         proportion = pl.col("__count") / pl.col("__total")
@@ -1159,59 +1206,65 @@ def _g_change_levels(name: str, g: _Grouped, args: tuple[pl.Series, ...], kw: di
 
 def _g_apply(name: str, g: _Grouped, args: tuple[pl.Series, ...], kw: dict[str, Any]) -> _Grouped:
     """One factor function on every group at once; *args* are Series of the rows' length."""
+    if g.uniform is not None and name in _LEVEL_ONLY:
+        # Every group has the same levels and the function reads only the
+        # levels: the groups' results are identical, so compute them once.
+        result = _apply(name, Factor(g.values, g.uniform, g.ordered), args, kw)
+        return _Grouped(g.keys, result.values, None, result.ordered, uniform=result.levels)
     if name not in _ORDERING_FUNCTIONS:
         return _g_change_levels(name, g, args, kw)
     ordered = g.ordered
     if name == "fct_rev":
-        return g.with_levels(g.levels.sort(["__gid", "__pos"], descending=[False, True]))
+        return g.with_levels(g.levels.sort("__pos", descending=True), counts=True)
     if name == "fct_relevel":
         requested = kw["levels"]
         if len(requested) == 1 and callable(requested[0]):
             function = requested[0]
             per_group = (
-                g.levels.sort(["__gid", "__pos"]).group_by("__gid", maintain_order=True).agg(pl.col("__level"))
+                g.levels.sort("__pos").group_by(g.by, maintain_order=True).agg(pl.col("__level"))
+                .with_row_index("__g")
             )
-            gids, names, indexes = [], [], []
-            for gid, levels in per_group.iter_rows():
-                chosen = list(function(list(levels)))
+            numbers, names, indexes = [], [], []
+            for number, levels in zip(per_group["__g"], per_group["__level"]):
+                chosen = list(function(levels.to_list()))
                 if not all(isinstance(level, str) for level in chosen):
                     raise TypeError("fct_relevel() callable must return character levels")
                 if len(set(chosen)) != len(chosen):
                     raise ValueError("fct_relevel() levels must be unique")
-                gids.extend([gid] * len(chosen))
+                numbers.extend([number] * len(chosen))
                 names.extend(chosen)
                 indexes.extend(range(len(chosen)))
             table = pl.DataFrame({
-                "__gid": pl.Series(gids, dtype=pl.Int64),
+                "__g": pl.Series(numbers, dtype=per_group.schema["__g"]),
                 "__level": pl.Series(names, dtype=pl.String),
                 "__index": pl.Series(indexes, dtype=pl.Int64),
-            })
+            }).join(per_group.select(*g.by, "__g"), on="__g", how="left").drop("__g")
         else:
             if not all(isinstance(level, str) for level in requested):
                 raise TypeError("fct_relevel() callable must return character levels")
             if len(set(requested)) != len(requested):
                 raise ValueError("fct_relevel() levels must be unique")
-            table = _g_requested(g, list(requested))
+            table = _g_requested(g.level_groups(), list(requested))
         for unknown in _g_unknown(g, table):
             warnings.warn(f"fct_relevel(): unknown levels: {unknown}", UserWarning, stacklevel=5)
         after = kw["after"]
-        pairs = g.levels.join(table, on=["__gid", "__level"], how="left").sort(["__gid", "__pos"]).with_columns(
+        pairs = g.join_levels(table, ["__index"]).sort("__pos").with_columns(
             __other=pl.col("__index").is_null()
         ).with_columns(
-            __other_rank=pl.col("__other").cast(pl.Int64).cum_sum().over("__gid") - 1,
-            __n_other=pl.col("__other").cast(pl.Int64).sum().over("__gid"),
+            __other_rank=pl.col("__other").cast(pl.Int64).cum_sum().over(g.by) - 1,
+            __n_other=pl.col("__other").cast(pl.Int64).sum().over(g.by),
         )
         position = pl.col("__n_other") if math.isinf(after) else pl.min_horizontal(pl.lit(int(after)), pl.col("__n_other"))
         before = pl.col("__other") & (pl.col("__other_rank") < position)
         pairs = pairs.with_columns(
             __band=pl.when(before).then(0).when(pl.col("__other")).then(2).otherwise(1),
             __key=pl.when(pl.col("__other")).then(pl.col("__other_rank")).otherwise(pl.col("__index")),
-        ).sort(["__gid", "__band", "__key"])
-        return g.with_levels(pairs)
+        ).sort(["__band", "__key"])
+        return g.with_levels(pairs, counts=True)
     if name == "fct_infreq":
-        weights = _weights("fct_infreq", len(g.gid), args, finite=False) if args else None
-        pairs = _g_totals(g, weights).sort(["__gid", "__count", "__pos"], descending=[False, True, False])
-        return g.with_levels(pairs, ordered if kw["ordered"] is None else kw["ordered"])
+        weights = _weights("fct_infreq", g.keys.height, args, finite=False) if args else None
+        pairs = _g_totals(g, weights).sort(["__count", "__pos"], descending=[True, False])
+        return g.with_levels(pairs, ordered if kw["ordered"] is None else kw["ordered"], counts=weights is None)
     x = args[0]
     if not (x.dtype.is_numeric() or x.dtype == pl.Boolean) and not x.drop_nulls().is_empty():
         raise TypeError("fct_reorder() x must be numeric")
@@ -1220,11 +1273,11 @@ def _g_apply(name: str, g: _Grouped, args: tuple[pl.Series, ...], kw: dict[str, 
     values = g.rows(x=x).drop_nulls("__level")
     if kw["na_rm"] is not False:
         values = values.filter(pl.col("x").is_not_null())
-    scores = _g_summaries(values, kw["fun"], kw["fun_kwargs"], "fct_reorder() fun must return one value per level", pair=False)
-    return g.with_levels(_g_sort_scores(_g_scored(g, scores, kw["default"]), kw["desc"]))
+    scores = _g_summaries(values, g.on, kw["fun"], kw["fun_kwargs"], "fct_reorder() fun must return one value per level", pair=False)
+    return g.with_levels(_g_sort_scores(_g_scored(g, scores, kw["default"]), kw["desc"]), counts=True)
 
 
-def _g_arg(node: Any, frame: pl.DataFrame, gid: pl.Series, ctx: _Context) -> Any:
+def _g_arg(node: Any, frame: pl.DataFrame, keys: pl.DataFrame, ctx: _Context) -> Any:
     """One argument of a grouped factor call, with dplyr's per-group semantics."""
     kind = node[0]
     if kind == "lit":
@@ -1232,18 +1285,18 @@ def _g_arg(node: Any, frame: pl.DataFrame, gid: pl.Series, ctx: _Context) -> Any
     if kind == "col" or (kind == "name" and node[1] in frame.columns):
         return _column_value(frame, node[1], ctx)
     if kind == "func" and node[1] in FUNCTIONS:
-        return _grouped_node(node, frame, gid, ctx)
+        return _grouped_node(node, frame, keys, ctx)
     return _compile_value(node, frame, ctx)
 
 
-def _grouped_node(node: tuple, frame: pl.DataFrame, gid: pl.Series, ctx: _Context) -> _Grouped:
-    """A factor call evaluated for every group at once."""
+def _grouped_node(node: tuple, frame: pl.DataFrame, keys: pl.DataFrame, ctx: _Context) -> _Grouped:
+    """A factor call evaluated for every group at once; *keys* are the rows' group columns."""
     name, raw_args, raw_kwargs = node[1], node[2], node[3]
-    args = [_g_arg(arg, frame, gid, ctx) for arg in raw_args]
-    kw = {key: _g_arg(value, frame, gid, ctx) for key, value in raw_kwargs.items()}
-    source = _g_as_factor(args[0], gid) if name == "as_factor" else _g_source(name, args[0], gid)
+    args = [_g_arg(arg, frame, keys, ctx) for arg in raw_args]
+    kw = {key: _g_arg(value, frame, keys, ctx) for key, value in raw_kwargs.items()}
+    source = _g_as_factor(args[0], keys) if name == "as_factor" else _g_source(name, args[0], keys)
     extras = tuple(
-        _g_lengths(name, gid, value.values if isinstance(value, _Grouped) else _vector_series(value))
+        _g_lengths(name, keys, value.values if isinstance(value, _Grouped) else _vector_series(value))
         for value in args[1:]
     )
     return _g_apply(name, source, extras, kw)
@@ -1379,7 +1432,7 @@ def prepare_polars(
 
         for name, result in results.items():
             ordered[name] = result.ordered
-            columns.append(to_polars(sources[name]).cast(pl.String).cast(pl.Enum(result.levels)).alias(name))
+            columns.append(to_polars(sources[name]).cast(pl.Enum(result.levels)).alias(name))
         return lf.with_columns(columns), rest, ordered
     if lazy:
         data = lf.collect()

@@ -1088,9 +1088,11 @@ mutations; `as_factor` also covers numeric and logical columns, and
 snapshot**, including the source frame, and later verbs build a lazy plan on
 that snapshot: nested calls, factor (Enum) inputs, grouped value changes,
 callables, and float columns holding NaN. Grouped calls compute every
-group's levels at once; only a Python callable passed as `fun=` runs once
-per group and level, and it receives Polars Series. Other mutations stay
-lazy.
+group's levels at once. A tidy3 aggregation passed as `fun=` (`median`,
+`mean`, `sum`, `min`, `max`, and the others) runs as one Polars aggregation
+over every group and level; any other Python callable runs once per group
+and level on the Polars Series collected for it, so prefer the aggregation
+when one fits. Other mutations stay lazy.
 
 A list, pandas categorical/Series, or Polars Series runs immediately. A
 Polars Series returns a Polars Enum Series; a list or pandas input returns a
