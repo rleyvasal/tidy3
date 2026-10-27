@@ -112,7 +112,7 @@ result.collect(as_="pandas").to_csv("summary.csv", index=False)
 | Export | `nb_export`, `transform_source`, `python -m tidy3 export` / `run` |
 | Frame | `tidy`, `scan_parquet`, `scan_csv`, `scan_ipc`, `read_csv`, `read_tsv`, `read_delim`, `read_excel`, `excel_sheets`, `TidyFrame` |
 | Output | `collect`, `to_numpy`, `write_parquet`, `write_csv`, `write_ipc`, `write_excel` (pipe steps, functions, and `TidyFrame` methods) |
-| Helpers | `is_na`, `is_nan`, `is_finite`, `is_infinite`, `abs`, `floor`, `ceiling`, `round`, `round_half_up`, `pmin`, `pmax`, `row_sums`, `row_means` |
+| Helpers | `is_na`, `is_nan`, `is_finite`, `is_infinite`, `abs`, `floor`, `ceiling`, `round`, `round_half_up`, `signif_half_up`, `round_to_fraction`, `pmin`, `pmax`, `row_sums`, `row_means` |
 | Convert | `as_numeric`/`as_double`, `as_integer`, `as_character`/`as_string`, `as_logical`, `as_date`, `as_datetime`, `ConversionError` |
 | Parse | `parse_double`, `parse_integer`, `parse_logical`, `parse_date`, `parse_datetime`, `parse_time`, `parse_number`, `locale`, `problems`, `stop_for_problems` |
 | Dates | `ymd`, `mdy`, `dmy`, `ym`, `ymd_hms`, `ymd_hm`, `ymd_h`, `mdy_hms`, `mdy_hm`, `mdy_h`, `dmy_hms`, `dmy_hm`, `dmy_h`, `parse_date_time`, `with_tz`, `force_tz`, `year`, `month`, `day`, `wday`, `yday`, `week`, `isoweek`, `isoyear`, `quarter`, `hour`, `minute`, `second`, `floor_date`, `ceiling_date`, `round_date`, `days_in_month`, `leap_year`, `make_date`, `make_datetime`, `months`, `years`, `weeks`, `days`, `hours`, `minutes`, `seconds`, `period`, `add_with_rollback`, `dseconds`, `dminutes`, `dhours`, `ddays`, `dweeks`, `dmonths`, `dyears`, `duration`, `as_duration`, `time_length`, `today`, `now`, `excel_numeric_to_date` |
@@ -550,12 +550,21 @@ stored, so `round(2.675, 2)` is 2.67 because 2.675 is stored as
 `round_half_up(2.5)` is 3 and `round_half_up(-2.5)` is -3. Like janitor, it
 adds `sqrt(.Machine$double.eps)` (about 1.5e-8) before truncating, so a tie
 stored a hair low still rounds up: `round_half_up(2.675, 2)` is 2.68.
-Results match janitor's to the last bit, checked against janitor 2.2.1.
 Negative `digits` and integer columns work as for `round`.
+`signif_half_up(x, digits=6)` keeps `digits` significant digits the same
+way, so `signif_half_up(12.5, 2)` is 13 and `signif_half_up(0.00125, 2)` is
+0.0013. `round_to_fraction(x, denominator)` rounds to the nearest
+`1/denominator` with R's `round()`, so ties go to the even part:
+`round_to_fraction(1.3, 4)` is 1.25 and `round_to_fraction(0.125, 4)` is 0.
+Its `digits` then rounds the result: `None` (janitor's `Inf`, the default)
+leaves it, an integer rounds to that many decimals, and `"auto"` uses
+`ceiling(log10(denominator)) + 1`. All three match janitor's results to the
+last bit, checked against janitor 2.2.1.
 
 ```python
-(tidy({"x": [0.5, 2.5, -2.5, 2.675]})
- >> mutate(even=round("x"), up=round_half_up("x"), up2=round_half_up("x", 2)))
+(tidy({"x": [0.5, 2.5, -2.5, 2.675, 1 / 3]})
+ >> mutate(even=round("x"), up=round_half_up("x"), up2=round_half_up("x", 2),
+           sig=signif_half_up("x", 2), thirds=round_to_fraction("x", 3, "auto")))
 ```
 
 `pmin` and `pmax` are element-wise. With `na_rm=False`, any missing input makes that row

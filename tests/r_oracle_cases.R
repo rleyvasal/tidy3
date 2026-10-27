@@ -57,6 +57,11 @@ args <- commandArgs(trailingOnly=TRUE)
 batch <- length(args) > 0 && args[[1]] == "--batch"
 cases <- if (batch) args[-1] else args[[1]]
 
+# -0 made at run time: the byte compiler pools constants that are
+# identical(), and identical(0, -0) is TRUE, so a literal -0 next to a 0
+# in the same case would come out as 0.
+negative_zero <- function() -as.numeric("0")
+
 base <- tibble(
   id=1:4,
   g=c("b", "a", "b", "a"),
@@ -191,7 +196,7 @@ run_case <- function(case_name) switch(
       grid <- (-3000:3000) / 1000
       special <- c(0.5, 1.5, 2.5, -0.5, -2.5, 0.125, 0.285, 2.675, 1.005, 0.0005, -1.005,
                    2.4999999999, 2.4999999, 0.49999999999999994, 2^52 - 0.5,
-                   1e15 + 0.3, 12345.6789, -0.4, 0, -0, 5e-324, 10^300, 1.5 * 2^1023,
+                   1e15 + 0.3, 12345.6789, -0.4, 0, negative_zero(), 5e-324, 10^300, 1.5 * 2^1023,
                    NA, NaN, Inf, -Inf)
       result <- list()
       for (digits in -2:3) result[[paste0("grid_", digits)]] <- exact(janitor::round_half_up(grid, digits))
@@ -199,6 +204,32 @@ run_case <- function(case_name) switch(
         result[[paste0("special_", digits)]] <- exact(janitor::round_half_up(special, digits))
       }
       result$integers <- exact(janitor::round_half_up(c(15L, 25L, -25L, 149L, NA), -1))
+      result
+    }
+  },
+  janitor_signif_fraction = {
+    if (!requireNamespace("janitor", quietly=TRUE)) {
+      list(skip=TRUE, reason="janitor is not installed")
+    } else {
+      exact <- function(x) ifelse(is.nan(x), "NaN", ifelse(is.na(x), "NA", sprintf("%.17g", x)))
+      grid <- (-3000:3000) / 1000
+      wide <- c(grid * 1000, grid / 1000, grid * 7 / 3)
+      special <- c(12.5, -12.5, 0.00125, 1250, 1000, 999.95, 0.1, 100, 1e15 + 0.3, 2^-1074, 2^1000,
+                   1.5 * 2^1023, 0, negative_zero(), NA, NaN, Inf, -Inf)
+      result <- list()
+      for (digits in c(-1, 0, 1, 2, 3, 6, 17, 20)) {
+        result[[paste0("signif_", digits)]] <- exact(janitor::signif_half_up(c(wide, special), digits))
+      }
+      result$signif_integers <- exact(janitor::signif_half_up(c(1250L, -1250L, 7L, 0L, NA), 2))
+      for (denominator in c(1, 2, 3, 4, 7, 10, 1.5, 1000)) {
+        name <- paste0("fraction_", gsub("\\.", "_", denominator))
+        values <- c(grid, special)
+        result[[name]] <- exact(janitor::round_to_fraction(values, denominator))
+        result[[paste0(name, "_auto")]] <- exact(janitor::round_to_fraction(values, denominator, "auto"))
+        result[[paste0(name, "_2")]] <- exact(janitor::round_to_fraction(values, denominator, 2))
+        result[[paste0(name, "_0")]] <- exact(janitor::round_to_fraction(values, denominator, 0))
+      }
+      result$fraction_integers <- exact(janitor::round_to_fraction(c(3L, -2L, NA), 4))
       result
     }
   },

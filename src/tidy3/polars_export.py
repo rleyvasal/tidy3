@@ -831,6 +831,8 @@ _UDF_NAMES = (
     ("tidy3.convert", "compile_polars", "a text conversion (as_*, parse_*, ymd(), ...)"),
     ("tidy3.helpers", "_round_expr", "round(), which follows R's rounding"),
     ("tidy3.helpers", "_round_half_up_expr", "round_half_up(), which follows janitor's rounding"),
+    ("tidy3.helpers", "_signif_half_up_expr", "signif_half_up(), which follows janitor's rounding"),
+    ("tidy3.helpers", "_round_to_fraction_expr", "round_to_fraction(), which follows janitor's rounding"),
     ("tidy3.dates", "_excel_polars", "excel_numeric_to_date()"),
     ("tidy3.dates", "compile_polars", "force_tz()"),
     ("tidy3.dates", "_clock_polars", "hour(), minute(), or second() on an unknown type"),

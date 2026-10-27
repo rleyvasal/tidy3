@@ -57,10 +57,12 @@ from tidy3 import (
     read_tsv,
     round,
     round_half_up,
+    round_to_fraction,
     row_means,
     row_sums,
     scan_csv,
     select,
+    signif_half_up,
     stop_for_problems,
     sum,
     summarise,
@@ -161,6 +163,41 @@ def test_round_half_up_around_a_summary_and_its_digits():
     for digits in (1.0, True, "1"):
         with pytest.raises(TypeError, match="digits must be an integer"):
             round_half_up("hp", digits)
+
+
+def test_signif_half_up_keeps_significant_digits_with_ties_up():
+    frame = tidy({"x": [12.5, -12.5, 0.00125, 123456.0, 0.0, None, float("inf")],
+                  "n": pl.Series([1250, -1250, 7, 0, 99, 5, 1], dtype=pl.Int32)})
+    out = (frame >> mutate(s=signif_half_up("x", 2), d=signif_half_up("x"), n2=signif_half_up("n", 2))).collect()
+    assert out["s"].to_list() == [13.0, -13.0, 0.0013, 120000.0, 0.0, None, float("inf")]
+    assert out["d"].to_list()[:4] == [12.5, -12.5, 0.00125, 123456.0]
+    assert out["n2"].dtype == pl.Int32 and out["n2"].to_list() == [1300, -1300, 7, 0, 99, 5, 1]
+
+
+def test_round_to_fraction_rounds_to_the_nearest_part():
+    frame = tidy({"x": [1.3, 2.6, 0.125, 0.375, -1.1, 1 / 3, None]})
+    out = (frame >> mutate(
+        q=round_to_fraction("x", 4),
+        third=round_to_fraction("x", 3, "auto"),
+        tenth=round_to_fraction("x", 3, 1),
+        inf=round_to_fraction("x", 3, float("inf")),
+    )).collect()
+    # Exact ties go to the even number of quarters, as R's round() does.
+    assert out["q"].to_list() == [1.25, 2.5, 0.0, 0.5, -1.0, 0.25, None]
+    assert out["third"].to_list()[:6] == [1.33, 2.67, 0.0, 0.33, -1.0, 0.33]
+    assert out["tenth"].to_list()[:6] == [1.3, 2.7, 0.0, 0.3, -1.0, 0.3]
+    assert out["inf"].to_list() == (frame >> mutate(r=round_to_fraction("x", 3))).collect()["r"].to_list()
+
+
+def test_signif_and_fraction_check_their_arguments():
+    with pytest.raises(TypeError, match="digits must be an integer"):
+        signif_half_up("x", 2.0)
+    with pytest.raises(ValueError, match="at least 1"):
+        round_to_fraction("x", 0.5)
+    with pytest.raises(TypeError, match="denominator must be a number"):
+        round_to_fraction("x", True)
+    with pytest.raises(TypeError, match="digits must be an integer"):
+        round_to_fraction("x", 4, "two")
 
 
 def test_row_sums_and_means():

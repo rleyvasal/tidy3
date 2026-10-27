@@ -1559,20 +1559,23 @@ def _janitor_formatting():
     return result
 
 
+def _exact_digits(values):
+    """R's ``sprintf("%.17g")`` spelling of each value, as an R vector."""
+    out = []
+    for value in values:
+        if value is None:
+            out.append("NA")
+        elif value != value:
+            out.append("NaN")
+        elif value in (float("inf"), float("-inf")):
+            out.append("Inf" if value > 0 else "-Inf")
+        else:
+            out.append("%.17g" % value)
+    return {"kind": "vector", "data": out}
+
+
 def _janitor_round_half_up():
-    def exact(values):
-        # R's sprintf("%.17g") spelling of each value.
-        out = []
-        for value in values:
-            if value is None:
-                out.append("NA")
-            elif value != value:
-                out.append("NaN")
-            elif value in (float("inf"), float("-inf")):
-                out.append("Inf" if value > 0 else "-Inf")
-            else:
-                out.append("%.17g" % value)
-        return {"kind": "vector", "data": out}
+    exact = _exact_digits
 
     grid = tidy({"x": [k / 1000 for k in range(-3000, 3001)]})
     special = tidy({"x": [0.5, 1.5, 2.5, -0.5, -2.5, 0.125, 0.285, 2.675, 1.005, 0.0005, -1.005,
@@ -1586,6 +1589,32 @@ def _janitor_round_half_up():
         result[f"special_{digits}"] = exact(special >> mutate(r=tidy3.round_half_up("x", digits)) >> pull("r"))
     integers = tidy({"x": pl.Series([15, 25, -25, 149, None], dtype=pl.Int64)})
     result["integers"] = exact(integers >> mutate(r=tidy3.round_half_up("x", -1)) >> pull("r"))
+    return result
+
+
+def _janitor_signif_fraction():
+    exact = _exact_digits
+    grid = [k / 1000 for k in range(-3000, 3001)]
+    wide = [v * 1000 for v in grid] + [v / 1000 for v in grid] + [v * 7 / 3 for v in grid]
+    special = [12.5, -12.5, 0.00125, 1250.0, 1000.0, 999.95, 0.1, 100.0, 1e15 + 0.3, 2.0**-1074, 2.0**1000,
+               1.5 * 2.0**1023, 0.0, -0.0, None, float("nan"), float("inf"), float("-inf")]
+
+    def run(values, expr):
+        return exact(tidy({"x": values}) >> mutate(r=expr) >> pull("r"))
+
+    result = {}
+    for digits in (-1, 0, 1, 2, 3, 6, 17, 20):
+        result[f"signif_{digits}"] = run(wide + special, tidy3.signif_half_up("x", digits))
+    integers = pl.Series([1250, -1250, 7, 0, None], dtype=pl.Int64)
+    result["signif_integers"] = run(integers, tidy3.signif_half_up("x", 2))
+    for denominator in (1, 2, 3, 4, 7, 10, 1.5, 1000):
+        name = "fraction_" + str(denominator).replace(".", "_")
+        values = grid + special
+        result[name] = run(values, tidy3.round_to_fraction("x", denominator))
+        result[f"{name}_auto"] = run(values, tidy3.round_to_fraction("x", denominator, "auto"))
+        result[f"{name}_2"] = run(values, tidy3.round_to_fraction("x", denominator, 2))
+        result[f"{name}_0"] = run(values, tidy3.round_to_fraction("x", denominator, 0))
+    result["fraction_integers"] = run(pl.Series([3, -2, None], dtype=pl.Int64), tidy3.round_to_fraction("x", 4))
     return result
 
 
@@ -2898,6 +2927,7 @@ ORACLE_CASES: dict[str, Callable[[str], Any]] = {
     "janitor_percentages": _janitor_percentages,
     "janitor_formatting": _janitor_formatting,
     "janitor_round_half_up": _janitor_round_half_up,
+    "janitor_signif_fraction": _janitor_signif_fraction,
     "timezone_conversion": _timezone_conversion,
     "timezone_dst": _timezone_dst,
     "timezone_resolved_repeats": _timezone_resolved_repeats,

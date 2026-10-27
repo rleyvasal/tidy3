@@ -27,6 +27,8 @@ __all__ = [
     "ceiling",
     "round",
     "round_half_up",
+    "signif_half_up",
+    "round_to_fraction",
     "pmin",
     "pmax",
     "row_sums",
@@ -35,7 +37,7 @@ __all__ = [
 ]
 
 _FLAGS = ("is_na", "is_nan", "is_finite", "is_infinite")
-_MATH = {"abs", "floor", "ceiling", "round", "round_half_up"}
+_MATH = {"abs", "floor", "ceiling", "round", "round_half_up", "signif_half_up", "round_to_fraction"}
 _PAIRS = {"pmin", "pmax"}
 _ROWS = {"row_sums", "row_means"}
 FUNCTIONS = frozenset((*_FLAGS, *_MATH, *_PAIRS, *_ROWS))
@@ -204,6 +206,49 @@ def round_half_up(x: Any, digits: int = 0) -> Expr:
     return _func("round_half_up", _value(x), digits=digits)
 
 
+def signif_half_up(x: Any, digits: int = 6) -> Expr:
+    """Round *x* to *digits* significant digits, ties away from zero.
+
+    janitor's ``signif_half_up``: each value is scaled so that *digits*
+    digits sit before the decimal point, rounded with
+    :func:`round_half_up`, and scaled back, so ``signif_half_up(12.5, 2)``
+    is 13 and ``signif_half_up(0.00125, 2)`` is 0.0013. Zero, missing
+    values, NaN, and infinities pass through. Integer columns stay integers
+    (``signif_half_up(1250, 2)`` is 1300). As in janitor, a value too small
+    to scale (a subnormal, below about 1e-308) comes out NaN.
+    """
+    if isinstance(digits, bool) or not isinstance(digits, int):
+        raise TypeError("signif_half_up() digits must be an integer")
+    return _func("signif_half_up", _value(x), digits=digits)
+
+
+def round_to_fraction(x: Any, denominator: float, digits: int | str | None = None) -> Expr:
+    """Round *x* to the nearest fraction with *denominator*, as janitor does.
+
+    ``round_to_fraction(x, 4)`` rounds to quarters, so 1.3 becomes 1.25 and
+    2.6 becomes 2.5. As in janitor, ``x * denominator`` is rounded with R's
+    ``round()`` and divided back; an exact tie goes to the even number, so
+    in quarters 0.125 rounds to 0 and 0.375 to 0.5. *denominator* is a
+    number of at least 1. ``digits`` then rounds the result with
+    :func:`round`: ``None`` (janitor's ``Inf``, the default) leaves it,
+    an integer rounds to that many decimals, and ``"auto"`` uses
+    ``ceiling(log10(denominator)) + 1``, so thirds show as 0.333.
+    """
+    if isinstance(denominator, bool) or not isinstance(denominator, (int, float)):
+        raise TypeError("round_to_fraction() denominator must be a number")
+    if not denominator >= 1:
+        raise ValueError("round_to_fraction() denominator must be at least 1")
+    if digits == "auto":
+        digits = math.ceil(math.log10(denominator)) + 1
+    elif isinstance(digits, float) and math.isinf(digits) and digits > 0:
+        digits = None
+    elif digits is not None and (isinstance(digits, bool) or not isinstance(digits, int)):
+        raise TypeError('round_to_fraction() digits must be an integer, "auto", or None')
+    return _func(
+        "round_to_fraction", _value(x), denominator=float(denominator), digits=digits
+    )
+
+
 def pmin(*args: Any, na_rm: bool = False) -> Expr:
     """Element-wise minimum, as R's ``pmin``.
 
@@ -367,7 +412,7 @@ def _round_expr(value: pl.Expr, digits: int) -> pl.Expr:
         return value.round(0, mode="half_to_even")
 
     def batch(series: pl.Series) -> pl.Series:
-        return _round_batch(series, digits, _round_numpy)
+        return _round_batch(series, lambda v: _round_numpy(v, digits), keep_integers=digits >= 0)
 
     # Integers stay integers; floats stay floats.
     return value.map_batches(batch, return_dtype=pl.dtype_of(value), is_elementwise=True)
@@ -381,21 +426,43 @@ def _round_half_up_expr(value: pl.Expr, digits: int) -> pl.Expr:
         return value
 
     def batch(series: pl.Series) -> pl.Series:
-        return _round_batch(series, digits, _round_half_up_numpy)
+        return _round_batch(
+            series, lambda v: _round_half_up_numpy(v, digits), keep_integers=digits >= 0
+        )
 
     return value.map_batches(batch, return_dtype=pl.dtype_of(value), is_elementwise=True)
 
 
-def _round_batch(series: pl.Series, digits: int, kernel: Any) -> pl.Series:
-    """Round one batch with a NumPy *kernel*, keeping nulls and the dtype."""
-    if series.dtype.is_integer() and digits >= 0:
+def _signif_half_up_expr(value: pl.Expr, digits: int) -> pl.Expr:
+    def batch(series: pl.Series) -> pl.Series:
+        return _round_batch(series, lambda v: _signif_half_up_numpy(v, digits))
+
+    return value.map_batches(batch, return_dtype=pl.dtype_of(value), is_elementwise=True)
+
+
+def _round_to_fraction_expr(value: pl.Expr, denominator: float, digits: int | None) -> pl.Expr:
+    def batch(series: pl.Series) -> pl.Series:
+        return _round_batch(
+            series, lambda v: _round_to_fraction_numpy(v, denominator, digits)
+        )
+
+    return value.map_batches(batch, return_dtype=pl.dtype_of(value), is_elementwise=True)
+
+
+def _round_batch(series: pl.Series, kernel: Any, *, keep_integers: bool = False) -> pl.Series:
+    """Round one batch with a NumPy *kernel*, keeping nulls and the dtype.
+
+    *keep_integers* skips integer columns, which the kernel would return
+    unchanged.
+    """
+    if keep_integers and series.dtype.is_integer():
         return series
     # NumPy, not Polars arithmetic: Polars divides a column by a constant
     # through its reciprocal, so 3 / 10 would come out 0.30000000000000004.
     # (Polars expressions were tried: at these sizes each of the twenty
     # or so passes costs more in Polars than in NumPy.)
     values = series.cast(pl.Float64).to_numpy()
-    rounded = pl.Series(series.name, kernel(values, digits))
+    rounded = pl.Series(series.name, kernel(values))
     if series.null_count():
         rounded = pl.select(
             pl.when(series.is_null()).then(None).otherwise(rounded)
@@ -417,6 +484,30 @@ def _round_half_up_numpy(values: np.ndarray, digits: int) -> np.ndarray:
         scale = np.power(10.0, digits)
         scaled = np.abs(values) * scale + 0.5 + _SQRT_EPS
         return np.trunc(scaled) / scale * np.sign(values)
+
+
+def _signif_half_up_numpy(values: np.ndarray, digits: int) -> np.ndarray:
+    """janitor's ``signif_half_up`` on a float array, step for step.
+
+    Nonzero finite values are multiplied by
+    ``10^(digits - ceiling(log10(|x|)))``, rounded half up to a whole
+    number, and divided by the same power; the rest are left as they are.
+    """
+    out = values.copy()
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        rows = np.flatnonzero((values != 0) & np.isfinite(values))
+        x = values[rows]
+        scale = np.power(10.0, digits - np.ceil(np.log10(np.abs(x))))
+        out[rows] = _round_half_up_numpy(x * scale, 0) / scale
+    return out
+
+
+def _round_to_fraction_numpy(values: np.ndarray, denominator: float, digits: int | None) -> np.ndarray:
+    """janitor's ``round_to_fraction``: R's ``round(x * d) / d``, then ``round(, digits)``."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        # R's round(, 0) is rint: an exact tie goes to the even number.
+        out = np.rint(values * denominator) / denominator
+    return out if digits is None else _round_numpy(out, digits)
 
 
 def _round_numpy(values: np.ndarray, digits: int) -> np.ndarray:
@@ -538,6 +629,13 @@ def compile_polars(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> 
         return _round_expr(args[0], int(kwargs["digits"]))
     if name == "round_half_up":
         return _round_half_up_expr(args[0], int(kwargs["digits"]))
+    if name == "signif_half_up":
+        return _signif_half_up_expr(args[0], int(kwargs["digits"]))
+    if name == "round_to_fraction":
+        digits = kwargs.get("digits")
+        return _round_to_fraction_expr(
+            args[0], float(kwargs["denominator"]), None if digits is None else int(digits)
+        )
     if name in _PAIRS:
         return _pair(name, args, bool(kwargs["na_rm"]))
     if name in _ROWS:

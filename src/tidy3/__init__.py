@@ -97,8 +97,10 @@ from tidy3.helpers import (
     pmax,
     pmin,
     round_half_up,
+    round_to_fraction,
     row_means,
     row_sums,
+    signif_half_up,
 )
 from tidy3.helpers import round as round
 from tidy3.convert import (
@@ -654,6 +656,8 @@ __all__ = [
     "ceiling",
     "round",
     "round_half_up",
+    "signif_half_up",
+    "round_to_fraction",
     "pmin",
     "pmax",
     "row_sums",

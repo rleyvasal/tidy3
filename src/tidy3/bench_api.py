@@ -709,6 +709,8 @@ def _cases() -> list[Case]:
     col("ceiling", "expr", ["ceiling"], lambda t, df: t.ceiling("bill"), lambda df: pl.col("bill").ceil())
     col("round", "expr", ["round"], lambda t, df: t.round("bill", 1), lambda df: pl.col("bill").round(1))
     col("round_half_up", "expr", ["round_half_up"], lambda t, df: t.round_half_up("bill"), lambda df: pl.col("bill").round(0, mode="half_away_from_zero"))
+    col("signif_half_up", "expr", ["signif_half_up"], lambda t, df: t.signif_half_up("bill", 2), lambda df: pl.col("bill").round_sig_figs(2))
+    col("round_to_fraction", "expr", ["round_to_fraction"], lambda t, df: t.round_to_fraction("bill", 4), lambda df: (pl.col("bill") * 4).round(0, mode="half_to_even") / 4)
     col("pmin", "expr", ["pmin"], lambda t, df: t.pmin("mass", "bill"), lambda df: pl.min_horizontal("mass", "bill"))
     col("pmax", "expr", ["pmax"], lambda t, df: t.pmax("mass", "bill"), lambda df: pl.max_horizontal("mass", "bill"))
     col("row_sums", "expr", ["row_sums"], lambda t, df: t.row_sums("mass", "bill", na_rm=True), lambda df: pl.sum_horizontal("mass", "bill"))

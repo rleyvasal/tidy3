@@ -181,6 +181,9 @@ def test_builtin_and_helper_names_mean_columns_where_only_a_column_fits():
     assert "select('id', 'type', ~all_of(['max']))" in _norm("select(id, type, -max)")
     assert f"arrange(desc({c}('id')), {c}('type'))" in _norm("arrange(desc(id), type)")
     assert f"mutate(r=round_half_up({c}('max'), 1))" in _norm("mutate(r = round_half_up(max, 1))")
+    assert f"mutate(s=signif_half_up({c}('id'), 2), f=round_to_fraction({c}('max'), 4))" in _norm(
+        "mutate(s = signif_half_up(id, 2), f = round_to_fraction(max, 4))"
+    )
     assert f"summarise(m=mean({c}('max')), k=n())" in _norm("summarise(m = mean(max), k = n())")
     assert "count('type')" in _norm("count(type)")
 
