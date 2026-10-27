@@ -223,8 +223,10 @@ class TidyFrame:
         tabyl: tuple[str, pl.DataFrame] | None = None,
     ):
         if not isinstance(data, pl.LazyFrame):
-            import pandas as pd
-
+            try:
+                import pandas as pd
+            except ImportError:
+                raise TypeError("TidyFrame requires a polars LazyFrame or pandas DataFrame") from None
             if not isinstance(data, pd.DataFrame):
                 raise TypeError("TidyFrame requires a polars LazyFrame or pandas DataFrame")
             if category_levels is None:

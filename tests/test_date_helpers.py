@@ -5,13 +5,13 @@ lubridate; these tests pin the edges and tidy3's own choices.
 """
 
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import polars as pl
 import pytest
 
 import tidy3 as t
-from tidy3.dates import eval_pandas
 from tidy3.expr import Expr, to_polars
 from tidy3.masking import apply_masking
 
@@ -236,17 +236,21 @@ def test_leap_year_without_a_known_type():
 # ── shared ──────────────────────────────────────────────────────────────
 
 
-def test_pandas_kernel_matches_polars():
-    frame = pd.DataFrame({"d": [date(2010, 2, 15), None], "y": [2024, None]})
-    rounded = eval_pandas("round_date", (frame["d"],), {"unit": "month", "week_start": 7}, frame)
-    assert rounded.tolist() == [date(2010, 3, 1), None]
-    made = eval_pandas("make_date", (frame["y"], 2, 29), {}, frame)
-    assert made.tolist() == [date(2024, 2, 29), None]
-    leap = eval_pandas("leap_year", (frame["y"],), {}, frame)
-    assert str(leap.dtype) == "boolean" and leap.tolist()[0] is True and pd.isna(leap.iloc[1])
-    clock = eval_pandas("make_datetime", (frame["y"], 1, 1, 0, 0, 0), {"tz": "UTC"}, frame)
-    assert clock.iloc[0] == pd.Timestamp("2024-01-01", tz="UTC") and pd.isna(clock.iloc[1])
-    assert eval_pandas("isoyear", (frame["d"],), {}, frame).tolist()[0] == 2010
+def test_date_kernels_keep_missing_values():
+    frame = pl.DataFrame({"d": [date(2010, 2, 15), None], "y": [2024, None]})
+    out = frame.select(
+        to_polars(t.round_date("d", unit="month")).alias("rounded"),
+        to_polars(t.make_date("y", 2, 29)).alias("made"),
+        to_polars(t.leap_year("y")).alias("leap"),
+        to_polars(t.make_datetime("y", 1, 1, 0, 0, 0, tz="UTC")).alias("clock"),
+        to_polars(t.isoyear("d")).alias("isoyear"),
+    )
+    assert out["rounded"].to_list() == [date(2010, 3, 1), None]
+    assert out["made"].to_list() == [date(2024, 2, 29), None]
+    assert out["leap"].dtype == pl.Boolean and out["leap"].to_list() == [True, None]
+    assert out["clock"].dtype == pl.Datetime("us", "UTC")
+    assert out["clock"].to_list() == [datetime(2024, 1, 1, tzinfo=ZoneInfo("UTC")), None]
+    assert out["isoyear"].to_list()[0] == 2010
 
 
 def test_bare_column_names_in_notebooks():

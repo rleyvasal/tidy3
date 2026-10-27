@@ -533,26 +533,8 @@ def test_case_helpers_split_words_like_stringr():
         str_to_camel("model", first_upper="yes")
 
 
-def test_case_helpers_python_fallback_matches_polars():
-    from tidy3 import str_to_camel, str_to_kebab, str_to_snake
-    from tidy3.stringr import eval_pandas
-
-    words = ["Mazda RX4 Wag", "HTTPServer", "aBCd", "ABCDe", "1abc", "\u65e5\u672cText", "don't", "", None]
-    series = pd.Series(words, dtype="string")
-    frame = pd.DataFrame(index=series.index)
-    for name, helper, kw in (
-        ("str_to_snake", str_to_snake, {}),
-        ("str_to_kebab", str_to_kebab, {}),
-        ("str_to_camel", str_to_camel, {"first_upper": False}),
-        ("str_to_camel", str_to_camel, {"first_upper": True}),
-    ):
-        fallback = eval_pandas(name, (series,), kw, frame, None, "window")
-        assert [None if pd.isna(v) else v for v in fallback] == helper(words, **kw)
-
-
 def test_str_rank_ranks_with_ties_and_groups():
     from tidy3 import str_rank
-    from tidy3.stringr import eval_pandas
 
     assert str_rank(["b", "a", None, "c", "a"]) == [3, 1, None, 4, 1]
     assert str_rank(["x10", "x9", "x09"]) == [2, 3, 1]
@@ -562,12 +544,6 @@ def test_str_rank_ranks_with_ties_and_groups():
     assert values(out, "r") == [2, 1, 1, 2, None]
     assert values(out, "n") == [2, 1, 2, 1, None]
 
-    series = pd.Series(["b", "a", "x10", "x9", None], dtype="string")
-    df = pd.DataFrame({"g": [1, 1, 2, 2, 2], "s": series})
-    grouped = eval_pandas("str_rank", (df["s"],), {"numeric": True}, df, ["g"], "window")
-    assert [None if pd.isna(v) else v for v in grouped] == [2, 1, 2, 1, None]
-    with pytest.raises(ValueError, match="summarise"):
-        eval_pandas("str_rank", (df["s"],), {"numeric": False}, df, None, "agg")
     with pytest.raises(TypeError, match="numeric"):
         str_rank("s", numeric=1)
 

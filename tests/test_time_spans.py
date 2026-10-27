@@ -284,26 +284,22 @@ def test_spans_compile_without_a_frame():
     assert seconds_.to_series()[0] == 1.5
 
 
-def test_pandas_engine_matches_polars():
-    from tidy3.pandas_engine import eval_expr
-
-    df = pd.DataFrame({
-        "d": pd.Series([date(2012, 2, 29), date(2010, 1, 31)], dtype="object"),
-        "x": pd.to_datetime(["2024-03-10 01:30", "2024-03-09 12:00"]).tz_localize(NY),
+def test_period_arithmetic_keeps_dates_and_missing_counts():
+    df = pl.DataFrame({
+        "d": [date(2012, 2, 29), date(2010, 1, 31)],
+        "x": pl.Series([datetime(2024, 3, 10, 1, 30), datetime(2024, 3, 9, 12, 0)]).dt.replace_time_zone(NY),
         "k": [1, None],
     })
-    assert eval_expr(col("d") + t.days(1), df, None, "window").tolist() == [date(2012, 3, 1), date(2010, 2, 1)]
-    assert eval_expr(col("d") + t.months(col("k")), df, None, "window").tolist() == [date(2012, 3, 29), None]
-    rolled = eval_expr(t.add_with_rollback("d", t.months(1), roll_to_first=True), df, None, "window")
-    assert rolled.tolist() == [date(2012, 3, 29), date(2010, 3, 1)]
-    clock = eval_expr(col("x") + t.hours(1), df, None, "window")
-    assert clock.isna().tolist() == [True, False]
-    assert str(clock.iloc[1]) == "2024-03-09 13:00:00-05:00"
-    part = eval_expr(col("d") + t.ddays(1.5), df, None, "window")
-    assert list(part) == [pd.Timestamp("2012-03-01 12:00"), pd.Timestamp("2010-02-01 12:00")]
-    whole = eval_expr(col("d") + t.ddays(1), df, None, "window")
-    assert whole.tolist() == [date(2012, 3, 1), date(2010, 2, 1)]
-
+    out = df.select(
+        to_polars(col("d") + t.days(1)).alias("days"),
+        to_polars(col("d") + t.months(col("k"))).alias("months"),
+        to_polars(t.add_with_rollback("d", t.months(1), roll_to_first=True)).alias("rolled"),
+        to_polars(col("x") + t.hours(1)).alias("clock"),
+    )
+    assert out["days"].to_list() == [date(2012, 3, 1), date(2010, 2, 1)]
+    assert out["months"].to_list() == [date(2012, 3, 29), None]
+    assert out["rolled"].to_list() == [date(2012, 3, 29), date(2010, 3, 1)]
+    assert out["clock"].is_null().to_list() == [True, False]
 
 def test_notebook_bare_columns_in_span_helpers():
     for helper in ("dseconds", "ddays", "days", "hours", "months", "as_duration", "time_length"):

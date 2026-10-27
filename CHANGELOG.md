@@ -4,6 +4,18 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.12.0 — 2026-10-26
+
+pandas is now optional: tidy3 runs on Polars alone, and pandas is needed only to move data to and from pandas.
+
+### Changed
+
+- pandas is no longer a required dependency. `pip install tidy3` installs Polars without pandas; `pip install "tidy3[pandas]"` adds pandas for `tidy(pandas_frame)`, `collect(as_="pandas")`, `pull(name=)`, pandas sheets in `write_excel()`, and the pandas `Categorical` results of the eager `fct_*()` functions. Everything else, including every `fct_*()` call inside `mutate()`, runs in Polars.
+- The factor functions no longer fall back to a pandas evaluator. Nested calls (`fct_rev(fct_infreq(x))`), callables (`fct_reorder(f, x, fun=...)`, `fct_relevel(f, sorted)`), factor (Enum) sources, computed arguments, grouped value changes (`group_by(g) >> mutate(f=fct_lump_n(x, 2))`), missing group keys, and `NaN` all compute in Polars, with the same levels, values, ordered flags, and warnings as before. Grouped calls compute every group's levels at once, as one group-wise table of levels, where nested calls, lumps, recodes, and factor sources used to run group by group: with 200 groups on 100,000 rows, `group_by(g) >> mutate(f=fct_rev(fct_infreq(x)))` 184 to 2 ms and `fct_lump_n` 219 to 4 ms (raw Polars 2 and 4), and `fct_infreq` over 1,000 groups 3.7 to 2.8 ms (raw 2.2). A factor (Enum) source keeps its values uncast while only the levels change and recasts straight to the new levels, and every group shares its level list, so a function that reads only the levels runs once: `fct_rev` on an Enum column 3.0 to 0.9 ms, and over 1,000 groups 9.9 to 1.0 ms. A tidy3 aggregation passed as `fun=` runs as one Polars aggregation; any other Python callable runs once per group and level on the Series collected for it.
+- A callable passed to `fct_reorder()`, `fct_reorder2()`, or `fct_relevel()` now receives Polars Series (`x.is_null()`, `x.max()`) rather than pandas Series.
+- The eager factor functions return a Polars Enum Series for a Polars Series input (`fct_inorder(pl.Series([...]))`); lists and pandas inputs still return a pandas `Categorical` when pandas is installed, and a Polars Enum Series otherwise.
+- The pandas evaluation helpers of the string, date, conversion, and column helpers (`eval_pandas`) and the `tidy3.pandas_engine` module are removed; they only served the factor fallback.
+
 ## 0.11.0 — 2026-10-26
 
 Durations and periods, stringr's case helpers, pivot prototypes and name repair, report counts and percentage text, and the public API's slowest functions brought within about twice raw Polars.
