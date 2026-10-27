@@ -4,7 +4,7 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.12.0 — 2026-10-26
 
 pandas is now optional: tidy3 runs on Polars alone, and pandas is needed only to move data to and from pandas.
 
