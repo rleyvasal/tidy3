@@ -4,6 +4,12 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- `to_polars_code()` exports a `summarise` whose expression is more than a bare summary, such as the README's `bill_mm=mean("bill_length_mm").round(1)`. tidy3 checks at collect time that such an expression gives one value per group, as dplyr does, and the exporter refused that check as a user's Python function. It is now skipped like tidy3's other input checks, and the exported code leaves out the hidden size columns and the filter that read them, so it is the aggregation alone and returns the same frame as tidy3.
+
 ## 0.12.4 — 2026-10-27
 
 Four more janitor functions: `single_value()`, `get_one_to_one()`, `adorn_rounding()`, and `adorn_title()`, checked against janitor 2.2.1.
