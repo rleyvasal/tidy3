@@ -33,7 +33,7 @@ from typing import Any
 
 import polars as pl
 
-from tidy3.polars_export import ExportError, _udf_name
+from tidy3.polars_export import ExportError, _legacy_join, _udf_name
 
 try:
     from pyspark.sql import Column, DataFrame, SparkSession, Window
@@ -481,7 +481,13 @@ class _Translator:
         return _Node(df.filter(F.col(rank) == 1).drop(rank), node.columns, node.order)
 
     def p_Join(self, body: dict) -> _Node:
-        if "condition" in body or body.get("predicates"):
+        if "condition" in body:
+            # Polars 2 writes a join's keys as condition: {Equi, NonEqui}.
+            try:
+                body = _legacy_join(body)
+            except ExportError:
+                raise self.unsupported("a join on a condition") from None
+        if body.get("predicates"):
             raise self.unsupported("a join on a condition")
         left, right = self.plan(body["input_left"]), self.plan(body["input_right"])
         args = body["options"]["args"]

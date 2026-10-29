@@ -57,6 +57,52 @@ jobs:
       - name: Run unit tests
         run: python -m pytest -q --tb=short
 
+  # to_spark() on Spark in local mode. The jobs above install no PySpark, so
+  # tests/test_spark_export.py skips there. "floor" pins the lowest PySpark
+  # pyproject.toml allows with the lowest Java the reference names; "latest"
+  # takes the newest PySpark and Polars, which checks the Polars plan format
+  # the translator reads.
+  spark:
+    name: Spark (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: floor
+            python-version: "3.12"
+            java-version: "17"
+          - name: latest
+            python-version: "3.13"
+            java-version: "21"
+    env:
+      # Fail, rather than skip, if PySpark or Java is missing.
+      TIDY3_REQUIRE_SPARK: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java-version }}
+      - name: Install tidy3 with PySpark
+        run: |
+          if [ "${{ matrix.name }}" = floor ]; then
+            pyspark=$(sed -n 's/.*"pyspark>=\([0-9.]*\)".*/\1/p' pyproject.toml)
+            test -n "$pyspark"
+            python -m pip install -e ".[dev,spark]" "pyspark==$pyspark"
+          else
+            python -m pip install -e ".[dev,spark]"
+          fi
+          python -c "import polars, pyspark; print('polars', polars.__version__, 'pyspark', pyspark.__version__)"
+          java -version
+      - name: Run the Spark tests
+        run: python -m pytest -q --tb=short tests/test_spark_export.py
+
   # Optional semantic parity against real dplyr/tidyr. Skipped paths still
   # exercise classification invariants when R is absent; this job enforces
   # the full differential suite when R is available.

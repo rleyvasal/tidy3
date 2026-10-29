@@ -165,6 +165,13 @@ every shuffle; not separate machines or network storage.
 The scripts are `cluster_checks.py`, `ansi_checks.py` and
 `single_partition.py` in the gpudev workspace.
 
+CI runs `tests/test_spark_export.py` in Spark local mode in a `spark` job
+with two settings: the floors (PySpark 4.0, the lowest `tidy3[spark]`
+allows, on Java 17) and the newest PySpark on Java 21. Both take the newest
+Polars, so a change to Polars' plan format shows up there. Polars 2 already
+writes join keys differently (`condition: {Equi, NonEqui}`); the translator
+reads both forms, and coverage is the same on Polars 1.42 and 2.1.
+
 ## 7. Open questions
 
 1. **Spark-only sources.** Some verbs read values from the data while the

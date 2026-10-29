@@ -10,9 +10,15 @@ import polars as pl
 import pytest
 from polars.testing import assert_frame_equal
 
-pytest.importorskip("pyspark")
-if not (shutil.which("java") or os.environ.get("JAVA_HOME")):
-    pytest.skip("Spark needs Java", allow_module_level=True)
+if os.environ.get("TIDY3_REQUIRE_SPARK"):
+    # CI's Spark job: a missing PySpark or Java is a failure, not a skip.
+    import pyspark  # noqa: F401
+
+    assert shutil.which("java") or os.environ.get("JAVA_HOME"), "Spark needs Java"
+else:
+    pytest.importorskip("pyspark")
+    if not (shutil.which("java") or os.environ.get("JAVA_HOME")):
+        pytest.skip("Spark needs Java", allow_module_level=True)
 
 import tidy3 as t
 from tidy3 import *  # noqa: F403
