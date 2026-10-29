@@ -44,15 +44,22 @@ Chinstrap,Dream,45.2,3700,female,2009
 
 @pytest.fixture(scope="module")
 def spark():
+    """A local Spark session, or the cluster at $TIDY3_SPARK_MASTER (spark://host:7077).
+
+    On a cluster, small executors spread each query over several processes.
+    """
     from pyspark.sql import SparkSession
 
-    session = (
-        SparkSession.builder.master("local[2]")
+    master = os.environ.get("TIDY3_SPARK_MASTER", "local[2]")
+    builder = (
+        SparkSession.builder.master(master)
         .appName("tidy3-tests")
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "4")
-        .getOrCreate()
     )
+    if not master.startswith("local"):
+        builder = builder.config("spark.executor.cores", "2").config("spark.executor.memory", "2g")
+    session = builder.getOrCreate()
     session.sparkContext.setLogLevel("ERROR")
     yield session
     session.stop()
@@ -122,6 +129,11 @@ PIPELINES = {
     ),
     "row_number": lambda p: p >> group_by("species") >> mutate(i=row_number()) >> ungroup() >> select("species", "i"),
     "semi_join": lambda p: p >> semi_join(ISLANDS >> filter(col("zone") == "north"), by="island") >> count("island"),
+    # A frame's missing columns are filled with nulls; rows keep each input's order.
+    "bind_rows": lambda p: (
+        p >> filter(col("species") == "Gentoo") >> arrange(desc("body_mass_g"))
+        >> bind_rows(p >> filter(col("species") == "Adelie") >> select("species", "year"))
+    ),
 }
 
 
@@ -233,3 +245,44 @@ def test_an_aggregation_of_an_aggregation(grouped, penguins, spark):
     # Polars broadcasts the inner min() within the group; Spark needs a window.
     frame = penguins >> group_by("species") if grouped else penguins
     _same(frame >> summarise(spread=sum(col("body_mass_g") - min("body_mass_g", na_rm=True), na_rm=True)), spark)
+
+
+def test_a_select_of_aggregations_and_literals_is_one_row(penguins, spark):
+    # adorn_totals builds its totals row this way; Polars gives one row, not one per input row.
+    _same(penguins >> summarise(label=pl.lit("Total"), n=n(), mass=sum("body_mass_g", na_rm=True)), spark)
+
+
+ARITHMETIC = {
+    "int_divide_by_zero": tidy({"a": [1, 0, -1, None], "b": [0, 0, 0, 0]}) >> mutate(r=col("a") / col("b")),
+    "float_divide_by_zero": (
+        tidy({"a": [1.0, 0.0, -1.0, float("nan"), 1.0], "b": [0.0, 0.0, 0.0, 0.0, -0.0]})
+        >> mutate(r=col("a") / col("b"))
+    ),
+    "int_modulo_by_zero": tidy({"a": [7, -7], "b": [0, 3]}) >> mutate(r=col("a") % col("b")),
+    "float_modulo_by_zero": tidy({"a": [7.5, -7.5], "b": [0.0, 2.0]}) >> mutate(r=col("a") % col("b")),
+    "non_strict_cast": tidy({"a": ["1", "x", None]}) >> mutate(r=col("a").cast(pl.Int64, strict=False)),
+}
+
+
+@pytest.mark.parametrize("ansi", ["true", "false"])
+@pytest.mark.parametrize("name", list(ARITHMETIC))
+def test_arithmetic_edges_match_tidy3_in_either_ansi_mode(name, ansi, spark):
+    # Spark gives null, or raises with ANSI on, where Polars gives inf, nan, or null.
+    before = spark.conf.get("spark.sql.ansi.enabled")
+    spark.conf.set("spark.sql.ansi.enabled", ansi)
+    try:
+        _same(ARITHMETIC[name], spark)
+    finally:
+        spark.conf.set("spark.sql.ansi.enabled", before)
+
+
+@pytest.mark.parametrize("ansi", ["true", "false"])
+def test_a_failing_strict_cast_raises_in_either_ansi_mode(ansi, spark):
+    before = spark.conf.get("spark.sql.ansi.enabled")
+    spark.conf.set("spark.sql.ansi.enabled", ansi)
+    try:
+        frame = tidy({"a": ["1", "x"]}) >> mutate(r=col("a").cast(pl.Int64))
+        with pytest.raises(Exception, match="strict cast|CAST_INVALID_INPUT"):
+            frame.to_spark(spark).collect()
+    finally:
+        spark.conf.set("spark.sql.ansi.enabled", before)

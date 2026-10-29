@@ -239,13 +239,15 @@ sorts, `distinct` keeping the first row, half-to-even `round`, and R's
 `tidy3.spark_export.SparkExportError`, an `ExportError`, naming the step:
 a column computed by a Python function (the text conversions, R-style
 `round`, per-value string functions), factor (Enum) columns, and so far
-many date, string, reshape and list functions. Of the benchmark cases, 153
-run on Spark and 189 are refused; none gives different rows. The
+many date, string, reshape and list functions. Of the benchmark cases, 159
+run on Spark and 183 are refused; none gives different rows. The
 [design note](design-spark-backend.md) lists what is translated and how
 Spark and Polars differ.
 
 Results come back in Spark's types: Spark has no unsigned integers, so
-`n()` is a `bigint`. Scans read the same files with Spark, and CSV options
+`n()` is a `bigint`. Division by zero, `%%` by zero and casts give tidy3's results
+whatever Spark's ANSI mode; integer overflow, which wraps in Polars, raises
+an error with ANSI mode on (Spark 4's default). Scans read the same files with Spark, and CSV options
 Spark would read differently are refused.
 
 A quoted string assigned in `mutate`, `transmute`, `summarise`, or `reframe`

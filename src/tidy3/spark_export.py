@@ -91,6 +91,21 @@ class _Node:
         return [c for c in self.df.columns if c not in self.columns]
 
 
+def _true_divide(a: Column, b: Column) -> Column:
+    """Polars' ``a / b``, the same in either Spark ANSI mode.
+
+    A zero divisor gives ``inf``, ``-inf``, or ``nan`` for ``0 / 0``, where
+    Spark gives null (ANSI off) or raises (ANSI on). A zero's sign counts:
+    ``1 / -0.0`` is ``-inf``.
+    """
+    x, y = a.cast(T.DoubleType()), b.cast(T.DoubleType())
+    # The sign of a zero divisor, read from its text ("-0.0"): Spark's
+    # comparisons, signum() and atan2() all treat -0.0 as 0.0.
+    sign = F.when(F.startswith(y.cast(T.StringType()), F.lit("-")), F.lit(-1.0)).otherwise(F.lit(1.0))
+    by_zero = F.when(F.isnan(x) | (x == 0), F.lit(float("nan"))).otherwise(F.signum(x) * sign * F.lit(float("inf")))
+    return F.when(y == 0, by_zero).otherwise(x / F.when(y != 0, y))
+
+
 def _col(name: str) -> Column:
     return F.col("`" + name.replace("`", "``") + "`")
 
@@ -133,6 +148,28 @@ def _contains_agg(node: Any) -> bool:
     return node == "Len"
 
 
+def _is_scalar(node: Any) -> bool:
+    """Whether a serialized expression is one value: every column inside an aggregation.
+
+    Literals count as one value, so ``select(sum(x), lit("Total"))`` is one row
+    in Polars, while ``x - mean(x)`` and windows are one value per row.
+    """
+    if isinstance(node, dict):
+        if "Agg" in node or "Len" in node:
+            return True
+        if "Column" in node or "Columns" in node or "Over" in node or "Selector" in node:
+            return False
+        if "Function" in node:
+            function = node["Function"].get("function")
+            if isinstance(function, dict) and isinstance(function.get("Boolean"), dict):
+                if set(function["Boolean"]) & {"Any", "All"}:
+                    return True
+        return all(_is_scalar(value) for value in node.values())
+    if isinstance(node, list):
+        return all(_is_scalar(item) for item in node)
+    return node != "Wildcard"
+
+
 def _int_literal(node: Any) -> int | None:
     """The value of a serialized integer literal, else None."""
     if isinstance(node, dict) and "Literal" in node:
@@ -148,7 +185,7 @@ def _int_literal(node: Any) -> int | None:
 
 _BINARY = {
     "Plus": lambda a, b: a + b, "Minus": lambda a, b: a - b, "Multiply": lambda a, b: a * b,
-    "TrueDivide": lambda a, b: a / b, "Modulus": _floor_mod,
+    "TrueDivide": _true_divide,
     "Gt": lambda a, b: a > b, "GtEq": lambda a, b: a >= b, "Lt": lambda a, b: a < b,
     "LtEq": lambda a, b: a <= b, "Eq": lambda a, b: a == b, "NotEq": lambda a, b: a != b,
     "EqValidity": lambda a, b: a.eqNullSafe(b), "NotEqValidity": lambda a, b: ~a.eqNullSafe(b),
@@ -363,8 +400,8 @@ class _Translator:
     def p_Select(self, body: dict) -> _Node:
         node = self.plan(body["input"])
         exprs = body["expr"]
-        if exprs and all(_contains_agg(e) for e in exprs):
-            # summarise() without groups: one row.
+        if exprs and all(_is_scalar(e) for e in exprs) and any(_contains_agg(e) for e in exprs):
+            # summarise() without groups, or a totals row: one row.
             self.group_window, self.pre_group = Window.partitionBy(), {}
             named = self.named(exprs, node, "agg")
             pre, self.group_window, self.pre_group = self.pre_group, None, {}
@@ -505,21 +542,40 @@ class _Translator:
 
     def p_Union(self, body: dict) -> _Node:
         options = body.get("args") or body.get("options") or {}
-        if options.get("diagonal") or options.get("to_supertypes"):
-            raise self.unsupported("a diagonal or type-widening bind_rows")
         nodes = [self.plan(n) for n in body["inputs"]]
-        columns = nodes[0].columns
-        if any(n.columns != columns for n in nodes):
+        columns = list(dict.fromkeys(c for n in nodes for c in n.columns))
+        if not options.get("diagonal") and any(n.columns != columns for n in nodes):
             raise self.unsupported("bind_rows of frames with different columns")
-        part, row = self.hidden_name("part"), self.hidden_name("row")
-        frames = []
-        for i, n in enumerate(nodes):
-            if not n.order:
-                raise self.unsupported("bind_rows of rows with no defined order")
-            position = F.row_number().over(Window.orderBy(*_sort_columns(n.order)))
-            frames.append(n.df.select(*map(_col, columns), F.lit(i).alias(part), position.alias(row)))
-        df = functools.reduce(lambda a, b: a.unionByName(b), frames)
-        return _Node(df, columns, [(part, False, True), (row, False, True)])
+        # A diagonal concat (tidy3's bind_rows) fills a frame's missing columns
+        # with nulls, as unionByName(allowMissingColumns=True) does. Polars and
+        # Spark widen types differently, so each column must have one type.
+        for name in columns:
+            types = {str(n.df.schema[name].dataType) for n in nodes if name in n.columns}
+            if len(types) > 1:
+                raise self.unsupported(f"bind_rows of {name!r} with different types ({', '.join(sorted(types))})")
+        if any(not n.order for n in nodes):
+            raise self.unsupported("bind_rows of rows with no defined order")
+        part = self.hidden_name("part")
+        shapes = {tuple((d, l) for _name, d, l in n.order) for n in nodes}
+        if len(shapes) == 1:
+            # The inputs order their rows the same way: carry the keys over,
+            # as shared columns after the part number.
+            (shape,) = shapes
+            keys = [self.hidden_name("key") for _ in shape]
+            order_columns = lambda n: [_col(k).alias(new) for (k, _d, _l), new in zip(n.order, keys)]  # noqa: E731
+            order = [(new, d, l) for new, (d, l) in zip(keys, shape)]
+        else:
+            # Otherwise number each input's rows: one Spark partition per input.
+            row = self.hidden_name("row")
+            order_columns = lambda n: [F.row_number().over(Window.orderBy(*_sort_columns(n.order))).alias(row)]  # noqa: E731
+            order = [(row, False, True)]
+        frames = [
+            n.df.select(*[_col(c) for c in n.columns], F.lit(i).alias(part), *order_columns(n))
+            for i, n in enumerate(nodes)
+        ]
+        df = functools.reduce(lambda a, b: a.unionByName(b, allowMissingColumns=True), frames)
+        return _Node(df.select(*map(_col, columns), part, *[name for name, _d, _l in order]),
+                     columns, [(part, False, True), *order])
 
     # ── expressions ─────────────────────────────────────────────────────
 
@@ -602,14 +658,17 @@ class _Translator:
         self.pre_group[name] = self.expr(arg, node, self.group_window)
         return F.col(name)
 
-    def summable(self, value: Column, node: _Node) -> Column:
-        """*value*, with booleans as 0 and 1: Polars sums booleans, Spark refuses to."""
+    def type_of(self, value: Column, node: _Node) -> T.DataType | None:
+        """The Spark type of a row-level *value*, or None if Spark can't say here."""
         df = node.df.withColumns(self.pre_group) if self.pre_group else node.df
         try:
-            dtype = df.select(value).schema.fields[0].dataType
+            return df.select(value).schema.fields[0].dataType
         except Exception:
-            return value
-        return value.cast(T.LongType()) if isinstance(dtype, T.BooleanType) else value
+            return None
+
+    def summable(self, value: Column, node: _Node) -> Column:
+        """*value*, with booleans as 0 and 1: Polars sums booleans, Spark refuses to."""
+        return value.cast(T.LongType()) if isinstance(self.type_of(value, node), T.BooleanType) else value
 
     def aggregate(self, column: Column, ctx: Any) -> Column:
         """An aggregation: per group in ``agg``, else broadcast over a window."""
@@ -653,7 +712,14 @@ class _Translator:
         op = body["op"]
         left, right = self.expr(body["left"], node, ctx), self.expr(body["right"], node, ctx)
         if op == "FloorDivide":
-            return F.floor(left / right)
+            return F.floor(_true_divide(left, right))
+        if op == "Modulus":
+            # By zero, Polars gives null for integers and NaN for floats; Spark
+            # gives null or raises, by ANSI mode.
+            types = (self.type_of(left, node), self.type_of(right, node))
+            floating = any(isinstance(t, (T.DoubleType, T.FloatType)) for t in types)
+            by_zero = F.lit(float("nan")) if floating else F.lit(None)
+            return F.when(right == 0, by_zero).otherwise(_floor_mod(left, F.when(right != 0, right)))
         if op not in _BINARY:
             raise self.unsupported(f"the operator {op}")
         return _BINARY[op](left, right)
@@ -664,7 +730,18 @@ class _Translator:
         ).otherwise(self.expr(body["falsy"], node, ctx))
 
     def e_Cast(self, body, node, ctx):
-        return self.expr(body["expr"], node, ctx).cast(self.dtype(body["dtype"]))
+        value, target = self.expr(body["expr"], node, ctx), self.dtype(body["dtype"])
+        options = body.get("options")
+        if options not in ("Strict", "NonStrict"):
+            # Overflowing: wraps with ANSI off; raises with it on.
+            return value.cast(target)
+        # try_cast gives null for a value with no such form, in either ANSI mode.
+        converted = value.try_cast(target)
+        if options == "NonStrict":
+            return converted
+        # A strict cast fails, as in Polars, rather than giving null.
+        message = f"conversion failed: a value has no {target.simpleString()} form (strict cast)"
+        return F.when(value.isNotNull() & converted.isNull(), F.raise_error(F.lit(message))).otherwise(converted)
 
     def e_Over(self, body, node, ctx):
         if body.get("order_by"):
@@ -674,12 +751,12 @@ class _Translator:
 
     def e_Agg(self, body, node, ctx):
         (kind, arg), = body.items()
-        if kind in ("First", "Last") and _contains_agg(arg):
-            # first() of one value per group: the value.
+        if kind in ("First", "Last") and _is_scalar(arg):
+            # first() of one value per group (an aggregation, a literal): the value.
             return self.expr(arg, node, ctx)
         if kind == "Count":
             include_nulls, arg = arg["include_nulls"], arg["input"]
-            if _contains_agg(arg):
+            if _is_scalar(arg):
                 return F.lit(1)
             value = self.expr(arg, node, ctx)
             return self.aggregate(F.count(F.lit(1)) if include_nulls else F.count(value), ctx)

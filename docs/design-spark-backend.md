@@ -88,10 +88,15 @@ is one value per group; on Spark that check is a `raise_error()`.
 | No unsigned integers in Spark | held in the next wider signed type; `UInt64` as `Decimal(20, 0)` | `unsigned` test |
 | Spark scans infer types differently | the Spark schema is Polars' schema for that scan; CSV options Spark would read differently are refused | penguins tests |
 | Regular expressions | Java's dialect, not Rust's: most patterns agree; look-arounds work on Spark but not in Polars, and some classes differ | `str_detect` test |
+| Division by zero: Polars gives `inf`, `-inf` or `nan`; Spark gives null (ANSI off) or raises (ANSI on, Spark 4's default) | IEEE results written out, the sign of `-0.0` read from its text (Spark's `signum` and `atan2` drop it) | `arithmetic_edges` tests, both ANSI modes |
+| `%%` by zero: null for integers, `nan` for floats in Polars | written out | same |
+| A non-strict cast gives null for a value with no such form; a strict one fails | `try_cast`, and a `raise_error` for strict casts, so ANSI off does not turn a failure into null | `strict_cast` test, both ANSI modes |
+| Integer overflow wraps in Polars | wraps with ANSI off; **raises** with ANSI on (Spark's `ARITHMETIC_OVERFLOW`), rather than hiding an overflow | `ansi_checks.py` on the cluster |
+| A `select` of aggregations and literals (`adorn_totals`' totals row) is one row in Polars | one Spark `agg` when every column is inside an aggregation | `adorn_totals` benchmark case |
 
 ## 4. What is not translated yet
 
-Of the 342 benchmark cases that collect a frame query, **153 run on Spark
+Of the 342 benchmark cases that collect a frame query, **159 run on Spark
 and match tidy3** to within 1e-12, and the rest raise `SparkExportError`.
 None returns different rows. (`to_polars_code()` exports 269.) The
 refusals, by count:
@@ -102,9 +107,9 @@ refusals, by count:
 | Dates and times | 30 | `offset_by` (periods), time zones, `floor_date`, durations, week numbers. Time zones need a session time-zone policy. |
 | Strings | 29 | `str_replace`, `str_sub`, `str_c`, `str_extract`, `str_split`, `str_trim`, padding, case. Mostly direct; `str_trim` must strip Unicode whitespace like Polars. |
 | Factors (Enum columns and casts) | 18 | Spark has no Enum; a string column plus recorded levels would do. |
-| Joins, binds, group order | 27 | right, full and cross joins, `bind_rows` with different columns, groups kept in order of appearance. |
+| Joins, binds, group order | 20 | right, full and cross joins, `bind_rows` of columns with different types, groups kept in order of appearance. |
 | Reshape | 11 | `pivot_wider`, `pivot_longer`, `unnest`, `bind_cols`, `explode`. Spark has `pivot`, `unpivot` and `explode`. |
-| Other | 30 | lists and structs, `first`/`last` within groups, `fill` (forward and backward), the row checks of `rows_*`, `between`. |
+| Other | 31 | lists and structs, `first`/`last` within groups, `fill` (forward and backward), the row checks of `rows_*`, `between`. |
 
 ## 5. Performance
 
@@ -117,11 +122,50 @@ Single machine, 50 million rows from a 0.78 GB Parquet file, 24 cores:
 | `filter` then grouped mean and `sd` | 0.22 s | 0.65 s | within 1e-9 |
 
 On one machine Polars is faster; Spark is for data spread over a cluster or
-beyond one machine's memory. A global row index, and `slice()` with an
-offset, use an unpartitioned window and run on one Spark partition; a
-pipeline that needs them at cluster scale is better sliced within groups.
+beyond one machine's memory.
 
-## 6. Open questions
+Three steps use an unpartitioned window and run on one Spark partition: an
+ungrouped `row_number()` (a global row index), `slice()` with an offset,
+and `bind_rows` of inputs ordered differently (inputs read the same way
+carry their ordering keys instead). On the cluster below, an ungrouped
+`row_number()` over 50M rows took 13.0 s against 7.95 s for the grouped
+one, with Spark's "moving all data to a single partition" warning. A
+pipeline that needs one at cluster scale is better numbered within groups.
+
+## 6. Cluster verification
+
+A Spark 4.2.1 standalone cluster on the same machine: one master and four
+workers of 4 cores and 5 GB, queries spread over 8 executors (2 cores, 2 GB
+each). Separate executor processes, so rows cross process boundaries in
+every shuffle; not separate machines or network storage.
+
+- The test suite against the cluster (`TIDY3_SPARK_MASTER=spark://host:7077`):
+  every test passes, as in local mode.
+- Row order under real splitting: 10M rows as one 388 MB CSV read in 93
+  partitions (`spark.sql.files.maxPartitionBytes` = 4 MB), and as 12
+  Parquet files of 4 KB to 23 MB read by one glob in 31 partitions, with
+  adaptive query execution on. Every order-sensitive pipeline gave tidy3's
+  rows in tidy3's order, with ANSI mode on and off:
+
+| Check | Rows | Polars | Spark cluster |
+|---|---|---|---|
+| stable `arrange` on a 10-value key | 10,000,000 | 0.22 s | 3.89 s |
+| `arrange(desc(s), k)`, `slice_head` | 200,000 | 0.42 s | 2.51 s |
+| `distinct` keeping the first row | 1,000 | 0.14 s | 2.10 s |
+| `row_number()` per group, `filter` | 2,000 | 0.22 s | 2.20 s |
+| `cumsum` per group | 10,000,000 | 0.26 s | 3.17 s |
+| `slice_head` over the Parquet glob | 100,000 | 0.00 s | 1.83 s |
+| `slice_head` per group | 30 | 0.14 s | 1.75 s |
+| `slice_max` per group | 30 | 0.34 s | 13.36 s |
+| `left_join` keeps the left order, `slice_head` | 50,000 | 0.00 s | 1.20 s |
+| grouped `mean`, `sd` | 40 | 0.19 s | 1.35 s |
+| ungrouped `row_number()` | 10 | 0.10 s | 2.37 s |
+| `bind_rows` of the glob and the CSV, `slice_head` | 100,000 | 0.01 s | 1.48 s |
+
+The scripts are `cluster_checks.py`, `ansi_checks.py` and
+`single_partition.py` in the gpudev workspace.
+
+## 7. Open questions
 
 1. **Spark-only sources.** Some verbs read values from the data while the
    plan is built (factor levels, `pivot_wider` names, `complete()`,
@@ -131,5 +175,9 @@ pipeline that needs them at cluster scale is better sliced within groups.
    source and a backend hook in each such verb.
 2. **Python steps** as Arrow UDFs (section 4), and which tidy3 functions
    can declare themselves elementwise.
-3. **Cluster checks.** Row order across many files and partitions, and the
-   cost of the single-partition windows, need a real cluster run.
+3. **Separate machines.** The cluster above shares one machine's disk.
+   Separate nodes reading network storage (and Spark Connect, which
+   Databricks serverless uses) are not tested yet.
+4. **Integer overflow under ANSI mode** raises where Polars wraps. Matching
+   Polars there would mean hiding an overflow; raising looks right, and the
+   reference says so.
