@@ -38,6 +38,8 @@ pandas = [
 ]
 dev = ["pytest>=7.0", "ipython>=8.0", "tidy3[pandas]"]
 excel = ["fastexcel>=0.10"]
+# frame.to_spark(): run a pipeline on Spark. Spark also needs Java 17 or later.
+spark = ["pyspark>=4.0"]
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/tidy3"

@@ -1418,6 +1418,18 @@ class TidyFrame:
 
         return to_polars_code(self, name=name)
 
+    def to_spark(self, spark: Any = None) -> Any:
+        """A PySpark DataFrame that runs this pipeline on Spark, in tidy3's row order.
+
+        *spark* defaults to the active Spark session. Needs ``tidy3[spark]``.
+        Raises :class:`tidy3.spark_export.SparkExportError` (an
+        :class:`tidy3.ExportError`) for a step with no Spark translation,
+        such as a column computed by a Python function.
+        """
+        from tidy3.spark_export import to_spark
+
+        return to_spark(self, spark)
+
     def preview(self, n: int | None = None) -> Any:
         """Materialize only the first *n* rows (for inspection)."""
         n = get_options().preview_rows if n is None else n

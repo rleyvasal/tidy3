@@ -4,6 +4,12 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- `TidyFrame.to_spark(spark=None)` runs a pipeline on Spark (experimental; `pip install "tidy3[spark]"`, plus Java 17 or later). It returns a lazy PySpark DataFrame built from the Polars query tidy3 compiled, the same plan `to_polars_code()` reads, so no verb is reimplemented and dplyr's rules carry over: tidy3's row order (stable sorts, `distinct` keeping the first row, `row_number`, `slice_*`, `cumsum`), missing values in `mean` and `arrange`, half-to-even `round`, R's `%%` sign, and summarise's one-value-per-group check. Scans read the same CSV and Parquet files with Polars' column types. A step with no Spark translation raises `SparkExportError` (an `ExportError`) naming it: columns computed by a Python function, factor columns, and for now many date, string, reshape and list functions. Of the 342 benchmark frame queries, 153 run on Spark and match tidy3 to within 1e-12 and 189 are refused; none gives different rows. [Design note](docs/design-spark-backend.md).
+
 ## 0.12.4 — 2026-10-27
 
 Four more janitor functions: `single_value()`, `get_one_to_one()`, `adorn_rounding()`, and `adorn_title()`, checked against janitor 2.2.1.

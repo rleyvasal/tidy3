@@ -687,6 +687,7 @@ METHOD_REASONS = {
     "explain": "prints a query plan",
     "factor_levels": "reads recorded levels and the schema; not a query",
     "to_polars_code": "prints Polars source for the pipeline; not a query",
+    "to_spark": "hands the pipeline to Spark; tests/test_spark_export.py checks it on every case",
     "preview": "prints a preview",
     "show": "prints a preview",
     "ggplot": "builds a plot",
