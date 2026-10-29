@@ -146,7 +146,7 @@ you need predictable performance and semantics.
 |------|--------|-----------------|
 | **Stable core** | Daily driver: declarative dplyr on Polars, dual-backend tests, R oracle where installed | `tidy`, `scan_*`, `filter`, `filter_out`, `mutate`, `transmute`, `select`, `drop`, `rename`, `relocate`, `arrange`, `distinct`, `group_by`, `ungroup`, `summarise`/`summarize`, `count`, `tally`, `add_count`, `add_tally`, equality joins (`left`/`right`/`inner`/`full`/`semi`/`anti`/`cross`), `bind_rows`/`bind_cols`, set ops (`union`, `union_all`, `intersect`, `setdiff`, `symdiff`, `setequal`), `head`/`slice`/`slice_head`/`slice_tail`/`slice_min`/`slice_max`, core expr helpers (`col`, `n`, `mean`, `sum`, …), tidyselect basics, `collect` and file writers |
 | **Growing** | Feature-complete enough for real work; more edge cases and schema-discovery cost | tidyr missing/reshape (`drop_na`, `replace_na`, `fill`, `complete`, `expand`, `pivot_*`, `separate`, `unite`, `nest`/`unnest*`), `across`/`if_any`/`if_all`/`pick`/`c_across`, `rowwise`, `reframe`, `rename_with`, `join_by` inequality joins, `nest_join`, `rows_*`, advanced ranking/window helpers, NumPy/`to_numpy` handoff, column helpers (`is_na`, `round`, `pmin`, `row_sums`), `as_*` conversion, lubridate-style dates, readr-style `parse_*` / `problems`, `read_csv` |
-| **Experimental** | Correctness-first or Python-callback paths; may materialize eagerly or lag R oracle coverage | `group_split`, `group_map`, `group_modify`, `group_nest`, `with_groups`, `hoist`, `pack`, `unpack`, `separate_longer_delim`, `separate_wider_delim`, stochastic sampling (`sample_n`, `sample_frac`, `slice_sample`) |
+| **Experimental** | Correctness-first or Python-callback paths; may materialize eagerly or lag R oracle coverage | `TidyFrame.to_spark` (`tidy3[spark]`), `group_split`, `group_map`, `group_modify`, `group_nest`, `with_groups`, `hoist`, `pack`, `unpack`, `separate_longer_delim`, `separate_wider_delim`, stochastic sampling (`sample_n`, `sample_frac`, `slice_sample`) |
 
 **Performance note:** the stable core is the path that tracks raw Polars and
 beats pandas on realistic sizes. `group_nest` compiles to a Polars
@@ -216,6 +216,42 @@ it returns the same result on valid input but does not raise on invalid input.
 A `summarise` expression that is more than a bare summary
 (`mean(x).round(1)`, `mean(x) / 1000`) exports as its aggregation alone,
 without the size check tidy3 adds.
+
+## Run on Spark
+
+Experimental. `pip install "tidy3[spark]"` adds PySpark; Spark also needs
+Java 17 or later. `to_spark()` returns a lazy PySpark DataFrame that runs
+the pipeline on Spark, in tidy3's row order:
+
+```python notest
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.getOrCreate()
+frame = (
+    scan_parquet("penguins/*.parquet")
+    >> group_by("species")
+    >> summarise(n=n(), mass=mean("body_mass_g", na_rm=True))
+)
+frame.to_spark(spark).show()      # spark= defaults to the active session
+```
+
+Like `to_polars_code()`, it translates the query tidy3 compiled, so
+dplyr's rules come along: missing values in `mean` and `arrange`, stable
+sorts, `distinct` keeping the first row, half-to-even `round`, and R's
+`%%` sign. A step with no Spark translation raises
+`tidy3.spark_export.SparkExportError`, an `ExportError`, naming the step:
+a column computed by a Python function (the text conversions, R-style
+`round`, per-value string functions), factor (Enum) columns, and so far
+many date, string, reshape and list functions. Of the benchmark cases, 159
+run on Spark and 183 are refused; none gives different rows. The
+[design note](design-spark-backend.md) lists what is translated and how
+Spark and Polars differ.
+
+Results come back in Spark's types: Spark has no unsigned integers, so
+`n()` is a `bigint`. Division by zero, `%%` by zero and casts give tidy3's results
+whatever Spark's ANSI mode; integer overflow, which wraps in Polars, raises
+an error with ANSI mode on (Spark 4's default). Scans read the same files with Spark, and CSV options
+Spark would read differently are refused.
 
 A quoted string assigned in `mutate`, `transmute`, `summarise`, or `reframe`
 is text, as in dplyr: `mtcars >> mutate(source="mtcars")`

@@ -550,6 +550,18 @@ def _single_value(series: pl.Series, options: dict[str, Any]) -> pl.Series:
 
 _SQRT_EPS = math.sqrt(sys.float_info.epsilon)  # R's sqrt(.Machine$double.eps)
 
+# 10^k for k in -400..400 from the C library's pow, as R computes 10^k.
+# np.power is not exact on every CPU: with AVX-512 it can be a bit off
+# (10^-1 is 0.09999999999999999 under NumPy 1.26, 10^-5 off under 2.5).
+_POW10_MIN = -400
+_POW10 = np.array([10.0**k if k <= 308 else math.inf for k in range(_POW10_MIN, 401)])
+
+
+def _pow10(exponent: Any) -> Any:
+    """``10^exponent`` for a whole number or an array of them, as R gives it."""
+    k = np.clip(np.asarray(exponent, dtype=float), _POW10_MIN, -_POW10_MIN).astype(np.int64) - _POW10_MIN
+    return _POW10[k]
+
 
 def _round_half_up_numpy(values: np.ndarray, digits: int) -> np.ndarray:
     """janitor's ``round_half_up`` on a float array, step for step.
@@ -559,7 +571,7 @@ def _round_half_up_numpy(values: np.ndarray, digits: int) -> np.ndarray:
     truncated, divided by ``10^digits``, times the sign of *x*.
     """
     with np.errstate(over="ignore", invalid="ignore"):
-        scale = np.power(10.0, digits)
+        scale = _pow10(digits)
         scaled = np.abs(values) * scale + 0.5 + _SQRT_EPS
         return np.trunc(scaled) / scale * np.sign(values)
 
@@ -575,7 +587,7 @@ def _signif_half_up_numpy(values: np.ndarray, digits: int) -> np.ndarray:
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         rows = np.flatnonzero((values != 0) & np.isfinite(values))
         x = values[rows]
-        scale = np.power(10.0, digits - np.ceil(np.log10(np.abs(x))))
+        scale = _pow10(digits - np.ceil(np.log10(np.abs(x))))
         out[rows] = _round_half_up_numpy(x * scale, 0) / scale
     return out
 

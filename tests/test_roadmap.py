@@ -6,6 +6,7 @@ import zipfile
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -146,6 +147,15 @@ def test_round_half_up_sends_ties_away_from_zero():
     assert _col(out, "tens")[:7] == [0.0, 0.0, 0.0, -0.0, 0.0, 0.0, 30.0]
     z = _col(out, "z")
     assert z[7] is None and z[8] != z[8]
+
+
+def test_rounding_scales_are_the_c_librarys_powers_of_ten():
+    # np.power is a bit off on some CPUs (AVX-512), which moved results off R's.
+    from tidy3.helpers import _pow10
+
+    for k in range(-400, 401):
+        assert _pow10(k) == (10.0**k if k <= 308 else float("inf")), k
+    assert list(_pow10(np.array([-5.0, -1.0, 2.0]))) == [1e-05, 0.1, 100.0]
 
 
 def test_round_half_up_keeps_the_column_type():
