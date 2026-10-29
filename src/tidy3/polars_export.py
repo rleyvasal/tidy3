@@ -240,6 +240,9 @@ class _Printer:
         return self.chain(body["input"], lambda: f"with_columns({self.args(body['exprs'])})")
 
     def p_Select(self, body: dict) -> str:
+        unchecked = _without_summary_sizes(body)
+        if unchecked is not None:
+            return self.plan(unchecked)
         source = body["input"]
         names = [_plain_column(node) for node in body["expr"]]
         inner = _unwrap(source)
@@ -732,6 +735,55 @@ def _unwrap(node: Any) -> Any:
     return node
 
 
+def _without_summary_sizes(select: dict) -> dict | None:
+    """summarise()'s size check, removed: the aggregation without its size columns.
+
+    ``agg(m, size_m).filter(check(size_m)).drop(size_m)`` is the aggregation
+    alone once the check is skipped; else None.
+    """
+    expr = select["expr"]
+    if len(expr) != 1 or not isinstance(expr[0], dict) or "Selector" not in expr[0]:
+        return None
+    selector = expr[0]["Selector"]
+    if not isinstance(selector, dict) or set(selector) != {"Difference"}:
+        return None
+    body = selector["Difference"]
+    left, right = body if isinstance(body, list) else (body["left"], body["right"])
+    sizes = _selector_names(right)
+    if left != "Wildcard" or not sizes:
+        return None
+    checked = _unwrap(select["input"])
+    if not isinstance(checked, dict) or "Filter" not in checked:
+        return None
+    predicate = checked["Filter"]["predicate"]
+    function = predicate.get("Function") if isinstance(predicate, dict) else None
+    if not function or function.get("function") != {"Boolean": "AllHorizontal"}:
+        return None
+    checked_columns = []
+    for node in function["input"]:
+        check = node.get("AnonymousFunction") if isinstance(node, dict) else None
+        text = bytes((check or {}).get("function") or []).decode("latin-1")
+        if "_pl_check_summary_sizes.<locals>.check" not in text:
+            return None
+        checked_columns.append(_plain_column(check["input"][0]) if len(check["input"]) == 1 else None)
+    if sorted(checked_columns, key=str) != sorted(sizes):
+        return None
+    source = _unwrap(checked["Filter"]["input"])
+    if not isinstance(source, dict) or len(source) != 1:
+        return None
+    (kind, step), = source.items()
+    field = {"GroupBy": "aggs", "Select": "expr"}.get(kind)
+    if field is None:
+        return None
+    kept = [
+        node for node in step[field]
+        if not (isinstance(node, dict) and "Alias" in node and node["Alias"][1] in sizes)
+    ]
+    if len(kept) != len(step[field]) - len(sizes):
+        return None
+    return {kind: {**step, field: kept}}
+
+
 def _plain_column(node: Any) -> str | None:
     """``x`` for ``pl.col("x")`` or ``pl.col("x").alias("x")``, else None."""
     if isinstance(node, dict) and "Column" in node:
@@ -823,7 +875,11 @@ def _selector_names(node: Any) -> list[str] | None:
 
 
 # Lazy input checks: the function returns True unless the input is invalid.
-_GUARDS = ("_pl_assert_rows.<locals>.validate", "_pl_guard_no_rows.<locals>.validate")
+_GUARDS = (
+    "_pl_assert_rows.<locals>.validate",
+    "_pl_guard_no_rows.<locals>.validate",
+    "_pl_check_summary_sizes.<locals>.check",
+)
 
 # tidy3's Python functions, by module and qualified name, as the user wrote them.
 _UDF_NAMES = (
