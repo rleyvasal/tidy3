@@ -126,6 +126,29 @@ def test_row_checks_are_skipped_in_exported_code():
     assert_frame_equal(_run(code, inputs), frame.collect())
 
 
+def test_readme_summary_exports_without_its_size_check():
+    penguins = pl.DataFrame({
+        "species": ["Adelie", "Adelie", "Adelie", "Gentoo", "Gentoo", "Chinstrap"],
+        "sex": ["male", "female", None, "male", "female", "female"],
+        "bill_length_mm": [39.1, 39.5, 40.3, 46.1, None, 46.5],
+        "body_mass_g": [3750.0, 3800.0, 3250.0, 5100.0, 4500.0, 3500.0],
+    })
+    frame = (
+        t.tidy(penguins)
+        >> t.drop_na("sex")
+        >> t.group_by("species", "sex")
+        >> t.summarise(
+            n=t.n(),
+            bill_mm=t.mean("bill_length_mm").round(1),
+            mass_kg=(t.mean("body_mass_g") / 1000).round(2),
+        )
+        >> t.arrange(t.desc("mass_kg"))
+    )
+    code, inputs = _export(frame)
+    assert "__tidy3_size" not in code and "pl.lit(True)" not in code
+    assert_frame_equal(_run(code, inputs), frame.collect())
+
+
 @pytest.mark.parametrize(
     "build, reason",
     [

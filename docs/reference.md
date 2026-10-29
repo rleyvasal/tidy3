@@ -211,8 +211,11 @@ the lazy schema when it compiles them.
 
 The exported code skips tidy3's input checks (a `separate_wider_delim` with
 too many pieces, a weight column with negative values, a `rows_update` key
-missing from x), so it returns the same result on valid input but does not
-raise on invalid input.
+missing from x, a `summarise` expression that is not one value per group), so
+it returns the same result on valid input but does not raise on invalid input.
+A `summarise` expression that is more than a bare summary
+(`mean(x).round(1)`, `mean(x) / 1000`) exports as its aggregation alone,
+without the size check tidy3 adds.
 
 ## Run on Spark
 

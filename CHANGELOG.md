@@ -10,6 +10,10 @@ under **Changed**.
 
 - `TidyFrame.to_spark(spark=None)` runs a pipeline on Spark (experimental; `pip install "tidy3[spark]"`, plus Java 17 or later). It returns a lazy PySpark DataFrame built from the Polars query tidy3 compiled, the same plan `to_polars_code()` reads, so no verb is reimplemented and dplyr's rules carry over: tidy3's row order (stable sorts, `distinct` keeping the first row, `row_number`, `slice_*`, `cumsum`), missing values in `mean` and `arrange`, half-to-even `round`, R's `%%` sign, and summarise's one-value-per-group check. Scans read the same CSV and Parquet files with Polars' column types. A step with no Spark translation raises `SparkExportError` (an `ExportError`) naming it: columns computed by a Python function, factor columns, and for now many date, string, reshape and list functions. Division and `%%` by zero and casts match tidy3 whatever Spark's ANSI mode; integer overflow raises with ANSI on, where Polars wraps. Of the 342 benchmark frame queries, 159 run on Spark and match tidy3 to within 1e-12 and 183 are refused; none gives different rows. Checked on a standalone cluster too (`TIDY3_SPARK_MASTER`), including row order over 93-partition CSV and uneven multi-file Parquet scans. [Design note](docs/design-spark-backend.md).
 
+### Fixed
+
+- `to_polars_code()` exports a `summarise` whose expression is more than a bare summary, such as the README's `bill_mm=mean("bill_length_mm").round(1)`. tidy3 checks at collect time that such an expression gives one value per group, as dplyr does, and the exporter refused that check as a user's Python function. It is now skipped like tidy3's other input checks, and the exported code leaves out the hidden size columns and the filter that read them, so it is the aggregation alone and returns the same frame as tidy3.
+
 ## 0.12.4 — 2026-10-27
 
 Four more janitor functions: `single_value()`, `get_one_to_one()`, `adorn_rounding()`, and `adorn_title()`, checked against janitor 2.2.1.
