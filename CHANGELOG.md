@@ -12,6 +12,7 @@ under **Changed**.
 
 ### Fixed
 
+- `round_half_up` and `signif_half_up` now match janitor to the last bit on every CPU. They took powers of ten from NumPy, which on some CPUs with AVX-512 is a bit off (10^-1 came out 0.09999999999999999), so `round_half_up(25, -1)` could give 30.000000000000004. They now use the C library's `pow`, as R does.
 - `to_polars_code()` exports a `summarise` whose expression is more than a bare summary, such as the README's `bill_mm=mean("bill_length_mm").round(1)`. tidy3 checks at collect time that such an expression gives one value per group, as dplyr does, and the exporter refused that check as a user's Python function. It is now skipped like tidy3's other input checks, and the exported code leaves out the hidden size columns and the filter that read them, so it is the aggregation alone and returns the same frame as tidy3.
 
 ## 0.12.4 — 2026-10-27
