@@ -27,6 +27,8 @@ import functools
 import glob
 import io
 import json
+import re
+import sys
 import warnings
 from dataclasses import dataclass, field
 from typing import Any
@@ -181,6 +183,132 @@ def _int_literal(node: Any) -> int | None:
             if isinstance(raw, int) and not isinstance(raw, bool):
                 return raw
     return None
+
+
+def _str_literal(node: Any) -> str | None:
+    """The value of a serialized string literal, else None."""
+    if isinstance(node, dict) and "Literal" in node:
+        (kind, value), = node["Literal"].items()
+        if kind == "Scalar" and isinstance(value, dict) and isinstance(value.get("String"), str):
+            return value["String"]
+    return None
+
+
+def _is_null_literal(node: Any) -> bool:
+    return isinstance(node, dict) and node.get("Literal", {}).get("Scalar", {}) == {"Null": "Null"}
+
+
+# Polars writes regular expressions for Rust's regex crate; Spark runs Java's.
+# (?U) gives Java Rust's Unicode \d, \s, \w and case folding; (?d) makes \n
+# the only line end, as in Rust.
+_JAVA_FLAGS = "(?Ud)"
+# Characters regex::escape escapes: before Polars 2, a pattern with none is
+# replaced literally, and so is its replacement.
+_RUST_META = set("\\.+*?()|[]{}^$#&-~")
+_POLARS_2 = int(pl.__version__.split(".")[0]) >= 2
+
+
+@functools.cache
+def _titlecase_letters() -> dict[str, str]:
+    """Letters whose titlecase is not their uppercase: "ß" is "Ss", "ǆ" is "ǅ"."""
+    letters = (chr(c) for c in range(sys.maxunicode + 1))
+    return {c: c.title() for c in letters if c.title() != c.upper()}
+
+
+def _java_regex(pattern: str) -> str:
+    # Java takes scripts as \p{IsHan}, and categories with or without "Is".
+    pattern = re.sub(r"\\([pP])\{(?!Is|In)(\w+)\}", r"\\\1{Is\2}", pattern)
+    return pattern.replace("(?P<", "(?<")
+
+
+def _java_quote(text: str) -> str:
+    """Java's Pattern.quote: *text* as a literal pattern."""
+    return "\\Q" + text.replace("\\E", "\\E\\\\E\\Q") + "\\E"
+
+
+def _java_literal_replacement(text: str) -> str:
+    """Java's Matcher.quoteReplacement: *text* as a literal replacement."""
+    return text.replace("\\", "\\\\").replace("$", "\\$")
+
+
+def _java_replacement(rust: str, shift: int = 0) -> str | None:
+    """A Rust regex replacement (``$1``, ``${name}``, ``$$``) for Java, else None.
+
+    Group numbers move up by *shift*. Rust reads the longest name after
+    ``$``, so ``$1x`` names a group "1x", which no pattern has: empty.
+    """
+    out, i, after_group = [], 0, False
+    while i < len(rust):
+        c = rust[i]
+        if c == "$" and rust.startswith("$$", i):
+            out.append("\\$")
+            i, after_group = i + 2, False
+            continue
+        if c == "$":
+            if rust.startswith("${", i) and "}" in rust[i:]:
+                end = rust.index("}", i)
+                name, i = rust[i + 2:end], end + 1
+            else:
+                j = i + 1
+                while j < len(rust) and (rust[j].isascii() and (rust[j].isalnum() or rust[j] == "_")):
+                    j += 1
+                name, i = rust[i + 1:j], j
+            if not name:
+                out.append("\\$")
+                after_group = False
+            elif name.isdigit():
+                out.append(f"${int(name) + shift}")
+                after_group = True
+            elif name[0].isdigit():
+                after_group = False
+            elif name.isascii() and name.isalnum() and name[0].isalpha():
+                out.append("${" + name + "}")
+                after_group = False
+            else:
+                return None
+            continue
+        # A digit straight after a group number would extend it in Java.
+        out.append("\\" + c if c == "\\" or (after_group and c.isdigit()) else c)
+        i, after_group = i + 1, False
+    return "".join(out)
+
+
+def _group_always_set(pattern: str) -> bool:
+    """Whether every group of *pattern* is set, and not empty, when it matches.
+
+    Spark's regexp_extract gives "" both for an empty group and for one that
+    took no part, where Polars gives "" and null; with no alternation,
+    optional or zero-width repetition, or empty group, neither can happen.
+    """
+    plain = pattern.replace("(?", "(")
+    return not (set("|?*") & set(plain) or "{0" in plain or "{," in plain or "()" in plain or not pattern)
+
+
+# Units of a Polars duration string such as "1mo2d" or "-14d".
+_MONTHS = {"y": 12, "q": 3, "mo": 1}
+_DAYS = {"w": 7, "d": 1}
+_MICROS = {"h": 3_600_000_000, "m": 60_000_000, "s": 1_000_000, "ms": 1_000, "us": 1}
+
+
+def _duration(text: str) -> tuple[int, int, int] | None:
+    """(months, days, microseconds) of a Polars duration string, else None."""
+    sign, body = (-1, text[1:]) if text.startswith("-") else (1, text)
+    months = days = micros = 0
+    for count, unit in re.findall(r"(\d+)([a-z]+)", body):
+        n = int(count)
+        if unit in _MONTHS:
+            months += n * _MONTHS[unit]
+        elif unit in _DAYS:
+            days += n * _DAYS[unit]
+        elif unit in _MICROS:
+            micros += n * _MICROS[unit]
+        elif unit == "ns" and n % 1000 == 0:
+            micros += n // 1000
+        else:
+            return None
+    if not body or re.sub(r"\d+[a-z]+", "", body):
+        return None
+    return sign * months, sign * days, sign * micros
 
 
 _BINARY = {
@@ -738,6 +866,9 @@ class _Translator:
     def e_Cast(self, body, node, ctx):
         value, target = self.expr(body["expr"], node, ctx), self.dtype(body["dtype"])
         options = body.get("options")
+        if isinstance(target, T.DateType) and isinstance(self.type_of(value, node), T.IntegralType):
+            # An integer as a date is a count of days since 1970, as in Polars.
+            return F.date_from_unix_date(value.cast(T.IntegerType()))
         if options not in ("Strict", "NonStrict"):
             # Overflowing: wraps with ANSI off; raises with it on.
             return value.cast(target)
@@ -799,6 +930,12 @@ class _Translator:
             if name in ("Any", "All"):
                 (value,) = [self.agg_input(i, node, ctx) for i in inputs]
                 return self.aggregate(F.bool_or(value) if name == "Any" else F.bool_and(value), ctx)
+            if name == "IsBetween":
+                value, low, high = args()
+                closed = options["closed"]
+                above = value >= low if closed in ("Both", "Left") else value > low
+                below = value <= high if closed in ("Both", "Right") else value < high
+                return above & below
             simple = {
                 "IsNull": lambda a: a.isNull(), "IsNotNull": lambda a: a.isNotNull(),
                 "IsNan": F.isnan, "IsNotNan": lambda a: ~F.isnan(a), "Not": lambda a: ~a,
@@ -866,31 +1003,175 @@ class _Translator:
             window = self.ordered_window(ctx, _sort_columns(node.order))
             return F.lag(value, n).over(window) if n >= 0 else F.lead(value, -n).over(window)
         if group == "StringExpr":
-            (value, *rest) = args()
-            if name == "Lowercase":
-                return F.lower(value)
-            if name == "Uppercase":
-                return F.upper(value)
-            if name == "LenChars":
-                return F.char_length(value)
-            if name == "StartsWith":
-                return F.startswith(value, rest[0])
-            if name == "EndsWith":
-                return F.endswith(value, rest[0])
-            if name == "Contains":
-                # Java regular expressions, not Rust's: most patterns agree.
-                return F.contains(value, rest[0]) if options["literal"] else F.regexp(value, rest[0])
-            raise self.unsupported(f"the string function {name}")
+            return self.string_function(name, options, inputs, node, ctx)
         if group == "TemporalExpr":
-            parts = {"Year": F.year, "Month": F.month, "Day": F.dayofmonth, "Hour": F.hour,
-                     "Minute": F.minute, "Quarter": F.quarter, "OrdinalDay": F.dayofyear,
-                     # Polars numbers weekdays 1 (Monday) to 7; Spark's weekday() counts from 0.
-                     "WeekDay": lambda v: F.weekday(v) + 1}
-            if name not in parts:
-                raise self.unsupported(f"the date function {name}")
-            (value,) = args()
-            return parts[name](value)
+            return self.date_function(name, options, inputs, node, ctx)
         raise self.unsupported(f"the Polars function {group}")
+
+    def regex(self, node: Any, what: str) -> str:
+        """The Java form of a literal Rust pattern."""
+        pattern = _str_literal(node)
+        if pattern is None:
+            raise self.unsupported(f"{what} with a computed pattern")
+        return _JAVA_FLAGS + _java_regex(pattern)
+
+    def string_function(self, name, options, inputs, node, ctx):
+        (value, *rest) = [self.expr(i, node, ctx) for i in inputs]
+        if name == "Lowercase":
+            return F.lower(value)
+        if name == "Uppercase":
+            return F.upper(value)
+        if name == "LenChars":
+            return F.char_length(value)
+        if name == "StartsWith":
+            return F.startswith(value, rest[0])
+        if name == "EndsWith":
+            return F.endswith(value, rest[0])
+        if name == "Contains":
+            # Java regular expressions, not Rust's: most patterns agree.
+            if options["literal"]:
+                return F.contains(value, rest[0])
+            return F.regexp(value, F.lit(self.regex(inputs[1], "a regex match")))
+        if name == "ConcatHorizontal":
+            delimiter = options["delimiter"]
+            if options["ignore_nulls"]:
+                return F.concat_ws(delimiter, value, *rest)
+            # concat() is missing if any input is, as in Polars.
+            parts = [value]
+            for v in rest:
+                parts += [F.lit(delimiter), v] if delimiter else [v]
+            return F.concat(*parts)
+        if name == "Slice":
+            offset, length = rest
+            # Polars counts from 0, Spark from 1; from the end, both count back.
+            pos = F.when(offset >= 0, offset + 1).otherwise(offset).cast(T.IntegerType())
+            span = F.lit(2**31 - 1) if _is_null_literal(inputs[2]) else length.cast(T.IntegerType())
+            return F.substring(value, pos, span)
+        if name == "Replace":
+            return self.replace(value, inputs, options)
+        if name == "Extract":
+            pattern = _str_literal(inputs[1])
+            if pattern is None or not _group_always_set(pattern):
+                raise self.unsupported("str_extract() of a group that may be empty or unset")
+            regex = self.regex(inputs[1], "str_extract()")
+            # regexp_extract gives "" where nothing matches; Polars, null.
+            return F.when(F.regexp(value, F.lit(regex)), F.regexp_extract(value, regex, options))
+        if name == "CountMatches":
+            pattern = _str_literal(inputs[1])
+            if pattern is None:
+                raise self.unsupported("a match count with a computed pattern")
+            regex = _java_quote(pattern) if options else self.regex(inputs[1], "a match count")
+            return F.regexp_count(value, F.lit(regex))
+        if name in ("PadStart", "PadEnd"):
+            width = _int_literal(inputs[1])
+            if width is None:
+                raise self.unsupported("padding to a computed width")
+            pad = F.lpad if name == "PadStart" else F.rpad
+            # lpad and rpad cut a longer string; Polars leaves it.
+            return F.when(F.char_length(value) >= width, value).otherwise(pad(value, width, options["fill_char"]))
+        if name in ("StripChars", "StripCharsStart", "StripCharsEnd"):
+            if _is_null_literal(inputs[1]):
+                # Unicode whitespace, as Rust's trim(); Spark's trim() takes spaces only.
+                chars = "\\s"
+            else:
+                text = _str_literal(inputs[1])
+                if text is None:
+                    raise self.unsupported("stripping computed characters")
+                if not text:
+                    return value
+                chars = "[" + "".join(c if c.isalnum() else "\\" + c for c in text) + "]"
+            ends = {"StripChars": [f"\\A{chars}+", f"{chars}+\\z"],
+                    "StripCharsStart": [f"\\A{chars}+"], "StripCharsEnd": [f"{chars}+\\z"]}[name]
+            return F.regexp_replace(value, F.lit(_JAVA_FLAGS + "|".join(ends)), F.lit(""))
+        if name == "Titlecase":
+            # Polars capitalizes each letter that follows a non-letter and
+            # lowercases the rest: "x1y" is "X1Y", where initcap() gives "X1y".
+            # Polars 2 capitalizes in titlecase ("ß" is "Ss"); Polars 1, in uppercase.
+            chars = F.regexp_extract_all(value, F.lit("(?s)."), 0)
+            title = None
+            if _POLARS_2:
+                title = F.create_map(*[F.lit(s) for pair in _titlecase_letters().items() for s in pair])
+
+            def cased(c, i):
+                after_letter = F.coalesce(F.regexp(F.get(chars, i - 1), F.lit("\\p{IsAlphabetic}")), F.lit(False))
+                first = F.upper(c) if title is None else F.coalesce(F.try_element_at(title, c), F.upper(c))
+                return F.when((i == 0) | ~after_letter, first).otherwise(F.lower(c))
+
+            return F.array_join(F.transform(chars, cased), "")
+        raise self.unsupported(f"the string function {name}")
+
+    def replace(self, value, inputs, options):
+        """str_replace() and friends: the first match (n=1) or all (n=-1)."""
+        pattern, replacement = _str_literal(inputs[1]), _str_literal(inputs[2])
+        n = options["n"]
+        if pattern is None or replacement is None or n not in (1, -1):
+            raise self.unsupported("a replacement with a computed pattern or count")
+        # Polars 1 replaces a pattern with no regex characters literally, and
+        # then reads the replacement literally too.
+        if options["literal"] or not (_POLARS_2 or _RUST_META & set(pattern)):
+            regex, java = _java_quote(pattern), _java_literal_replacement(replacement)
+        else:
+            regex, java = _java_regex(pattern), _java_replacement(replacement, shift=1 if n == 1 else 0)
+            if java is None:
+                raise self.unsupported(f"the replacement {replacement!r}")
+        if n == -1:
+            return F.regexp_replace(value, F.lit(_JAVA_FLAGS + regex), F.lit(java))
+        # Spark replaces every match: anchor the first, keeping the text before it.
+        lead = "$1" + ("\\" if java[:1].isdigit() else "")
+        return F.regexp_replace(value, F.lit(f"{_JAVA_FLAGS}\\A(?s:(.*?))(?:{regex})"), F.lit(lead + java))
+
+    def date_function(self, name, options, inputs, node, ctx):
+        parts = {"Year": F.year, "Month": F.month, "Day": F.dayofmonth, "Hour": F.hour,
+                 "Minute": F.minute, "Second": F.second, "Quarter": F.quarter, "OrdinalDay": F.dayofyear,
+                 # Polars numbers weekdays 1 (Monday) to 7; Spark's weekday() counts from 0.
+                 "WeekDay": lambda v: F.weekday(v) + 1,
+                 # ISO weeks, and the ISO year: that of the week's Thursday.
+                 "Week": F.weekofyear,
+                 "IsoYear": lambda v: F.year(F.date_add(F.to_date(v), 3 - F.weekday(v))),
+                 "DaysInMonth": lambda v: F.dayofmonth(F.last_day(v)),
+                 "Nanosecond": lambda v: (F.extract(F.lit("SECOND"), v) * 1_000_000).cast(T.LongType()) % 1_000_000 * 1000}
+        (value, *rest) = [self.expr(i, node, ctx) for i in inputs]
+        if name in parts:
+            return parts[name](value)
+        if name == "IsLeapYear":
+            year = F.year(value)
+            return (year % 4 == 0) & ((year % 100 != 0) | (year % 400 == 0))
+        is_date = isinstance(self.type_of(value, node), T.DateType)
+        if name == "Truncate":
+            every = _str_literal(inputs[1])
+            unit = {"1y": "year", "1q": "quarter", "1mo": "month", "1w": "week", "1d": "day",
+                    "1h": "hour", "1m": "minute", "1s": "second"}.get(every)
+            if unit is None:
+                raise self.unsupported(f"floor_date() to {every!r}")
+            if unit in ("hour", "minute", "second"):
+                if is_date:
+                    raise self.unsupported(f"floor_date() of a date to {every!r}")
+                # Not date_trunc(): it reads a naive datetime in the session's
+                # time zone, which moves a clock time daylight saving skipped.
+                kept = {"hour": 1, "minute": 2, "second": 3}[unit]
+                clock = [F.hour(value), F.minute(value), F.second(value)][:kept] + [F.lit(0)] * (3 - kept)
+                return F.make_timestamp_ntz(F.year(value), F.month(value), F.dayofmonth(value), *clock)
+            day = value if is_date else F.to_date(value)
+            floored = day if unit == "day" else F.trunc(day, unit)
+            return floored if is_date else floored.cast(T.TimestampNTZType())
+        if name == "OffsetBy":
+            text = _str_literal(inputs[1])
+            span = _duration(text) if text is not None else None
+            if span is None:
+                raise self.unsupported(f"a date offset of {text!r}")
+            months, days, micros = span
+            # Polars adds months first (clamped to the month's end, as
+            # add_months is), then days and time.
+            if is_date:
+                if micros:
+                    raise self.unsupported("a date offset by part of a day")
+                return F.date_add(F.add_months(value, months) if months else value, days)
+            shifted = value + F.make_ym_interval(F.lit(0), F.lit(months)) if months else value
+            if days or micros:
+                seconds = F.lit(micros).cast(T.DecimalType(18, 6)) / 1_000_000
+                shifted = shifted + F.make_dt_interval(F.lit(days), F.lit(0), F.lit(0), seconds.cast(T.DecimalType(18, 6)))
+            return shifted
+        raise self.unsupported(f"the date function {name}")
 
     def e_AnonymousFunction(self, body, node, ctx):
         text = bytes(body.get("function") or []).decode("latin-1")
@@ -916,6 +1197,8 @@ class _Translator:
         if isinstance(node, dict) and "Literal" in node:
             node = node["Literal"]
         spark_type = _SIMPLE_TYPES.get(node) if isinstance(node, str) else None
+        if node == {"Datetime": ["Microseconds", None]}:
+            spark_type = T.TimestampNTZType()
         if spark_type is None:
             # A parametrized type is {"Enum": ...}, {"Datetime": [...]}: name it only.
             kind = next(iter(node), "?") if isinstance(node, dict) else node

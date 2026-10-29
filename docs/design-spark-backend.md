@@ -87,7 +87,11 @@ is one value per group; on Spark that check is a `raise_error()`.
 | Polars sums booleans; Spark refuses | booleans cast to 0/1 in `sum`, `mean`, `cumsum` | `consecutive_id` benchmark case |
 | No unsigned integers in Spark | held in the next wider signed type; `UInt64` as `Decimal(20, 0)` | `unsigned` test |
 | Spark scans infer types differently | the Spark schema is Polars' schema for that scan; CSV options Spark would read differently are refused | penguins tests |
-| Regular expressions | Java's dialect, not Rust's: most patterns agree; look-arounds work on Spark but not in Polars, and some classes differ | `str_detect` test |
+| Regular expressions: Rust's dialect in Polars, Java's in Spark | patterns get Java's `(?U)` (Unicode `\d`, `\s`, `\w` and case folding, as in Rust) and `(?d)` (`\n` the only line end); `\p{Han}` becomes `\p{IsHan}`, `(?P<name>` becomes `(?<name>`. Look-arounds work on Spark but not in Polars; `$` before a final newline differs | `string_functions` tests |
+| Replacements: Rust writes `$1`, `${1}`, `$$`, and reads `$1x` as a group named "1x" (empty); Java reads `$12` as group 12 if it exists | rewritten for Java; a first-only replace (`n=1`), which Spark lacks, anchors the first match as `\A(?s:(.*?))(?:pattern)`. Polars 1 replaces a pattern with no regex characters literally, replacement and all; Polars 2 does not, and the translator follows the installed version | `polars_options` test |
+| `regexp_extract` gives `""` where nothing matches, and for a group that took no part | null where nothing matches; a pattern whose group may be unset or empty (`\|`, `?`, `*`, `{0}`) is refused | `extract_whose_group_may_be_unset` test |
+| `trim` strips spaces; `lpad`/`rpad` cut a longer string; `initcap` capitalizes after spaces only; `concat_ws` skips missing values | Unicode whitespace stripped by regex; padding only when shorter; title case letter by letter after any non-letter, in titlecase under Polars 2 (`ß` is `Ss`) and uppercase under Polars 1; `concat` with the separator between, so a missing value makes the result missing | `stringr` test |
+| `date_trunc` reads a naive datetime in the session time zone, so a clock time daylight saving skipped moves an hour | truncation from the date and clock fields (`trunc`, `make_timestamp_ntz`); offsets add months (clamped to the month's end, as Polars does) then a day-time interval | session-time-zone test with 02:37 on 8 March 2020 in New York |
 | Division by zero: Polars gives `inf`, `-inf` or `nan`; Spark gives null (ANSI off) or raises (ANSI on, Spark 4's default) | IEEE results written out, the sign of `-0.0` read from its text (Spark's `signum` and `atan2` drop it) | `arithmetic_edges` tests, both ANSI modes |
 | `%%` by zero: null for integers, `nan` for floats in Polars | written out | same |
 | A non-strict cast gives null for a value with no such form; a strict one fails | `try_cast`, and a `raise_error` for strict casts, so ANSI off does not turn a failure into null | `strict_cast` test, both ANSI modes |
@@ -96,20 +100,25 @@ is one value per group; on Spark that check is a `raise_error()`.
 
 ## 4. What is not translated yet
 
-Of the 342 benchmark cases that collect a frame query, **159 run on Spark
+Of the 342 benchmark cases that collect a frame query, **200 run on Spark
 and match tidy3** to within 1e-12, and the rest raise `SparkExportError`.
-None returns different rows. (`to_polars_code()` exports 269.) The
-refusals, by count:
+None returns different rows. (`to_polars_code()` exports 269.) The counts
+are the same under Polars 1.42.1 and 2.1.0. The refusals, by count:
 
 | Refused | Cases | Notes |
 |---|---|---|
 | A column computed by a Python function | 44 | Text conversions (`as_*`, `parse_*`, `ymd`), R `round`, per-value stringr, janitor rounding. Polars stores the functions cloudpickled in the plan, and they run outside Polars, so they could become Arrow UDFs, but only those tidy3 marks elementwise can be split across partitions. |
-| Dates and times | 30 | `offset_by` (periods), time zones, `floor_date`, durations, week numbers. Time zones need a session time-zone policy. |
-| Strings | 29 | `str_replace`, `str_sub`, `str_c`, `str_extract`, `str_split`, `str_trim`, padding, case. Mostly direct; `str_trim` must strip Unicode whitespace like Polars. |
+| Joins, binds, group order | 22 | right, full and cross joins (and the inequality joins built on a cross join), `bind_cols`, `bind_rows` of columns with different types, groups kept in order of appearance. |
 | Factors (Enum columns and casts) | 18 | Spark has no Enum; a string column plus recorded levels would do. |
-| Joins, binds, group order | 20 | right, full and cross joins, `bind_rows` of columns with different types, groups kept in order of appearance. |
-| Reshape | 11 | `pivot_wider`, `pivot_longer`, `unnest`, `bind_cols`, `explode`. Spark has `pivot`, `unpivot` and `explode`. |
-| Other | 31 | lists and structs, `first`/`last` within groups, `fill` (forward and backward), the row checks of `rows_*`, `between`. |
+| Strings | 15 | Functions that give lists or structs (`str_split`, `str_extract_all`, `str_locate`, `str_match`, `word`, `separate`), `str_flatten`, and Unicode normalization (`str_equal`). |
+| Dates and times | 14 | Durations (`ddays`, `as_duration`, `time_length`) and time zones (`with_tz`, `force_tz`, zoned datetimes). Spark's day-time intervals could hold durations; time zones need a session time-zone policy. |
+| Reshape | 11 | `pivot_wider`, `pivot_longer`, `unnest`, `explode`, `pack`, `hoist`. Spark has `pivot`, `unpivot` and `explode`. |
+| Other | 18 | `first`/`last` within groups, `lag`/`lead` with a default, `fill`, `slice_tail`, `nth`, `cume_dist`, `row_means`, `uncount`, IPC scans, and the row checks of `rows_*`. |
+
+String and date functions with a Spark form are translated: replacing,
+slicing, padding, trimming, case, counting and extracting matches, and
+joining strings; date parts, ISO weeks and years, leap years, days in a
+month, `floor_date`/`ceiling_date`, `make_date`, and adding periods.
 
 ## 5. Performance
 

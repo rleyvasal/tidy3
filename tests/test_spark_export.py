@@ -177,6 +177,96 @@ def test_edge_cases_match_tidy3(frame, spark):
     _same(frame, spark)
 
 
+TEXT = tidy({
+    "s": ["abcabc", None, "héllo wörld", "", "  pad \t", "o'neil mc-DONALD x1y", "a.b$c\\d", "ǆemal ÉCOLE ßa ﬁx"],
+    "t": ["x", "y", None, "z", "", "w", "v", "u"],
+})
+
+STRINGS = {
+    "stringr": TEXT >> mutate(
+        replace=str_replace("s", "b", "B"), replace_all=str_replace_all("s", "[aeiou]", "_"),
+        remove=str_remove("s", "\\s+"), sub=str_sub("s", 2, 4), sub_end=str_sub("s", -3),
+        pad=str_pad("s", 8, pad="*"), pad_right=str_pad("s", 8, side="right"),
+        trim=str_trim("s"), trim_left=str_trim("s", side="left"), squish=str_squish("s"),
+        title=str_to_title("s"), sentence=str_to_sentence("s"), count=str_count("s", "[a-z]"),
+        extract=str_extract("s", "[a-z]+"), c=str_c("s", "t", sep="-"), trunc=str_trunc("s", 6),
+        snake=str_to_snake("s"), camel=str_to_camel("s"),
+    ),
+    "polars_options": TEXT >> mutate(
+        # Rust's $1x is a group named "1x": empty. Before Polars 2, a pattern
+        # with no regex characters is replaced literally, replacement and all.
+        first_groups=pl.col("s").str.replace("(b)(c)", "$2$1x", n=1),
+        all_groups=pl.col("s").str.replace_all("(b)(c)", "${2}${1}0"),
+        literal_dollars=pl.col("s").str.replace("b", "$$"),
+        quoted=pl.col("s").str.replace_all(".", "[$0]", literal=True),
+        escaped=pl.col("s").str.replace_all("([.$\\\\])", "\\$1"),
+        slice_back=pl.col("s").str.slice(-5, 2), slice_past=pl.col("s").str.slice(-20, 4),
+        slice_rest=pl.col("s").str.slice(3), strip_set=pl.col("s").str.strip_chars("a c"),
+        strip_end=pl.col("s").str.strip_chars_end(), pad_end=pl.col("s").str.pad_end(9, "."),
+        joined=pl.concat_str([pl.col("s"), pl.col("t")], separator="|", ignore_nulls=True),
+        group=pl.col("s").str.extract("([a-z])([a-z])", 2),
+        words=pl.col("s").str.count_matches("\\w+"), literal_count=pl.col("s").str.count_matches(".", literal=True),
+        unicode=pl.col("s").str.contains("\\p{Lu}"), digits=pl.col("s").str.contains("^\\D+$"),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(STRINGS))
+def test_string_functions_match_tidy3(name, spark):
+    _same(STRINGS[name], spark)
+
+
+def test_an_extract_whose_group_may_be_unset_is_refused(spark):
+    # Spark gives "" where Polars gives null for a group that took no part.
+    frame = TEXT >> mutate(e=pl.col("s").str.extract("(a)|(b)", 2))
+    with pytest.raises(SparkExportError, match="str_extract"):
+        frame.to_spark(spark)
+
+
+_DAYS = ["2020-01-31", "2020-02-29", "2021-01-01", "2020-12-31", "1999-12-27", None, "1900-03-01", "2024-07-15"]
+DAYS = tidy({
+    "d": pl.Series(_DAYS).str.to_date(),
+    "at": pl.Series([d and d + " 13:07:05.250001" for d in _DAYS[:-1]] + ["2020-03-08 02:37:59.999999"])
+    .str.to_datetime("%Y-%m-%d %H:%M:%S%.f", time_unit="us"),
+})
+
+DATES = {
+    "parts": DAYS >> mutate(
+        week=isoweek("d"), iso=isoyear("d"), leap=leap_year("d"), month_days=days_in_month("d"),
+        sec=second("at"), nanos=pl.col("at").dt.nanosecond(), at_week=isoweek("at"),
+    ),
+    "rounding": DAYS >> mutate(
+        month=floor_date("d", "month"), year=floor_date("d", "year"), quarter=floor_date("d", "quarter"),
+        up=ceiling_date("d", "month"), hour=floor_date("at", "hour"), at_month=floor_date("at", "month"),
+        monday=pl.col("d").dt.truncate("1w"), at_monday=pl.col("at").dt.truncate("1w"),
+    ),
+    "offsets": DAYS >> mutate(
+        # Months first, clamped to the month's end: 31 January plus a month is 29 February.
+        month=col("d") + months(1), year=col("d") + years(1), back=col("d") - weeks(2),
+        day=col("d") + days(1), at_month=pl.col("at").dt.offset_by("1mo2d3h"),
+        at_back=pl.col("at").dt.offset_by("-1mo1500ms"), at_minutes=col("at") + minutes(90),
+    ),
+    "make_date": tidy({"y": [2020, 2021, 2020, None], "m": [2, 2, 13, 1], "day": [29, 29, 1, 1]})
+    >> mutate(d=make_date("y", "m", "day"), mid=pl.col("y").is_between(2020, 2020, closed="left")),
+}
+
+
+@pytest.mark.parametrize("name", list(DATES))
+def test_date_functions_match_tidy3(name, spark):
+    _same(DATES[name], spark)
+
+
+def test_datetimes_ignore_the_session_time_zone(spark):
+    # 02:37 on 8 March 2020 never happened in New York; a naive datetime has no zone.
+    before = spark.conf.get("spark.sql.session.timeZone")
+    spark.conf.set("spark.sql.session.timeZone", "America/New_York")
+    try:
+        for name in ("parts", "rounding", "offsets"):
+            _same(DATES[name], spark)
+    finally:
+        spark.conf.set("spark.sql.session.timeZone", before)
+
+
 def test_a_multi_file_scan_keeps_file_order(tmp_path, spark):
     # Spark orders a scan's files by size; Polars reads them in name order.
     (tmp_path / "a.csv").write_text("x\n1\n2\n")
