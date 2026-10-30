@@ -67,6 +67,7 @@ __all__ = [
     "make_date",
     "make_datetime",
     "seq",
+    "date_seq",
     "isoyear",
     "leap_year",
     "today",
@@ -834,18 +835,23 @@ _SEQ_STEPS = {
 }
 
 
+def _split_interval(interval: str) -> tuple[int, str]:
+    digits = len(interval) - len(interval.lstrip("0123456789"))
+    return int(interval[:digits]), interval[digits:]
+
+
 def _seq_interval(by: Any) -> str:
     """A Polars interval from ``"month"``, ``"2 weeks"``, ``"-1 year"``, or a period."""
     if isinstance(by, Period):
         used = [(n, v) for n, v in zip(_PERIOD_SLOTS, by._slots()) if not _zero(v)]
         if len(used) != 1 or not isinstance(used[0][1], int) or isinstance(used[0][1], bool):
-            raise ValueError("seq() by must be one unit, such as months(1) or days(7)")
+            raise ValueError("date_seq() by must be one unit, such as months(1) or days(7)")
         unit, count = used[0]
         if count < 1:
-            raise ValueError("seq() by must count up; use a positive period")
+            raise ValueError("date_seq() by must count up; use a positive period")
         return f"{count}{_SEQ_STEPS[unit.rstrip('s')]}"
     if not isinstance(by, str):
-        raise TypeError('seq() by must be a string such as "month" or "2 weeks", or a period')
+        raise TypeError('date_seq() by must be a string such as "month" or "2 weeks", or a period')
     text = by.strip().lower()
     parts = text.split()
     count = 1
@@ -853,32 +859,60 @@ def _seq_interval(by: Any) -> str:
         try:
             count = int(parts[0])
         except ValueError:
-            raise ValueError(f"seq() cannot read by={by!r}") from None
+            raise ValueError(f"date_seq() cannot read by={by!r}") from None
         text = parts[1]
     elif len(parts) != 1:
-        raise ValueError(f"seq() cannot read by={by!r}")
+        raise ValueError(f"date_seq() cannot read by={by!r}")
     if text.endswith("s") and text[:-1] in _SEQ_STEPS:
         text = text[:-1]
     if text not in _SEQ_STEPS or count < 1:
-        raise ValueError(f"seq() by unit must be one of: {', '.join(_SEQ_STEPS)}, with a count of 1 or more")
+        raise ValueError(f"date_seq() by unit must be one of: {', '.join(_SEQ_STEPS)}, with a count of 1 or more")
     return f"{count}{_SEQ_STEPS[text]}"
 
 
-def seq(start: Any, end: Any, by: Any = "day") -> Expr:
-    """Dates from *start* to *end* (both included), like R's ``seq.Date``.
+def date_seq(
+    from_: Any, to: Any = None, by: Any = None, total_size: int | None = None
+) -> Expr:
+    """Dates from *from_* by a step, as clock's ``date_seq()`` and R's ``seq.Date``.
+
+    Give exactly two of *to*, *by*, and *total_size*:
+
+    - ``date_seq(a, b, "month")``: every month from *a* up to *b*, both
+      included when the steps land on them.
+    - ``date_seq(a, by="month", total_size=12)``: 12 dates starting at *a*.
 
     ``by`` is ``"day"``, ``"week"``, ``"month"``, ``"quarter"``, ``"year"``,
-    optionally with a count (``"2 months"``), or a period such as
-    ``months(1)``. Steps count up only: a negative step raises, where R counts
-    down, and an *end* before *start* gives an empty list. Each row gets its own list of dates, so in ``mutate`` the result is a list
-    column; ``explode`` it for one row per date. A month step from the 29th
-    to the 31st stays on the last real day of a short month (Polars' rule),
-    where R spills into the next month. A missing *start* or *end* gives a
-    missing list.
+    optionally with a count (``"2 months"``), a whole number of days, or a
+    period such as ``months(1)``. Steps count up only: a negative step
+    raises, where R counts down, and a *to* before *from_* gives an empty
+    list. Giving *to* and *total_size* without *by* is not supported yet.
 
-        mutate(window = seq(ym(sale_month) - months(11), ym(sale_month), by="month"))
+    Each row gets its own list of dates, so in ``mutate`` the result is a
+    list column; ``explode`` it for one row per date. A month step from the
+    29th to the 31st stays on the last real day of a short month (Polars'
+    rule), where R spills into the next month. A missing *from_* or *to*
+    gives a missing list.
+
+        mutate(window = date_seq(ym(sale_month) - months(11), ym(sale_month), by="month"))
     """
-    return _func("seq_date", _value(start), _value(end), by=_seq_interval(by))
+    given = sum(x is not None for x in (to, by, total_size))
+    if given != 2:
+        raise ValueError("date_seq() needs exactly two of to, by, and total_size")
+    if by is None:
+        raise NotImplementedError("date_seq() with to and total_size but no by is not supported yet")
+    if isinstance(by, int) and not isinstance(by, bool):
+        by = f"{by} days"
+    interval = _seq_interval(by)
+    if total_size is None:
+        return _func("seq_date", _value(from_), _value(to), by=interval)
+    if isinstance(total_size, bool) or not isinstance(total_size, int) or total_size < 0:
+        raise ValueError("date_seq() total_size must be a whole number of 0 or more")
+    return _func("seq_date", _value(from_), by=interval, total=total_size)
+
+
+def seq(start: Any, end: Any, by: Any = "day") -> Expr:
+    """:func:`date_seq` with R's ``seq()`` argument order: *start*, *end*, *by*."""
+    return date_seq(start, end, by)
 
 
 def _part(function: str, name: str, value: Any, *, whole: bool) -> Any:
@@ -1884,6 +1918,10 @@ def compile_polars(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> 
     if name == "round_date":
         return _round_polars(value, kwargs["unit"], int(kwargs["week_start"]))
     if name == "seq_date":
+        if "total" in kwargs:
+            count, unit = _split_interval(kwargs["by"])
+            end = value.dt.offset_by(f"{count * (kwargs['total'] + 1)}{unit}")
+            return pl.date_ranges(value, end, interval=kwargs["by"], closed="both").list.head(kwargs["total"])
         return pl.date_ranges(args[0], args[1], interval=kwargs["by"], closed="both")
     if name == "make_date":
         return _make_date_polars(*args)

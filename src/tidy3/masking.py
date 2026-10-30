@@ -198,7 +198,7 @@ _FIRST_COLUMN_ARG = frozenset(
         "ymd", "mdy", "dmy", "ym", "year", "month", "day",
         "floor_date", "ceiling_date", "days_in_month", "add_with_rollback",
         "months", "years", "excel_numeric_to_date",
-        "round_date", "isoyear", "leap_year", "seq",
+        "round_date", "isoyear", "leap_year", "seq", "date_seq",
         "weeks", "days", "hours", "minutes", "seconds", "period",
         "dseconds", "dminutes", "dhours", "ddays", "dweeks", "dmonths", "dyears",
         "duration", "as_duration", "time_length",
