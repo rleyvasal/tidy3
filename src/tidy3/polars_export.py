@@ -1358,6 +1358,13 @@ def _range(first, rest, detail, printer):
         dtype = options.get("dtype") if isinstance(options, dict) else None
         dtype_text = f", dtype={_dtype(dtype)}" if dtype else ""
         return f"pl.int_ranges({first}, {rest[0]}, {rest[1] if len(rest) > 1 else 1}{dtype_text})"
+    if sub == "DateRanges" and isinstance(options, dict) and len(rest) == 1:
+        step = options["interval"]
+        units = (("months", "mo"), ("weeks", "w"), ("days", "d"), ("nsecs", "ns"))
+        interval = "".join(f"{step[key]}{unit}" for key, unit in units if step.get(key))
+        if interval and not step.get("negative"):
+            closed = _snake(options["closed"])
+            return f"pl.date_ranges({first}, {rest[0]}, interval={interval!r}, closed={closed!r})"
     raise printer.unsupported(f"the Polars function Range.{sub}")
 
 

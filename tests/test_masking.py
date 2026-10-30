@@ -154,6 +154,32 @@ def test_mutate_backtick_new_column_end_to_end():
     assert abs(vals[0] - 110.0) < 1e-9 and abs(vals[1] - 220.0) < 1e-9
 
 
+def test_mutate_backtick_assign_after_other_assignment():
+    """A backtick assign after a keyword arg must stay valid Python."""
+    from tidy3 import as_numeric, mutate, tidy
+    from tidy3.expr import col
+    from tidy3.masking import ASSIGN_NAME, BT_NAME, COL_NAME, apply_masking, make_named_assign
+
+    ns = {
+        "mutate": mutate,
+        "as_numeric": as_numeric,
+        COL_NAME: col,
+        BT_NAME: col,
+        ASSIGN_NAME: make_named_assign,
+    }
+    for body in (
+        "k2 = k * 2, `number x` = as_numeric(`number x`)",
+        "`k2` = k * 2, `number x` = as_numeric(`number x`)",
+        "`number x` = as_numeric(`number x`), k2 = k * 2",
+        "k2 = k * 2, `number x` = as_numeric(`number x`), `y z` = k",
+    ):
+        df = tidy({"number x": ["1", "2"], "k": [1, 2]})
+        src = apply_masking(f"(df >> mutate({body}))")
+        out = eval(compile(src, "<t>", "eval"), {**ns, "df": df}).collect()
+        assert out["number x"].to_list() == [1, 2]
+        assert out["k2"].to_list() == [2, 4]
+
+
 def test_lambda_parameters_are_not_columns():
     out = _norm('filter(if_any(ends_with("_score"), lambda x: x > 0))')
     assert "lambda x: x > 0" in out

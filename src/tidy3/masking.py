@@ -198,7 +198,7 @@ _FIRST_COLUMN_ARG = frozenset(
         "ymd", "mdy", "dmy", "ym", "year", "month", "day",
         "floor_date", "ceiling_date", "days_in_month", "add_with_rollback",
         "months", "years", "excel_numeric_to_date",
-        "round_date", "isoyear", "leap_year",
+        "round_date", "isoyear", "leap_year", "seq",
         "weeks", "days", "hours", "minutes", "seconds", "period",
         "dseconds", "dminutes", "dhours", "ddays", "dweeks", "dmonths", "dyears",
         "duration", "as_duration", "time_length",
@@ -234,6 +234,7 @@ _ALL_COLUMN_ARGS = frozenset(
 )
 
 _BT_RE = re.compile(r"`([^`\n]+)`")
+_KW_START_RE = re.compile(r"\s*[A-Za-z_]\w*\s*=(?!=)")
 
 
 def rewrite_backtick_keyword_assigns(source: str) -> str:
@@ -249,17 +250,50 @@ def rewrite_backtick_keyword_assigns(source: str) -> str:
 
     Runtime :class:`NamedAssign` objects are expanded inside mutate/select/rename.
     Uses ``=`` only (not ``==`` / ``!=`` / ``<=`` / ``>=``).
+
+    Python rejects a positional argument after a keyword one, so once a call
+    already has a plain ``name = expr`` argument, later backtick assignments
+    become a keyword spread instead::
+
+        mutate(a = 1, `new hp` = hp)  →  mutate(a = 1, **{'new hp': (hp)})
     """
     if "`" not in source or "=" not in source:
         return source
     out: list[str] = []
     i = 0
     n = len(source)
+    # One [opener, call-already-has-a-keyword-arg] frame per open bracket.
+    frames: list[list] = []
     while i < n:
         ch = source[i]
         if ch != "`":
+            if ch in "'\"":
+                e = i + 1
+                while e < n and source[e] != ch:
+                    e += 2 if source[e] == "\\" else 1
+                e = min(e + 1, n)
+                out.append(source[i:e])
+                i = e
+                continue
+            if ch == "#":
+                e = source.find("\n", i)
+                e = n if e < 0 else e
+                out.append(source[i:e])
+                i = e
+                continue
+            if ch in "([{":
+                frames.append([ch, False])
+            elif ch in ")]}" and frames:
+                frames.pop()
             out.append(ch)
             i += 1
+            if (
+                frames
+                and frames[-1][0] == "("
+                and (ch == "(" or (ch == "," and source[i - 1] == ","))
+                and _KW_START_RE.match(source, i)
+            ):
+                frames[-1][1] = True
             continue
         j = source.find("`", i + 1)
         if j < 0:
@@ -314,8 +348,11 @@ def rewrite_backtick_keyword_assigns(source: str) -> str:
                 break
             k += 1
         expr = source[expr_start:k].rstrip()
-        # Positional sentinel — valid before/after other arguments.
-        out.append(f"{ASSIGN_NAME}({name!r}, ({expr}))")
+        if frames and frames[-1][0] == "(" and frames[-1][1]:
+            # Positional is illegal after a keyword argument: spread instead.
+            out.append(f"**{{{name!r}: ({expr})}}")
+        else:
+            out.append(f"{ASSIGN_NAME}({name!r}, ({expr}))")
         i = k
     return "".join(out)
 
