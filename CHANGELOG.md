@@ -4,6 +4,13 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.12.7 — 2026-10-30
+
+### Fixed
+
+- In a notebook, a verb call with a named argument before a positional one, such as `select(Cus = NUM, Source_Row)`, no longer fails with Python's `SyntaxError: positional argument follows keyword argument`. R allows that order and Python does not, so the notebook translator now rewrites each `name = expr` that comes before a positional argument in `select`, `rename`, `mutate`, `transmute`, `summarise`, `reframe`, `distinct`, and `group_by` into the ordered assignment form that backtick names already use, and the columns come out in the order you wrote them. `summarise(n = n(), across(...))` works the same way. Keywords after the last positional argument, `*args`, verb settings such as `by=`, and method calls like `df.select(...)` are left alone. Plain `.py` files still need valid Python.
+- A backtick name after a keyword argument, as in ``mutate(k2 = k * 2, `number x` = ...)``, now uses that same form instead of 0.12.5's `**{...}` spread, so a positional argument after it also works.
+
 ## 0.12.6 — 2026-10-30
 
 ### Added
