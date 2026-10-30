@@ -241,9 +241,9 @@ sorts, `distinct` keeping the first row, half-to-even `round`, and R's
 `%%` sign. A step with no Spark translation raises
 `tidy3.spark_export.SparkExportError`, an `ExportError`, naming the step:
 a column computed by a Python function (the text conversions, R-style
-`round`, per-value string functions), factor (Enum) columns, and so far
-many date, string, reshape and list functions. Of the benchmark cases, 159
-run on Spark and 183 are refused; none gives different rows. The
+`round`, per-value string functions), factor (Enum) columns, durations and
+time zones, and so far reshape, list and struct functions. Of the benchmark
+cases, 200 run on Spark and 142 are refused; none gives different rows. The
 [design note](design-spark-backend.md) lists what is translated and how
 Spark and Polars differ.
 
