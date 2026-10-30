@@ -234,7 +234,6 @@ _ALL_COLUMN_ARGS = frozenset(
 )
 
 _BT_RE = re.compile(r"`([^`\n]+)`")
-_KW_START_RE = re.compile(r"\s*[A-Za-z_]\w*\s*=(?!=)")
 
 
 def rewrite_backtick_keyword_assigns(source: str) -> str:
@@ -250,50 +249,17 @@ def rewrite_backtick_keyword_assigns(source: str) -> str:
 
     Runtime :class:`NamedAssign` objects are expanded inside mutate/select/rename.
     Uses ``=`` only (not ``==`` / ``!=`` / ``<=`` / ``>=``).
-
-    Python rejects a positional argument after a keyword one, so once a call
-    already has a plain ``name = expr`` argument, later backtick assignments
-    become a keyword spread instead::
-
-        mutate(a = 1, `new hp` = hp)  →  mutate(a = 1, **{'new hp': (hp)})
     """
     if "`" not in source or "=" not in source:
         return source
     out: list[str] = []
     i = 0
     n = len(source)
-    # One [opener, call-already-has-a-keyword-arg] frame per open bracket.
-    frames: list[list] = []
     while i < n:
         ch = source[i]
         if ch != "`":
-            if ch in "'\"":
-                e = i + 1
-                while e < n and source[e] != ch:
-                    e += 2 if source[e] == "\\" else 1
-                e = min(e + 1, n)
-                out.append(source[i:e])
-                i = e
-                continue
-            if ch == "#":
-                e = source.find("\n", i)
-                e = n if e < 0 else e
-                out.append(source[i:e])
-                i = e
-                continue
-            if ch in "([{":
-                frames.append([ch, False])
-            elif ch in ")]}" and frames:
-                frames.pop()
             out.append(ch)
             i += 1
-            if (
-                frames
-                and frames[-1][0] == "("
-                and (ch == "(" or (ch == "," and source[i - 1] == ","))
-                and _KW_START_RE.match(source, i)
-            ):
-                frames[-1][1] = True
             continue
         j = source.find("`", i + 1)
         if j < 0:
@@ -348,11 +314,8 @@ def rewrite_backtick_keyword_assigns(source: str) -> str:
                 break
             k += 1
         expr = source[expr_start:k].rstrip()
-        if frames and frames[-1][0] == "(" and frames[-1][1]:
-            # Positional is illegal after a keyword argument: spread instead.
-            out.append(f"**{{{name!r}: ({expr})}}")
-        else:
-            out.append(f"{ASSIGN_NAME}({name!r}, ({expr}))")
+        # Positional sentinel — valid before/after other arguments.
+        out.append(f"{ASSIGN_NAME}({name!r}, ({expr}))")
         i = k
     return "".join(out)
 
@@ -528,17 +491,120 @@ def rewrite_bang_not(source: str) -> str:
     return "".join(out)
 
 
+# Verbs where ``name = expr`` makes a column (the named-assign carrier works).
+_NAMED_ASSIGN_VERBS = _ASSIGN_VERBS | _RENAME_VERBS | _GROUP_VERBS | frozenset({"select"})
+# Keywords that configure a verb rather than name a column; never converted.
+_CONTROL_KW = frozenset(
+    {"by", "keep", "keep_all", "before", "after", "groups", "add", "drop", "sort",
+     "name", "wt", "weight", "order_by", "where"}
+)
+_KEYWORD_ARG_RE = re.compile(r"\s*([A-Za-z_]\w*)\s*=(?!=)")
+_NAMED_VERB_CALL_RE = re.compile(
+    r"(?<![\w.])(" + "|".join(sorted(_NAMED_ASSIGN_VERBS)) + r")\s*\("
+)
+
+
+def _call_arguments(source: str, open_at: int) -> tuple[int, list[tuple[int, int]]] | None:
+    """Close index and top-level ``(start, end)`` argument spans of the call at *open_at*."""
+    spans: list[tuple[int, int]] = []
+    depth = 0
+    start = open_at + 1
+    i = open_at
+    n = len(source)
+    while i < n:
+        c = source[i]
+        if c in "'\"`":
+            j = i + 1
+            while j < n and source[j] != c:
+                j += 2 if source[j] == "\\" and c != "`" else 1
+            i = j + 1
+            continue
+        if c == "#":
+            j = source.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                spans.append((start, i))
+                return i, spans
+        elif c == "," and depth == 1:
+            spans.append((start, i))
+            start = i + 1
+        i += 1
+    return None
+
+
+def rewrite_keywords_before_positional(source: str) -> str:
+    """Make ``select(Cus = NUM, Source_Row)`` valid Python, keeping its order.
+
+    Python rejects a positional argument after a keyword one, but R allows
+    it. In a tidy3 verb call where a ``name = expr`` argument comes before a
+    positional one, each such keyword becomes the ordered assign carrier
+    ``__tidy3_assign__('Cus', (NUM))``, the form backtick names already use::
+
+        select(Cus = NUM, Source_Row)  →  select(__tidy3_assign__('Cus', (NUM)), Source_Row)
+
+    Keywords after the last positional argument, ``*args``, ``**kwargs`` and
+    verb settings such as ``by=`` are left alone. Code that was already valid
+    Python is not changed. Run after :func:`rewrite_backtick_keyword_assigns`,
+    whose backtick assignments count as positional arguments.
+    """
+    if "=" not in source:
+        return source
+    calls = [m.end() - 1 for m in _NAMED_VERB_CALL_RE.finditer(source)]
+    # Right to left, so an edit never moves a call still to be handled.
+    for open_at in reversed(calls):
+        found = _call_arguments(source, open_at)
+        if found is None:
+            continue
+        close, spans = found
+        kinds = []
+        for a, b in spans:
+            text = source[a:b]
+            match = _KEYWORD_ARG_RE.match(text)
+            if match:
+                kinds.append("keyword")
+            elif text.strip() and not text.lstrip().startswith("*"):
+                kinds.append("positional")
+            else:
+                kinds.append("other")
+        if "positional" not in kinds:
+            continue
+        last = len(kinds) - 1 - kinds[::-1].index("positional")
+        edits = []
+        for (a, b), kind in zip(spans[:last], kinds[:last]):
+            if kind != "keyword":
+                continue
+            match = _KEYWORD_ARG_RE.match(source[a:b])
+            name = match.group(1)
+            if name in _CONTROL_KW:
+                continue
+            value = source[a + match.end() : b].strip()
+            lead = source[a:b][: len(source[a:b]) - len(source[a:b].lstrip())]
+            tail = source[a:b][len(source[a:b].rstrip()) :]
+            edits.append((a, b, f"{lead}{ASSIGN_NAME}({name!r}, ({value})){tail}"))
+        for a, b, text in reversed(edits):
+            source = source[:a] + text + source[b:]
+    return source
+
+
 def rewrite_backticks(source: str) -> str:
     """Preparse R-style tokens for Python (tidy3 contexts only for ``!``).
 
     1. ``!`` → ``~`` inside tidy3 verb args only (not shell ``!pip``, not ``!=``)
     2. `` `new col` = expr `` → ``__tidy3_assign__("new col", (expr))``
-    3. remaining `` `col` `` → ``__tidy3_bt__("col")``
+    3. ``select(a = x, b)`` → ``select(__tidy3_assign__('a', (x)), b)``
+       (a keyword before a positional argument, which Python rejects)
+    4. remaining `` `col` `` → ``__tidy3_bt__("col")``
 
     Prefer writing ``~`` for negation — it needs no preparser.
     """
     source = rewrite_bang_not(source)
     source = rewrite_backtick_keyword_assigns(source)
+    source = rewrite_keywords_before_positional(source)
     return _BT_RE.sub(lambda m: f"{BT_NAME}({m.group(1)!r})", source)
 
 
@@ -591,7 +657,7 @@ def tidy3_backtick_transform(lines: list[str]) -> list[str]:
             for ln in non_empty
         ):
             return lines
-    if "`" not in src and "!" not in src:
+    if "`" not in src and "!" not in src and "=" not in src:
         return lines
     out = rewrite_backticks(src)
     if out == src:

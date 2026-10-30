@@ -265,3 +265,68 @@ def test_new_tidyr_verbs_take_bare_columns():
     assert "separate_wider_position('code', [('year', 4)])" in _norm(
         "separate_wider_position(code, [('year', 4)])"
     )
+
+
+def _run_verb(call, **frames):
+    import tidy3 as t
+    from tidy3.expr import col
+    from tidy3.masking import ASSIGN_NAME, BT_NAME, COL_NAME, apply_masking, make_named_assign
+
+    ns = {k: getattr(t, k) for k in dir(t) if not k.startswith("_")}
+    ns.update({COL_NAME: col, BT_NAME: col, ASSIGN_NAME: make_named_assign, **frames})
+    out = eval(compile(apply_masking(f"(df >> {call})"), "<t>", "eval"), ns)
+    return out.collect()
+
+
+def test_keyword_before_positional_keeps_requested_order():
+    from tidy3 import tidy
+
+    df = tidy({"NUM": [1, 2], "Source_Row": [3, 4], "my col": [5, 6], "g": ["a", "b"]})
+    cases = {
+        "select(Cus=NUM, Source_Row)": ["Cus", "Source_Row"],
+        "select(Source_Row, Cus=NUM, other=g)": ["Source_Row", "Cus", "other"],
+        "select(Cus=NUM, `my col`, Source_Row)": ["Cus", "my col", "Source_Row"],
+        "select(`new col`=NUM, Source_Row, back=g)": ["new col", "Source_Row", "back"],
+        "select(Cus=NUM, `x y`=`my col`, Source_Row)": ["Cus", "x y", "Source_Row"],
+    }
+    for call, columns in cases.items():
+        assert _run_verb(call, df=df).columns == columns, call
+
+
+def test_keyword_before_across_keeps_order():
+    from tidy3 import tidy
+
+    df = tidy({"NUM": [1, 2], "Source_Row": [3, 4]})
+    out = _run_verb("summarise(n=n(), across(['NUM'], sum))", df=df)
+    assert out.columns == ["n", "NUM"] and out["NUM"].to_list() == [3]
+    out = _run_verb("mutate(z=NUM, `b c`=NUM, across(['Source_Row'], lambda x: x * 2))", df=df)
+    assert out.columns[-2:] == ["z", "b c"] and out["Source_Row"].to_list() == [6, 8]
+
+
+def test_keyword_rewrite_leaves_valid_code_alone():
+    from tidy3.masking import rewrite_backticks
+
+    for text in (
+        "select(a=NUM, b=g)",
+        "mutate(a=1, b=2)",
+        "select(Source_Row, Cus=NUM)",
+        "df.select(a=NUM, b)",
+        "dict(a=1, b=2)",
+        "select(a=NUM, *rest, b=g)",
+        "mutate(by='g', z=1)",
+    ):
+        assert rewrite_backticks(text) == text, text
+    # Verb settings are never turned into columns.
+    out = rewrite_backticks("select(by='g', Cus=NUM, Source_Row)")
+    assert "by='g'" in out and "__tidy3_assign__('Cus'" in out
+
+
+def test_notebook_transformer_rewrites_keyword_before_positional():
+    from tidy3.masking import tidy3_backtick_transform
+
+    cell = ["df >> select(Cus=NUM,\n", "                Source_Row)\n"]
+    out = "".join(tidy3_backtick_transform(cell))
+    compile(out, "<cell>", "exec")
+    assert "__tidy3_assign__('Cus', (NUM))" in out
+    plain = ["x = 1\n", "y = dict(a=1, b=2)\n"]
+    assert tidy3_backtick_transform(plain) == plain
