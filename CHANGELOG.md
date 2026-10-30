@@ -4,14 +4,18 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.12.5 — 2026-10-30
+
+The experimental Spark backend (`to_spark()`), a date-sequence helper `seq()`, and a fix for backtick names in `mutate()`.
 
 ### Added
 
+- `seq(start, end, by="day")` builds the dates from `start` to `end`, both included, as R's `seq.Date` does. `by` is a unit (`"day"`, `"week"`, `"month"`, `"quarter"`, `"year"`, also hours to seconds for datetimes), optionally with a count (`"2 months"`), or a period such as `months(1)`. With columns it gives one list of dates per row, as in `mutate(window = seq(ym(sale_month) - months(11), ym(sale_month), by="month"))`; `explode` it for one row per date. It runs as `pl.date_ranges` and exports with `to_polars_code()`. Differences from R: steps count up only, so a negative `by` raises, and a month step from the 29th to the 31st stays on the month's last real day where R spills into the next month. `to_spark()` refuses it.
 - `TidyFrame.to_spark(spark=None)` runs a pipeline on Spark (experimental; `pip install "tidy3[spark]"`, plus Java 17 or later). It returns a lazy PySpark DataFrame built from the Polars query tidy3 compiled, the same plan `to_polars_code()` reads, so no verb is reimplemented and dplyr's rules carry over: tidy3's row order (stable sorts, `distinct` keeping the first row, `row_number`, `slice_*`, `cumsum`), missing values in `mean` and `arrange`, half-to-even `round`, R's `%%` sign, and summarise's one-value-per-group check. Scans read the same CSV and Parquet files with Polars' column types. A step with no Spark translation raises `SparkExportError` (an `ExportError`) naming it: columns computed by a Python function, factor columns, durations and time zones, and for now reshape, list and struct functions. String and date functions with a Spark form run there, rewritten where Spark's differ: regular expressions in Java's Unicode mode, Rust's replacement syntax, null for a failed `str_extract`, Unicode whitespace in `str_trim`, Polars' title case, and naive datetimes truncated without the session time zone. Division and `%%` by zero and casts match tidy3 whatever Spark's ANSI mode; integer overflow raises with ANSI on, where Polars wraps. Of the 342 benchmark frame queries, 200 run on Spark and match tidy3 to within 1e-12 and 142 are refused, under Polars 1 and 2; none gives different rows. Checked on a standalone cluster too (`TIDY3_SPARK_MASTER`), including row order over 93-partition CSV and uneven multi-file Parquet scans. [Design note](docs/design-spark-backend.md).
 
 ### Fixed
 
+- A backtick name assigned after another named argument, as in ``mutate(k2 = k * 2, `number x` = as_numeric(`number x`))``, no longer fails with a `SyntaxError`. It worked only as the first argument, because the rewrite made it a positional argument and Python rejects those after a keyword. It now becomes a `**{name: value}` spread when a keyword argument comes before it.
 - `round_half_up` and `signif_half_up` now match janitor to the last bit on every CPU. They took powers of ten from NumPy, which on some CPUs with AVX-512 is a bit off (10^-1 came out 0.09999999999999999), so `round_half_up(25, -1)` could give 30.000000000000004. They now use the C library's `pow`, as R does.
 - `to_polars_code()` exports a `summarise` whose expression is more than a bare summary, such as the README's `bill_mm=mean("bill_length_mm").round(1)`. tidy3 checks at collect time that such an expression gives one value per group, as dplyr does, and the exporter refused that check as a user's Python function. It is now skipped like tidy3's other input checks, and the exported code leaves out the hidden size columns and the filter that read them, so it is the aggregation alone and returns the same frame as tidy3.
 
