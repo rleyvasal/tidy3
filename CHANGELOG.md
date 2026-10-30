@@ -4,6 +4,17 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.12.6 — 2026-10-30
+
+### Added
+
+- `date_format(x, format="%Y-%m-%d")` writes a date or datetime as text, like clock's `date_format()` and R's `format(date, "%Y,%m")`. It runs as a native Polars expression and exports with `to_polars_code()`. Output matches R's `format()` for `%Y %y %m %d %e %b %B %a %A %j %U %W %u %w %G-%V` on dates at year boundaries, and missing dates stay missing. Differences: month and weekday names are always English, where R and clock follow the locale, and a time code (`%H`, `%M`, `%p`, `%Z`) on a date with no time of day raises an error where R writes `00`.
+- `date_seq(from_, to=None, by=None, total_size=None)` is the name for 0.12.5's `seq()`, taking its arguments from clock's `date_seq()`: give exactly two of `to`, `by`, and `total_size`. The new form `date_seq(start, by="month", total_size=12)` gives 12 dates from `start`; `by` may also be a whole number of days. `to` with `total_size` and no `by` is not supported yet and raises. It still gives one list of dates per row and exports with `to_polars_code()`.
+
+### Changed
+
+- `seq(start, end, by="day")` stays as a short form of `date_seq(start, end, by)`.
+
 ## 0.12.5 — 2026-10-30
 
 The experimental Spark backend (`to_spark()`), a date-sequence helper `seq()`, and a fix for backtick names in `mutate()`.
