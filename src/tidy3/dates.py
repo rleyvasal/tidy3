@@ -66,6 +66,7 @@ __all__ = [
     "days_in_month",
     "make_date",
     "make_datetime",
+    "date_format",
     "seq",
     "date_seq",
     "isoyear",
@@ -112,6 +113,7 @@ FUNCTIONS = frozenset(
         "round_date",
         "make_date",
         "make_datetime",
+        "date_format",
         "seq_date",
         "isoyear",
         "leap_year",
@@ -868,6 +870,23 @@ def _seq_interval(by: Any) -> str:
     if text not in _SEQ_STEPS or count < 1:
         raise ValueError(f"date_seq() by unit must be one of: {', '.join(_SEQ_STEPS)}, with a count of 1 or more")
     return f"{count}{_SEQ_STEPS[text]}"
+
+
+def date_format(x: Any, format: str = "%Y-%m-%d") -> Expr:
+    """Write a date or datetime as text, like clock's ``date_format()`` and R's ``format()``.
+
+        mutate(month = date_format(d, "%Y,%m"))    # "2024,03"
+
+    Codes are those of C's ``strftime``: ``%Y %y %m %d %e %j %b %B %a %A
+    %U %W %u %w %G-%V %%``, and on a datetime ``%H %M %S %p %z %Z``. A
+    missing date stays missing. Month and weekday names are in English
+    whatever the computer's locale, where R and clock follow the locale.
+    A time code (``%H``, ``%M``, ``%p``, ``%Z``) on a date, with no time
+    of day, raises an error where R writes ``00``.
+    """
+    if not isinstance(format, str):
+        raise TypeError("date_format() format must be a string such as \"%Y-%m\"")
+    return _func("date_format", _value(x), fmt=format)
 
 
 def date_seq(
@@ -1917,6 +1936,8 @@ def compile_polars(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> 
         return _by_dtype(value, lambda v, dtype: _time_length_of(v, dtype, kwargs["unit"]), pl.Float64)
     if name == "round_date":
         return _round_polars(value, kwargs["unit"], int(kwargs["week_start"]))
+    if name == "date_format":
+        return value.dt.to_string(kwargs["fmt"])
     if name == "seq_date":
         if "total" in kwargs:
             count, unit = _split_interval(kwargs["by"])

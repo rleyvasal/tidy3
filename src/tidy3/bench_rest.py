@@ -1295,6 +1295,7 @@ def attach(add, Case) -> None:
         lambda t, df: t.seq("day_d", t.col("day_d") + t.months(3), "month"),
         lambda df: pl.date_ranges(pl.col("day_d"), pl.col("day_d").dt.offset_by("3mo"), interval="1mo", closed="both"),
     )
+    _col("date_format", ["date_format"], lambda t, df: t.date_format("day_d", "%Y,%m"), lambda df: pl.col("day_d").dt.to_string("%Y,%m"))
     _col("isoyear", ["isoyear"], lambda t, df: t.isoyear("day_d"), lambda df: pl.col("day_d").dt.iso_year().cast(pl.Int64))
     _col("leap_year", ["leap_year"], lambda t, df: t.leap_year("day_d"), lambda df: pl.col("day_d").dt.is_leap_year())
 

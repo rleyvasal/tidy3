@@ -1293,6 +1293,8 @@ def _temporal(first, rest, detail, printer):
         return f"{first}.dt.{simple[sub]}()"
     if sub == "Truncate":
         return f"{first}.dt.truncate({rest[0]})"
+    if sub == "ToString" and isinstance(options, str):
+        return f"{first}.dt.to_string({options!r})"
     if sub == "OffsetBy":
         return f"{first}.dt.offset_by({rest[0]})"
     if sub == "ReplaceTimeZone":

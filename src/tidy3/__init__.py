@@ -158,7 +158,7 @@ from tidy3.dates import (
     ymd_hms,
 )
 from tidy3.dates import day as day
-from tidy3.dates import isoyear, leap_year, make_date, make_datetime, round_date, date_seq, seq
+from tidy3.dates import isoyear, leap_year, make_date, make_datetime, round_date, date_format, date_seq, seq
 from tidy3.dates import (
     as_duration,
     ddays,
@@ -730,6 +730,7 @@ __all__ = [
     "make_datetime",
     "seq",
     "date_seq",
+    "date_format",
     "isoyear",
     "leap_year",
     "weeks",

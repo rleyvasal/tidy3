@@ -47,3 +47,31 @@ def test_date_seq_total_size_and_argument_rules():
             date_seq("d", **kwargs)
     with pytest.raises(NotImplementedError):
         date_seq("d", to="d", total_size=2)
+
+
+def test_date_format_matches_r_format():
+    import datetime as dt
+
+    import pytest
+
+    from tidy3 import date_format, mutate, tidy
+
+    days = [dt.date(2024, 3, 5), dt.date(2024, 12, 31), dt.date(2021, 1, 1), dt.date(2023, 1, 1), None]
+    df = tidy({"d": days})
+    # Expected text is R's format(as.Date(...), fmt), checked by hand against R 4.x.
+    expected = {
+        "%Y,%m": ["2024,03", "2024,12", "2021,01", "2023,01", None],
+        "%b %d": ["Mar 05", "Dec 31", "Jan 01", "Jan 01", None],
+        "%A": ["Tuesday", "Tuesday", "Friday", "Sunday", None],
+        "%j": ["065", "366", "001", "001", None],
+        "%U": ["09", "52", "00", "01", None],
+        "%W": ["10", "53", "00", "00", None],
+        "%G-%V": ["2024-10", "2025-01", "2020-53", "2022-52", None],
+    }
+    for fmt, want in expected.items():
+        got = (df >> mutate(t=date_format("d", fmt))).collect()["t"].to_list()
+        assert got == want, fmt
+    default = (df >> mutate(t=date_format("d"))).collect()["t"].to_list()
+    assert default[0] == "2024-03-05" and default[-1] is None
+    with pytest.raises(TypeError):
+        date_format("d", 5)
