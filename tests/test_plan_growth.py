@@ -260,8 +260,6 @@ TIME_GROWS = {
     "rows_update",
     "rows_patch",
     "rows_upsert",
-    "semi_join join_by",
-    "anti_join join_by",
     "inequality join (between)",
 }
 

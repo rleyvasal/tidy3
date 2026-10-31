@@ -3312,6 +3312,26 @@ def _polars_join_by(
         )
 
     if (
+        _NATIVE_FILTER_JOINS
+        and how in {"semi", "anti"}
+        and equality
+        and not spec.inequality
+        and relationship is None
+        and unmatched == "drop"
+    ):
+        # Keeping or dropping x's rows by whether they match is what Polars'
+        # semi and anti joins do. The general path finds the matched row ids
+        # and joins them back, reading x twice.
+        lf = left_frame.join(
+            right_frame,
+            left_on=[condition.left for condition in equality],
+            right_on=[condition.right for condition in equality],
+            how=how,
+            nulls_equal=na_matches == "na",
+            maintain_order="left",
+        )
+        return tf._with_lf(lf, groups=tf._groups)
+    if (
         _COMPACT_EQUALITY_JOINS
         and equality
         and not spec.inequality
@@ -3584,6 +3604,10 @@ def _polars_join_by(
 # checks inside the same query. Switched off only to compare with the general
 # path (matching row ids, then reattaching) in tests.
 _COMPACT_EQUALITY_JOINS = True
+
+# Equality semi and anti joins use Polars' own. Off only for tests that compare
+# with the general path.
+_NATIVE_FILTER_JOINS = True
 
 
 def _compact_equality_join(
