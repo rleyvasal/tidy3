@@ -3311,6 +3311,21 @@ def _polars_join_by(
 
     left = left_frame.with_row_index(left_id)
     y = right_frame.with_row_index(right_id).rename(right_names)
+    if (
+        _COMPACT_EQUALITY_JOINS
+        and equality
+        and not spec.inequality
+        and how in {"left", "inner", "right", "full"}
+        and multiple == "all"
+        and unmatched == "drop"
+    ):
+        return _compact_equality_join(
+            tf, left, y, spec, how,
+            left_id=left_id, right_id=right_id, right_names=right_names,
+            left_columns=left_columns, right_columns=right_columns,
+            keep=keep, suffix=suffix, na_matches=na_matches,
+            relationship=relationship,
+        )
     rolling = next((condition for condition in spec.conditions if condition.rolling), None)
     fast_rolling = False
     if rolling is not None and len(spec.inequality) == 1 and multiple == "all":
@@ -3558,6 +3573,68 @@ def _polars_join_by(
     combined = combined.sort([left_id, right_id], nulls_last=True, maintain_order=True)
     return _join_by_output(
         tf, combined, guards, equality, left_columns, right_columns,
+        right_names, keep, suffix,
+    )
+
+
+# An equality-only join_by join runs as one Polars join with its relationship
+# checks inside the same query. Switched off only to compare with the general
+# path (matching row ids, then reattaching) in tests.
+_COMPACT_EQUALITY_JOINS = True
+
+
+def _compact_equality_join(
+    tf: Any,
+    left: pl.LazyFrame,
+    y: pl.LazyFrame,
+    spec: JoinSpec,
+    how: str,
+    *,
+    left_id: str,
+    right_id: str,
+    right_names: dict[str, str],
+    left_columns: list[str],
+    right_columns: list[str],
+    keep: bool,
+    suffix: tuple[str, str],
+    na_matches: str,
+    relationship: str | None,
+):
+    """Join once, then check the relationship on that result.
+
+    Every row of x and y carries its own row id, and a row with no match has
+    a missing id on the other side. So a row of x matches several rows of y
+    exactly when its id repeats among the matched pairs, and the same for y.
+    Counting inside the one result avoids the extra queries (each repeating
+    the whole join) that the general path attaches. Polars' own
+    ``validate=`` is not used: it rejects repeated keys even when they find
+    no partner, which dplyr and tidy3 allow.
+    """
+    equality = spec.equality
+    combined = left.join(
+        y,
+        left_on=[condition.left for condition in equality],
+        right_on=[right_names[condition.right] for condition in equality],
+        how=how,
+        nulls_equal=na_matches == "na",
+        coalesce=False,
+        maintain_order="left_right",
+    )
+    checks: list[tuple[str, str, str]] = []
+    if relationship in {"one-to-one", "many-to-one"}:
+        checks.append((left_id, right_id, "a row in x matches multiple rows in y"))
+    if relationship in {"one-to-one", "one-to-many"}:
+        checks.append((right_id, left_id, "a row in y matches multiple rows in x"))
+    for own, other, reason in checks:
+        matched = pl.col(own).is_not_null() & pl.col(other).is_not_null()
+        ids = pl.col(own).filter(matched)
+        combined = _pl_assert_rows(
+            combined,
+            ids.n_unique() == ids.len(),
+            f"join relationship {relationship!r} violated: {reason}",
+        )
+    return _join_by_output(
+        tf, combined, [], equality, left_columns, right_columns,
         right_names, keep, suffix,
     )
 

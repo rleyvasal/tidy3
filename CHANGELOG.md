@@ -4,6 +4,12 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- Chained `join_by` joins with a `relationship=` check no longer slow down as they pile up. Each check used to repeat the whole earlier query, so four checked joins built a query plan of about 830,000 characters and took 570 ms on 300,000 rows. A join of plain equality conditions (any of `left`, `inner`, `right`, `full`, with `keep=`, `na_matches=` and `relationship=`) now joins once and checks the relationship on that result: the same four joins build a 5,000-character plan and take 12 ms, and one checked join of 1,000,000 rows to 200,000 runs in 6 ms instead of 15. Results, row order, column order and errors are unchanged, and repeated keys that find no partner are still allowed (Polars' own `validate=` would reject them). Inequality and rolling joins, `multiple=` and `unmatched="error"` still use the general path.
+
 ## 0.12.9 — 2026-10-30
 
 ### Fixed
