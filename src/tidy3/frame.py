@@ -259,8 +259,7 @@ class TidyFrame:
         computed once and appears in the plan once.
         """
         clone = copy.copy(self)
-        clone._data = self._data.cache()
-        clone._schema_cache = None
+        clone._data = self._data.cache()  # same columns and types, so the schema carries over
         return clone
 
     def _schema(self) -> pl.Schema:

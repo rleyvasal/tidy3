@@ -155,14 +155,14 @@ def _unique_sorted(values: list[Any]) -> list[Any]:
 def _named_values_frame(tf: Any, name: str, values: list[Any], backend: str) -> Any:
     """One-column frame of *values*, cast to the column's type when present."""
     frame = pl.DataFrame({name: values}, strict=False).lazy()
-    schema = tf._lf.collect_schema()
+    schema = tf._schema()
     if name in schema:
         frame = frame.with_columns(pl.col(name).cast(schema[name], strict=False))
     return frame
 
 
 def _columns(tf: Any) -> list[str]:
-    return tf._lf.collect_schema().names()
+    return tf._schema().names()
 
 
 def _temp_name(columns: Iterable[str], base: str) -> str:
@@ -299,7 +299,7 @@ def _factor_units(tf: Any, specs: tuple[Any, ...]) -> dict[str, Any]:
         name for spec in specs if not isinstance(spec, Nesting)
         for name in resolve_selection(tf, [spec])
     ]
-    schema = tf._lf.collect_schema()
+    schema = tf._schema()
     return {name: schema[name] for name in bare if isinstance(schema[name], pl.Enum)}
 
 
@@ -308,6 +308,34 @@ def _polars_levels(tf: Any, name: str, dtype: Any) -> pl.LazyFrame:
     every = pl.LazyFrame({name: pl.Series(name, dtype.categories.to_list(), dtype=dtype)})
     missing = tf._lf.select(pl.col(name)).filter(pl.col(name).is_null()).head(1)
     return pl.concat([every, missing])
+
+
+# Expanding several columns reads the input once, for all their distinct values
+# together. Off only so tests can compare with one read per column.
+_SINGLE_READ_EXPAND = True
+
+
+def _expand_in_one_pass(lf: pl.LazyFrame, units: list[list[str]]) -> pl.LazyFrame:
+    """Every combination of the distinct values of each unit, reading *lf* once.
+
+    A unit's distinct values (rows, for a nesting) become one list in a single
+    row; exploding the lists one after another then crosses them. Each extra
+    read of a plan multiplies the work of planning a chain of verbs, so this
+    keeps ``expand`` to one read however many columns it spreads over.
+    """
+    names = [f"__tidy3_unit_{i}" for i in range(len(units))]
+    values = [
+        (pl.col(unit[0]) if len(unit) == 1 else pl.struct(unit))
+        .unique(maintain_order=True)
+        .implode()
+        .alias(name)
+        for unit, name in zip(units, names)
+    ]
+    result = lf.select(values)
+    for unit, name in zip(units, names):
+        result = result.explode(name, empty_as_null=False)
+        result = result.rename({name: unit[0]}) if len(unit) == 1 else result.unnest(name)
+    return result
 
 
 def expand(*cols: Any, **values: Any) -> Verb:
@@ -354,6 +382,8 @@ def expand(*cols: Any, **values: Any) -> Verb:
                 result = result.join(
                     values, on=groups, how="inner", maintain_order="left_right"
                 )
+        elif _SINGLE_READ_EXPAND and units and not levels:
+            result = _expand_in_one_pass(tf._lf, units)
         else:
             result = None
             for unit in units:
@@ -531,7 +561,9 @@ def complete(
             maintain_order="left_right",
             nulls_equal=True,  # a missing key matches its own row, as in tidyr
         )
-        schema = output.collect_schema()
+        # The output's schema is only needed to check fill= columns; asking for it
+        # walks the whole plan, so leave it to whoever needs it next.
+        schema = output.collect_schema() if replacements else {}
         expressions = []
         for name, value in replacements.items():
             if name not in schema:

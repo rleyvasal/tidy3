@@ -16,10 +16,10 @@ avoid the second read (the joins, ``slice_sample``) or mark the input shared
 (``cache()``), which prints it once.
 
 The count only sees printed copies. A shared input is still walked once per
-reader by Polars' optimizer, so ``complete``, ``expand`` and the ``rows_*`` verbs,
-which must read their input twice (the rows, and the keys or values), still take
-about twice as long for each extra step in a chain. Verbs that read it once, like
-``mutate``, grow by a small constant.
+reader by Polars (plain 1.42 and 2.1 alike), so a verb with two readers, like
+``complete`` and ``rows_insert``, takes about twice as long for each extra step in
+a chain. ``test_chained_verb_time_grows_gently`` times the chains to catch that.
+``expand`` and verbs that read their input once grow by a small constant.
 """
 
 import builtins
@@ -245,13 +245,14 @@ def test_slice_sample_weight_checks_still_raise():
     assert ok.height == 4
 
 
-# Verbs that read their input twice by nature (the rows, and the keys or values):
-# a shared input prints once, but Polars still walks it once per reader, so the
-# time to plan a chain of them multiplies. Not strict: a fast machine may hide it.
-TIME_GROWS = {"complete", "rows_insert"}
+# Verbs that read their input twice (the rows, and the keys or values): Polars
+# walks a shared plan once per reader, so the time to plan a chain of them
+# doubles with each step. Fewer readers or a plan that is not shared would fix it.
+# Not strict: a fast machine may hide the growth.
+TIME_GROWS = {"rows_insert"}
 
 
-def _chain_ms(name, steps, repeats=5):
+def _chain_ms(name, steps, repeats=3):
     """Fastest time, in ms, to build and collect `steps` chained applications."""
     best = float("inf")
     for _ in builtins.range(repeats):
@@ -268,16 +269,16 @@ def _time_case(name):
     marks = []
     if name in TIME_GROWS:
         marks.append(
-            pytest.mark.xfail(strict=False, reason="reads its input twice, so planning time multiplies")
+            pytest.mark.xfail(strict=False, reason="reads its input twice, so planning time doubles per step")
         )
     return pytest.param(name, id=name, marks=marks)
 
 
 @pytest.mark.parametrize("name", [_time_case(name) for name in C])
 def test_chained_verb_time_grows_gently(name):
-    # Eight steps of a verb that costs a fixed amount per step take about twice
-    # as long as four. One that multiplies its work each step takes many times
-    # longer (complete: ~14x, rows_insert: ~23x). The slack keeps tiny timings
-    # from failing on noise.
-    four, eight = _chain_ms(name, 4), _chain_ms(name, 8)
-    assert eight <= 8 * four + 2.0, (round(four, 2), round(eight, 2))
+    # Ten steps of a verb that costs a fixed amount per step take about twice as
+    # long as five. One whose work grows by 1.65x or more per step takes over
+    # twelve times as long (rows_insert is about 25 times). The
+    # slack keeps tiny timings from failing on noise.
+    five, ten = _chain_ms(name, 5), _chain_ms(name, 10)
+    assert ten <= 12 * five + 3.0, (round(five, 2), round(ten, 2))
