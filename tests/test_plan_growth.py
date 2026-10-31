@@ -9,9 +9,17 @@ walk them all, so a handful of chained steps gets slow (see CHANGELOG, 0.12.10).
 
 Each case below applies one verb four times and counts the copies of the source
 table in the unoptimized plan. Linear growth keeps the count within four times
-its value after one step. ``KNOWN_SUPERLINEAR`` lists the verbs that do not yet;
-they are expected failures, and one that gets fixed makes this test fail until
-it is removed from the list.
+its value after one step. ``KNOWN_SUPERLINEAR`` lists any verb that does not yet;
+it is an expected failure, and one that gets fixed makes this test fail until it
+is removed from the list. Verbs that read their input more than once either
+avoid the second read (the joins, ``slice_sample``) or mark the input shared
+(``cache()``), which prints it once.
+
+The count only sees printed copies. A shared input is still walked once per
+reader by Polars' optimizer, so ``complete``, ``expand`` and the ``rows_*`` verbs,
+which must read their input twice (the rows, and the keys or values), still take
+about twice as long for each extra step in a chain. Verbs that read it once, like
+``mutate``, grow by a small constant.
 """
 
 import builtins
@@ -190,29 +198,7 @@ C["rows_insert"] = lambda f, i: f >> rows_insert(pl.DataFrame({k: [v[0] if k != 
 C["rows_delete"] = lambda f, i: f >> rows_delete(pl.DataFrame({"id": [N + 10_000]}), by="id", unmatched="ignore")
 C["rows_append"] = lambda f, i: f >> rows_append(extra)
 
-KNOWN_SUPERLINEAR = {
-    "inner_join unmatched=error",
-    "right_join relationship=one-to-one",
-    "right_join unmatched=error",
-    "full_join unmatched=error",
-    "full_join multiple=first",
-    "slice_sample weight_by",
-    "left_join unmatched=error",
-    "right_join relationship=many-to-one",
-    "rows_insert",
-    "complete",
-    "right_join na_matches=never",
-    "right_join multiple=first",
-    "rows_update",
-    "rows_patch",
-    "rows_upsert",
-    "symdiff",
-    "left_join multiple=first",
-    "inner_join multiple=first",
-    "inequality join (between)",
-    "semi_join join_by",
-    "expand",
-}
+KNOWN_SUPERLINEAR: set[str] = set()
 
 
 def _copies(name, steps=4):
@@ -235,3 +221,24 @@ def _case(name):
 def test_chained_verb_copies_the_source_linearly(name):
     counts = _copies(name)
     assert counts[-1] <= 4 * counts[0], counts
+
+
+def test_slice_sample_weight_checks_still_raise():
+    df = pl.DataFrame({"g": ["a"] * 3 + ["b"] * 3, "w": [1.0, 0.0, 2.0, 1.0, 1.0, 1.0], "v": list(range(6))})
+    bad = {
+        "negative": (df.with_columns(w=pl.Series([1.0, -1.0, 1.0, 1.0, 1.0, 1.0])), {"n": 2}),
+        "missing": (df.with_columns(w=pl.Series([1.0, None, 1.0, 1.0, 1.0, 1.0])), {"n": 2}),
+        "not finite": (df.with_columns(w=pl.Series([1.0, float("inf"), 1.0, 1.0, 1.0, 1.0])), {"n": 2}),
+    }
+    for name, (frame, options) in bad.items():
+        with pytest.raises(ValueError, match="finite, non-missing, and non-negative"):
+            (tidy(frame) >> slice_sample(weight_by="w", seed=1, **options)).collect()
+    with pytest.raises(ValueError, match="larger sample than the number of positive weights"):
+        (tidy(df) >> slice_sample(n=6, weight_by="w", seed=1)).collect()
+    with pytest.raises(ValueError, match="too few positive weights"):
+        (tidy(df.with_columns(w=pl.lit(0.0))) >> slice_sample(n=2, weight_by="w", replace=True, seed=1)).collect()
+    # Each group is checked on its own.
+    with pytest.raises(ValueError, match="larger sample than the number of positive weights"):
+        (tidy(df) >> group_by("g") >> slice_sample(n=3, weight_by="w", seed=1)).collect()
+    ok = (tidy(df) >> group_by("g") >> slice_sample(n=2, weight_by="w", seed=1)).collect()
+    assert ok.height == 4

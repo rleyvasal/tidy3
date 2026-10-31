@@ -1,4 +1,7 @@
-"""Equality join_by joins with options run as one join; they must match the general path."""
+"""Equality join_by joins with options run as one join; they must match the general path.
+
+The general path (matched row ids, then re-attached) stays for inequality, rolling
+and semi/anti joins and is what these tests compare against."""
 
 import itertools
 import random
@@ -122,3 +125,64 @@ def test_chained_checked_joins_keep_the_plan_small():
     # grows past 800,000 characters for these four joins.
     assert len(frame._lf.explain(optimized=False)) < 50_000
     assert frame.collect().height == 20
+
+
+def test_compact_join_matches_general_path_for_multiple_and_unmatched(monkeypatch):
+    rng = random.Random(8)
+    for _ in range(12):
+        x = _table(rng, rng.choice([0, 2, 5, 8]), "k", "a", ["p", "q", "r"])
+        y = _table(rng, rng.choice([0, 2, 5, 8]), "k", "b", ["p", "q", "r", "s"])
+        for how, relationship, multiple, unmatched in itertools.product(
+            JOINS, [None, "many-to-one"], ["all", "first", "last", "any"], ["drop", "error"]
+        ):
+            if rng.random() > 0.4:
+                continue
+            options = {"relationship": relationship, "multiple": multiple, "unmatched": unmatched}
+            general = _run(False, monkeypatch, x, y, how, join_by("k"), **options)
+            compact = _run(True, monkeypatch, x, y, how, join_by("k"), **options)
+            assert general[0] == compact[0], (how, options)
+            if general[0] == "ok":
+                assert compact[1].columns == general[1].columns
+                assert compact[1].equals(general[1]), (how, options)
+            else:
+                assert "violated" in compact[1] or "unmatched" in compact[1], (how, options)
+
+
+def test_unmatched_error_names_the_side():
+    x = pl.DataFrame({"k": [1, 2], "a": [1, 2]})
+    y = pl.DataFrame({"k": [1, 3], "b": [3, 4]})
+    with pytest.raises(ValueError, match="rows in x have no match in y"):
+        (tidy(x) >> inner_join(y, on=join_by("k"), unmatched="error")).collect()
+    with pytest.raises(ValueError, match="rows in y have no match in x"):
+        (tidy(x) >> left_join(y, on=join_by("k"), unmatched="error")).collect()
+    with pytest.raises(ValueError, match="rows in x have no match in y"):
+        (tidy(x) >> right_join(y, on=join_by("k"), unmatched="error")).collect()
+    # A full join keeps every row, so nothing can be unmatched.
+    out = (tidy(x) >> full_join(y, on=join_by("k"), unmatched="error")).collect()
+    assert out.height == 3
+
+
+def test_multiple_first_leaves_orphaned_y_rows_unmatched_as_in_dplyr():
+    # Checked against dplyr 1.2.1: y's second row for key 1 loses its only
+    # partner, so it is appended as an unmatched row of y.
+    x = pl.DataFrame({"k": [1, 2], "a": [10, 20]})
+    y = pl.DataFrame({"k": [1, 1, 3], "b": [1, 2, 3]})
+    full = (tidy(x) >> full_join(y, on=join_by("k"), multiple="first")).collect()
+    assert full.to_dicts() == [
+        {"k": 1, "a": 10, "b": 1},
+        {"k": 2, "a": 20, "b": None},
+        {"k": 1, "a": None, "b": 2},
+        {"k": 3, "a": None, "b": 3},
+    ]
+    right = (tidy(x) >> right_join(y, on=join_by("k"), multiple="first")).collect()
+    assert right.to_dicts() == [
+        {"k": 1, "a": 10, "b": 1},
+        {"k": 1, "a": None, "b": 2},
+        {"k": 3, "a": None, "b": 3},
+    ]
+    last = (tidy(x) >> right_join(y, on=join_by("k"), multiple="last")).collect()
+    assert last.to_dicts() == [
+        {"k": 1, "a": 10, "b": 2},
+        {"k": 1, "a": None, "b": 1},
+        {"k": 3, "a": None, "b": 3},
+    ]

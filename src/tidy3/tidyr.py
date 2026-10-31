@@ -321,6 +321,7 @@ def expand(*cols: Any, **values: Any) -> Verb:
     named_specs = dict(values)
 
     def _apply(tf):
+        tf = tf._shared()  # each unit reads the input, so share it
         units = _expansion_units(tf, cols)
         levels = _factor_units(tf, cols)
         groups = list(tf._groups or [])
@@ -514,6 +515,7 @@ def complete(
         raise TypeError("complete() fill must be a mapping or None")
 
     def _apply(tf):
+        tf = tf._shared()  # the grid and the join back both read the input
         expanded = expand(*cols, **values)._fn(tf)
         groups = list(tf._groups or [])
         units = _expansion_units(tf, cols)

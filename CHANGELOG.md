@@ -4,6 +4,12 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- Chained verbs that read their input more than once no longer put a full copy of it in the query plan for every read, so the plan and the time to build and optimize it stop multiplying with each step. At four chained steps on a small table, a join with `unmatched="error"` built a plan of 1.8 million characters and took 59 ms to plan and run; it now takes 1.5 ms. The joins that stay in one Polars join with their checks inside it are `left`, `inner`, `right` and `full` equality joins with any of `relationship=`, `unmatched="error"`, `multiple=` and `na_matches=`. A right join now runs as a full join with the unmatched x rows dropped (Polars' own right join was several times slower), and `multiple="first"`/`"last"` on a right or full join keeps dplyr's rule that a y row whose matches were all dropped is appended as unmatched. `slice_sample(weight_by=...)` checks its weights inside the same frame: eight chained steps went from 8.4 s to 3 ms. `complete`, `expand`, `symdiff`, the `rows_*` verbs, and the joins that still need pairs of row ids (inequality, rolling, semi and anti) share their input instead of copying it; a single call is within about 10% of its old speed. `complete`, `expand` and the `rows_*` verbs still read their input twice by nature, so a long chain of them takes about twice as long per extra step. A new test counts the copies of the source table in the plan for 89 verb and option combinations applied four times each.
+
 ## 0.12.10 — 2026-10-31
 
 ### Fixed

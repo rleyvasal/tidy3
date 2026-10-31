@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Callable, Literal, overload
 
@@ -248,6 +249,19 @@ class TidyFrame:
     @property
     def _lf(self) -> pl.LazyFrame:
         return self._data
+
+    def _shared(self) -> TidyFrame:
+        """This frame with its query marked shared, for a verb that reads it twice.
+
+        A verb that uses its input in several places (a self-join, the distinct
+        values joined back) would put that whole query in the plan once per use,
+        and chaining such verbs multiplies the copies. A shared query is
+        computed once and appears in the plan once.
+        """
+        clone = copy.copy(self)
+        clone._data = self._data.cache()
+        clone._schema_cache = None
+        return clone
 
     def _schema(self) -> pl.Schema:
         """The plan's schema, resolved on first use (Polars re-resolves each call)."""

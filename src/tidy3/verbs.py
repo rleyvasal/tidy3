@@ -2884,14 +2884,15 @@ def slice_sample(
             base = tf._lf.with_row_index(row_name).with_columns(
                 weight.cast(pl.Float64).alias(weight_name)
             )
-            invalid = base.filter(
+            # The checks look at the frame they guard, not at a second copy of it.
+            invalid = (
                 pl.col(weight_name).is_null()
                 | ~pl.col(weight_name).is_finite()
                 | (pl.col(weight_name) < 0)
             )
-            base = _pl_guard_no_rows(
+            base = _pl_assert_rows(
                 base,
-                invalid,
+                ~invalid.any(),
                 "slice_sample() weights must be finite, non-missing, and non-negative",
             )
             target = _windowed(_slice_target(n, prop), groups)
@@ -2899,10 +2900,9 @@ def slice_sample(
                 (pl.col(weight_name) > 0).sum(), groups
             )
             if not replace:
-                too_few = base.filter(positive < target)
-                base = _pl_guard_no_rows(
+                base = _pl_assert_rows(
                     base,
-                    too_few,
+                    ~(positive < target).any(),
                     "slice_sample() cannot take a larger sample than the number of positive weights",
                 )
                 modulus = float(2**53 - 1)
@@ -2926,12 +2926,14 @@ def slice_sample(
                     groups=None if transient else tf._groups,
                 )
 
-            no_positive = base.filter((positive == 0) & (target > 0))
-            base = _pl_guard_no_rows(
+            base = _pl_assert_rows(
                 base,
-                no_positive,
+                ~((positive == 0) & (target > 0)).any(),
                 "slice_sample() has too few positive weights",
             )
+            # Sampling with replacement reads the rows and the group totals, so
+            # share the frame: it then appears once in the plan.
+            base = base.cache()
 
             group_keys = list(groups or [])
             dummy = None
@@ -3313,22 +3315,20 @@ def _polars_join_by(
         _COMPACT_EQUALITY_JOINS
         and equality
         and not spec.inequality
-        # A right join stays on the general path: Polars' own right join is
-        # several times slower than a left join, and finding the matched pairs
-        # with an inner join first is faster.
-        and how in {"left", "inner", "full"}
-        and multiple == "all"
-        and unmatched == "drop"
+        and how in {"left", "inner", "right", "full"}
     ):
         return _compact_equality_join(
             tf, left_frame, right_frame, spec, how,
             left_id=left_id, right_id=right_id, right_names=right_names,
             left_columns=left_columns, right_columns=right_columns,
             keep=keep, suffix=suffix, na_matches=na_matches,
-            relationship=relationship,
+            relationship=relationship, multiple=multiple, unmatched=unmatched,
         )
-    left = left_frame.with_row_index(left_id)
-    y = right_frame.with_row_index(right_id).rename(right_names)
+    # The matched pairs, the checks and the final joins all read both inputs.
+    # Marking them shared keeps each in the plan once, not once per use, so
+    # chained joins grow linearly instead of multiplying.
+    left = left_frame.cache().with_row_index(left_id)
+    y = right_frame.cache().with_row_index(right_id).rename(right_names)
     rolling = next((condition for condition in spec.conditions if condition.rolling), None)
     fast_rolling = False
     if rolling is not None and len(spec.inequality) == 1 and multiple == "all":
@@ -3602,20 +3602,29 @@ def _compact_equality_join(
     suffix: tuple[str, str],
     na_matches: str,
     relationship: str | None,
+    multiple: str,
+    unmatched: str,
 ):
-    """Join once, then check the relationship on that result.
+    """Join once, then check and trim the result in place.
 
-    A relationship check gives every row of x and y its own row id, and a
-    row with no match has a missing id on the other side. So a row of x
-    matches several rows of y exactly when its id repeats among the matched
-    pairs, and the same for y. Counting inside the one result avoids the
-    extra queries (each repeating the whole join) that the general path
-    attaches. Polars' own ``validate=`` is not used: it rejects repeated keys
-    even when they find no partner, which dplyr and tidy3 allow.
+    The checks need to see which rows found no partner, so they give every row
+    of x and y its own row id: a row with no match has a missing id on the
+    other side. A row of x matches several rows of y exactly when its id
+    repeats among the matched pairs, and the same for y. Doing this inside
+    the one result avoids the extra queries (each repeating the whole join)
+    that the general path attaches. Polars' own ``validate=`` is not used: it
+    rejects repeated keys even when they find no partner, which dplyr and
+    tidy3 allow.
 
-    Without a check no ids are made. For left and inner joins the key of a
-    result row is always x's key (a missing key only matches a missing key),
-    so Polars drops y's key itself and no key is merged afterwards.
+    A right join, and any join that must see unmatched rows on the side it
+    would drop (``unmatched="error"``), runs as a full join; the rows the join
+    type does not keep are filtered out last. Polars' full join lists x's rows
+    in order with their matches, then y's unmatched rows, which is dplyr's
+    order for a right join too.
+
+    Without checks or filters no ids are made. For left and inner joins the
+    key of a result row is always x's key (a missing key only matches a
+    missing key), so Polars drops y's key itself and no key is merged later.
     """
     equality = spec.equality
     checks: list[tuple[str, str, str]] = []
@@ -3623,36 +3632,111 @@ def _compact_equality_join(
         checks.append((left_id, right_id, "a row in x matches multiple rows in y"))
     if relationship in {"one-to-one", "one-to-many"}:
         checks.append((right_id, left_id, "a row in y matches multiple rows in x"))
-    left = left_frame.with_row_index(left_id) if checks else left_frame
-    y = right_frame.with_row_index(right_id) if checks else right_frame
+    unmatched_x = unmatched == "error" and how in {"inner", "right"}
+    unmatched_y = unmatched == "error" and how in {"inner", "left"}
+    join_how = "full" if how == "right" or unmatched_x or unmatched_y else how
+    needs_ids = bool(checks) or unmatched_x or unmatched_y or join_how != how or multiple != "all"
+    left = left_frame.with_row_index(left_id) if needs_ids else left_frame
+    y = right_frame.with_row_index(right_id) if needs_ids else right_frame
     y = y.rename(right_names)
-    x_keys_final = how in {"left", "inner"} and not keep
+    x_keys_final = join_how in {"left", "inner"} and not keep
     combined = left.join(
         y,
         left_on=[condition.left for condition in equality],
         right_on=[right_names[condition.right] for condition in equality],
-        how=how,
+        how=join_how,
         nulls_equal=na_matches == "na",
         coalesce=x_keys_final,
         maintain_order="left_right",
     )
+    left_present = pl.col(left_id).is_not_null()
+    right_present = pl.col(right_id).is_not_null()
     for own, other, reason in checks:
-        if own == left_id and how in {"left", "inner"}:
+        if own == left_id and join_how in {"left", "inner"}:
             # x keeps every row, so its id is never missing: a repeat means
             # that row was matched more than once.
             unique = pl.col(own).n_unique() == pl.len()
         else:
-            matched = pl.col(own).is_not_null() & pl.col(other).is_not_null()
-            ids = pl.col(own).filter(matched)
+            ids = pl.col(own).filter(left_present & right_present)
             unique = ids.n_unique() == ids.len()
         combined = _pl_assert_rows(
             combined,
             unique,
             f"join relationship {relationship!r} violated: {reason}",
         )
+    if unmatched_x:
+        combined = _pl_assert_rows(
+            combined,
+            ~(left_present & ~right_present).any(),
+            "join unmatched='error': rows in x have no match in y",
+        )
+    if unmatched_y:
+        combined = _pl_assert_rows(
+            combined,
+            ~(right_present & ~left_present).any(),
+            "join unmatched='error': rows in y have no match in x",
+        )
+    if multiple != "all":
+        # One match per row of x: the first or last of its matches, in y's order.
+        # Rows with no x row (y's unmatched rows) are not matches of any x row.
+        distinct = (
+            pl.col(left_id).is_last_distinct()
+            if multiple == "last"
+            else pl.col(left_id).is_first_distinct()
+        )
+        if join_how in {"left", "inner"}:
+            combined = combined.filter(~left_present | distinct)
+        else:
+            combined = _keep_one_match(
+                combined, left_id, right_id, left_columns, distinct,
+                left_present & right_present,
+            )
+    if join_how != how:
+        kept = {"left": left_present, "inner": left_present & right_present, "right": right_present}[how]
+        combined = combined.filter(kept)
     return _join_by_output(
         tf, combined, [], equality, left_columns, right_columns,
         right_names, keep, suffix, left_keys_final=x_keys_final,
+    )
+
+
+def _keep_one_match(
+    combined: pl.LazyFrame,
+    left_id: str,
+    right_id: str,
+    left_columns: list[str],
+    keep_match: pl.Expr,
+    is_match: pl.Expr,
+) -> pl.LazyFrame:
+    """Drop the extra matches of each x row from a full join, as dplyr does.
+
+    A row of y whose every match was dropped is then unmatched: it stays once,
+    with missing x columns, among y's unmatched rows after all of x's rows.
+    """
+    names = combined.collect_schema().names()
+    marker = _temp_column(names, "__tidy3_row")
+    flag = _temp_column([*names, marker], "__tidy3_keep")
+    # The flag is a column first: inside a window it would be recomputed per group.
+    combined = combined.with_row_index(marker).with_columns(
+        (is_match & keep_match).alias(flag)
+    )
+    dropped = is_match & ~pl.col(flag)
+    survives = pl.col(flag).any().over(right_id)
+    first_dropped = (
+        pl.col(marker).filter(dropped).min().over(right_id) == pl.col(marker)
+    )
+    demote = dropped & ~survives & first_dropped
+    # Rows that stay as matches, rows of x or y with no match, and the one row
+    # per orphaned y row, with x's columns blanked.
+    blanked = [
+        pl.when(~demote).then(pl.col(name)).alias(name)
+        for name in [*left_columns, left_id]
+    ]
+    return (
+        combined.filter(~dropped | demote)
+        .with_columns(blanked)
+        .sort([left_id, right_id], nulls_last=True, maintain_order=True)
+        .drop(marker, flag)
     )
 
 
@@ -4333,6 +4417,9 @@ def _set_operation(right: Any, operation: str) -> Verb:
         else:
             left_unique = left.unique(keep="first", maintain_order=True)
             right_unique = other.unique(keep="first", maintain_order=True)
+            if operation == "symdiff":
+                # Each side is read by both halves of the result.
+                left_unique, right_unique = left_unique.cache(), right_unique.cache()
             join_how = "semi" if operation == "intersect" else "anti"
             left_part = left_unique.join(
                 right_unique,
@@ -4482,6 +4569,9 @@ def _rows_operation(
     unmatched = _validate_policy(unmatched, "unmatched")
 
     def _apply(tf):
+        # The result, the key checks and an upsert's unmatched rows all read x,
+        # so share it: it then appears once in the plan, not once per use.
+        x_lf = tf._lf.cache()
         y = _right_frame(right)
         keys = _row_keys(y, by)
 
@@ -4510,7 +4600,7 @@ def _rows_operation(
 
         def matched_in_x() -> pl.LazyFrame:
             return (
-                tf._lf.select(keys)
+                x_lf.select(keys)
                 .join(y.select(right_id, *keys), on=keys, how="inner", nulls_equal=True)
                 .select(right_id)
                 .unique()
@@ -4522,7 +4612,8 @@ def _rows_operation(
         if operation == "rows_append":
             additions = y
         elif operation == "rows_insert":
-            matched = matched_in_x()
+            # Both the conflict check and the rows to add read the matches.
+            matched = matched_in_x().cache()
             if conflict == "error":
                 guards.append((matched, "rows_insert(): y contains keys that already exist in x"))
             additions = y.join(matched, on=right_id, how="anti", maintain_order="left")
@@ -4546,10 +4637,10 @@ def _rows_operation(
 
         if operation in {"rows_append", "rows_insert"}:
             additions = aligned(additions, y_columns)
-            lf = pl.concat([tf._lf, additions], how="vertical_relaxed")
+            lf = pl.concat([x_lf, additions], how="vertical_relaxed")
             return tf._with_lf(guarded(lf), groups=tf._groups)
         if operation == "rows_delete":
-            lf = tf._lf.join(
+            lf = x_lf.join(
                 y.select(keys),
                 on=keys,
                 how="anti",
@@ -4565,7 +4656,7 @@ def _rows_operation(
             incoming = _temp_column([*occupied, *rename_map.values()], f"__tidy3_y_{column}")
             rename_map[column] = incoming
         payload = y.rename(rename_map).with_columns(pl.lit(True).alias(marker))
-        joined = tf._lf.join(
+        joined = x_lf.join(
             payload,
             on=keys,
             how="left",
