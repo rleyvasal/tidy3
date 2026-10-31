@@ -480,8 +480,9 @@ def rewrite_bang_not(source: str) -> str:
                 out.append("!=")
                 i += 2
                 continue
-            # Jupyter shell: ``!cmd`` / ``!!cmd`` at the start of a line.
-            if _out_at_line_start(out):
+            # Jupyter shell: ``!cmd`` / ``!!cmd`` at the start of a line,
+            # but not on a continuation line inside a tidy3 call.
+            if _out_at_line_start(out) and not any(tidy_stack):
                 out.append("!")
                 i += 1
                 continue

@@ -4,6 +4,12 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- In a notebook, a `!` that starts a line inside a tidy3 call is now negation. `!is_na(x)` on its own line inside `mutate(...)`, `select(...)` or `filter(...)` was mistaken for a shell command and left as `!`, which Python rejects. Shell lines such as `!pip install ...` outside a call are still left alone, as is `!=`.
+
 ## 0.12.8 — 2026-10-30
 
 ### Added

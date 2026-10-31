@@ -436,3 +436,31 @@ def test_formula_rules_reach_every_notebook_route(monkeypatch):
     exported = transform_source(cell, known={"bill_len"})
     compile(exported, "<export>", "exec")
     assert "~" not in exported.replace("__tidy3", "")
+
+
+def test_multiline_negation_inside_mutate():
+    from tidy3.masking import rewrite_bang_not
+
+    source = (
+        "mutate(\n"
+        "    long_bill=(\n"
+        "        !is_na(bill_len)\n"
+        "        & (island != 'Dream')\n"
+        "    )\n"
+        ")\n"
+    )
+    expected = source.replace("!is_na", "~is_na")
+    assert rewrite_bang_not(source) == expected
+    # ``!=`` stays comparison, and a line-leading ``!`` in other tidy3 calls too.
+    assert rewrite_bang_not("select(\n    !starts_with('b')\n)\n") == "select(\n    ~starts_with('b')\n)\n"
+    assert rewrite_bang_not("df >> filter(\n    !is_na(bill_len)\n)\n") == "df >> filter(\n    ~is_na(bill_len)\n)\n"
+
+
+def test_shell_command_is_preserved():
+    from tidy3.masking import rewrite_bang_not
+
+    for source in ("!pip install tidy3\n", "x = 1\n!ls\n", "!!pwd\n"):
+        assert rewrite_bang_not(source) == source
+    # A shell line before a tidy3 call stays; the negation inside the call changes.
+    mixed = "!pip install tidy3\nmutate(\n    !a\n)\n"
+    assert rewrite_bang_not(mixed) == "!pip install tidy3\nmutate(\n    ~a\n)\n"
