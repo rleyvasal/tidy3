@@ -4,7 +4,7 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.12.10 — 2026-10-31
 
 ### Fixed
 
