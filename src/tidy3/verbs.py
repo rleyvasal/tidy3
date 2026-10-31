@@ -3309,23 +3309,26 @@ def _polars_join_by(
             f"__tidy3_y_{column}",
         )
 
-    left = left_frame.with_row_index(left_id)
-    y = right_frame.with_row_index(right_id).rename(right_names)
     if (
         _COMPACT_EQUALITY_JOINS
         and equality
         and not spec.inequality
-        and how in {"left", "inner", "right", "full"}
+        # A right join stays on the general path: Polars' own right join is
+        # several times slower than a left join, and finding the matched pairs
+        # with an inner join first is faster.
+        and how in {"left", "inner", "full"}
         and multiple == "all"
         and unmatched == "drop"
     ):
         return _compact_equality_join(
-            tf, left, y, spec, how,
+            tf, left_frame, right_frame, spec, how,
             left_id=left_id, right_id=right_id, right_names=right_names,
             left_columns=left_columns, right_columns=right_columns,
             keep=keep, suffix=suffix, na_matches=na_matches,
             relationship=relationship,
         )
+    left = left_frame.with_row_index(left_id)
+    y = right_frame.with_row_index(right_id).rename(right_names)
     rolling = next((condition for condition in spec.conditions if condition.rolling), None)
     fast_rolling = False
     if rolling is not None and len(spec.inequality) == 1 and multiple == "all":
@@ -3585,8 +3588,8 @@ _COMPACT_EQUALITY_JOINS = True
 
 def _compact_equality_join(
     tf: Any,
-    left: pl.LazyFrame,
-    y: pl.LazyFrame,
+    left_frame: pl.LazyFrame,
+    right_frame: pl.LazyFrame,
     spec: JoinSpec,
     how: str,
     *,
@@ -3602,40 +3605,54 @@ def _compact_equality_join(
 ):
     """Join once, then check the relationship on that result.
 
-    Every row of x and y carries its own row id, and a row with no match has
-    a missing id on the other side. So a row of x matches several rows of y
-    exactly when its id repeats among the matched pairs, and the same for y.
-    Counting inside the one result avoids the extra queries (each repeating
-    the whole join) that the general path attaches. Polars' own
-    ``validate=`` is not used: it rejects repeated keys even when they find
-    no partner, which dplyr and tidy3 allow.
+    A relationship check gives every row of x and y its own row id, and a
+    row with no match has a missing id on the other side. So a row of x
+    matches several rows of y exactly when its id repeats among the matched
+    pairs, and the same for y. Counting inside the one result avoids the
+    extra queries (each repeating the whole join) that the general path
+    attaches. Polars' own ``validate=`` is not used: it rejects repeated keys
+    even when they find no partner, which dplyr and tidy3 allow.
+
+    Without a check no ids are made. For left and inner joins the key of a
+    result row is always x's key (a missing key only matches a missing key),
+    so Polars drops y's key itself and no key is merged afterwards.
     """
     equality = spec.equality
+    checks: list[tuple[str, str, str]] = []
+    if relationship in {"one-to-one", "many-to-one"}:
+        checks.append((left_id, right_id, "a row in x matches multiple rows in y"))
+    if relationship in {"one-to-one", "one-to-many"}:
+        checks.append((right_id, left_id, "a row in y matches multiple rows in x"))
+    left = left_frame.with_row_index(left_id) if checks else left_frame
+    y = right_frame.with_row_index(right_id) if checks else right_frame
+    y = y.rename(right_names)
+    x_keys_final = how in {"left", "inner"} and not keep
     combined = left.join(
         y,
         left_on=[condition.left for condition in equality],
         right_on=[right_names[condition.right] for condition in equality],
         how=how,
         nulls_equal=na_matches == "na",
-        coalesce=False,
+        coalesce=x_keys_final,
         maintain_order="left_right",
     )
-    checks: list[tuple[str, str, str]] = []
-    if relationship in {"one-to-one", "many-to-one"}:
-        checks.append((left_id, right_id, "a row in x matches multiple rows in y"))
-    if relationship in {"one-to-one", "one-to-many"}:
-        checks.append((right_id, left_id, "a row in y matches multiple rows in x"))
     for own, other, reason in checks:
-        matched = pl.col(own).is_not_null() & pl.col(other).is_not_null()
-        ids = pl.col(own).filter(matched)
+        if own == left_id and how in {"left", "inner"}:
+            # x keeps every row, so its id is never missing: a repeat means
+            # that row was matched more than once.
+            unique = pl.col(own).n_unique() == pl.len()
+        else:
+            matched = pl.col(own).is_not_null() & pl.col(other).is_not_null()
+            ids = pl.col(own).filter(matched)
+            unique = ids.n_unique() == ids.len()
         combined = _pl_assert_rows(
             combined,
-            ids.n_unique() == ids.len(),
+            unique,
             f"join relationship {relationship!r} violated: {reason}",
         )
     return _join_by_output(
         tf, combined, [], equality, left_columns, right_columns,
-        right_names, keep, suffix,
+        right_names, keep, suffix, left_keys_final=x_keys_final,
     )
 
 
@@ -3649,8 +3666,13 @@ def _join_by_output(
     right_names: dict[str, str],
     keep: bool,
     suffix: tuple[str, str],
+    left_keys_final: bool = False,
 ) -> Any:
-    """Name and order the joined columns as dplyr does, then add the guards."""
+    """Name and order the joined columns as dplyr does, then add the guards.
+
+    ``left_keys_final`` says x's key columns already hold the merged key, so
+    y's key columns are not in *combined* and nothing is coalesced.
+    """
     equality_map = {condition.left: condition.right for condition in equality}
     equality_right = {condition.right for condition in equality}
     left_out, right_out = join_names(
@@ -3663,7 +3685,7 @@ def _join_by_output(
     )
     output = []
     for column in left_columns:
-        if column in equality_map and not keep:
+        if column in equality_map and not keep and not left_keys_final:
             output.append(
                 pl.coalesce(
                     pl.col(column), pl.col(right_names[equality_map[column]])
