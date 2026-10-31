@@ -4567,6 +4567,65 @@ def _pl_row_inputs(tf: Any, right: Any, operation: str):
     return y, x_columns, y_columns
 
 
+# rows_insert() on its default path reads x twice (its rows, and its keys to find
+# conflicts), which doubles the planning cost of each step in a chain. This switch
+# lets tests compare the one-pass version with that path.
+_ONE_PASS_INSERT = True
+
+
+def _rows_insert_one_pass(
+    tf: Any,
+    x_lf: pl.LazyFrame,
+    y: pl.LazyFrame,
+    keys: list[str],
+    x_columns: list[str],
+    y_columns: list[str],
+    conflict: str,
+):
+    """rows_insert() reading x once: tag the rows, stack them, test each key.
+
+    x's rows and y's rows are stacked into one table, each tagged with where it
+    came from. A y row is new when no x row shares its key, which one pass over
+    the keys answers (``any`` of the x tag within each key, missing keys
+    matching each other). Every x row stays; a y row stays when its key is new,
+    so repeated new keys are all kept. Returns None when the key types differ,
+    where stacking would coerce them before comparing; the join then decides.
+    """
+    x_types, y_types = tf._schema(), y.collect_schema()
+    if any(x_types[key] != y_types[key] for key in keys):
+        return None
+    tag = _temp_column([*x_columns, *y_columns], "__tidy3_from_x")
+    additions = y.select(
+        *[
+            pl.col(column) if column in y_columns else pl.lit(None).alias(column)
+            for column in x_columns
+        ]
+    )
+    stacked = pl.concat(
+        [
+            x_lf.with_columns(pl.lit(True).alias(tag)),
+            additions.with_columns(pl.lit(False).alias(tag)),
+        ],
+        how="vertical_relaxed",
+    )
+    # Build the set from y's few keys and probe x's keys against it, so the
+    # hash table stays small however large x is; then mark every row whose key
+    # is one of the keys x and y share.
+    key = pl.struct(keys) if len(keys) > 1 else pl.col(keys[0])
+    y_keys = key.filter(~pl.col(tag)).implode()
+    shared = key.filter(pl.col(tag) & key.is_in(y_keys, nulls_equal=True)).unique().implode()
+    taken = key.is_in(shared, nulls_equal=True)
+    if conflict == "error":
+        stacked = _pl_assert_rows(
+            stacked,
+            ~(~pl.col(tag) & taken).any(),
+            "rows_insert(): y contains keys that already exist in x",
+        )
+    else:
+        stacked = stacked.filter(pl.col(tag) | ~taken)
+    return tf._with_lf(stacked.drop(tag), groups=tf._groups)
+
+
 def _rows_operation(
     right: Any,
     *,
@@ -4597,6 +4656,13 @@ def _rows_operation(
                 pl.struct(keys).n_unique() == pl.len(),
                 f"{operation}(): y keys must be unique",
             )
+
+        if operation == "rows_insert" and _ONE_PASS_INSERT:
+            one_pass = _rows_insert_one_pass(
+                tf, tf._lf, y, keys, x_columns, y_columns, conflict
+            )
+            if one_pass is not None:
+                return one_pass
 
         # Every join hashes y, the small side, and probes x: the y rows
         # with a match are read off the main join (update, patch, upsert)

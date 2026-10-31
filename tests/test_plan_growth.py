@@ -17,9 +17,10 @@ avoid the second read (the joins, ``slice_sample``) or mark the input shared
 
 The count only sees printed copies. A shared input is still walked once per
 reader by Polars (plain 1.42 and 2.1 alike), so a verb with two readers, like
-``complete`` and ``rows_insert``, takes about twice as long for each extra step in
-a chain. ``test_chained_verb_time_grows_gently`` times the chains to catch that.
-``expand`` and verbs that read their input once grow by a small constant.
+``complete``, takes about twice as long for each extra step in a chain.
+``test_chained_verb_time_grows_gently`` times the chains to catch that; the verbs
+it still lists are unresolved. ``expand``, ``rows_insert`` and verbs that read
+their input once grow by a small constant.
 """
 
 import builtins
@@ -187,6 +188,7 @@ C["inequality join (between)"] = lambda f, i: f >> left_join(bins.rename({"bin":
 C["semi_join"] = lambda f, i: f >> semi_join(side, on="id")
 C["anti_join"] = lambda f, i: f >> anti_join(side, on="id")
 C["semi_join join_by"] = lambda f, i: f >> semi_join(side, on=join_by("id"))
+C["anti_join join_by"] = lambda f, i: f >> anti_join(side, on=join_by("id"))
 C["cross_join"] = lambda f, i: f >> cross_join(pl.DataFrame({nm("z", i): [1]}))
 C["nest_join"] = lambda f, i: f >> nest_join(many, on="id", name=nm("nj", i))
 
@@ -245,11 +247,23 @@ def test_slice_sample_weight_checks_still_raise():
     assert ok.height == 4
 
 
-# Verbs that read their input twice (the rows, and the keys or values): Polars
-# walks a shared plan once per reader, so the time to plan a chain of them
-# doubles with each step. Fewer readers or a plan that is not shared would fix it.
-# Not strict: a fast machine may hide the growth.
-TIME_GROWS = {"rows_insert"}
+# Verbs that read their input twice (its rows, and its keys or values): Polars
+# walks a shared plan once per reader, so the time to plan a chain of them roughly
+# doubles with each step. Measured over 6 and 12 steps they take 9 to 22 times as
+# long, where verbs that read once take under 4. Unresolved: each needs a
+# rewrite that reads its input once (rows_insert, expand and the joins got one),
+# or a ``compute()`` between long runs of them. Not strict: a fast machine may
+# hide the growth.
+TIME_GROWS = {
+    "complete",
+    "symdiff",
+    "rows_update",
+    "rows_patch",
+    "rows_upsert",
+    "semi_join join_by",
+    "anti_join join_by",
+    "inequality join (between)",
+}
 
 
 def _chain_ms(name, steps, repeats=3):
@@ -265,20 +279,31 @@ def _chain_ms(name, steps, repeats=3):
     return best
 
 
+# pivot_wider reads the data while it plans, to name the new columns. Chained after
+# pivot_longer it takes 3.5 times as long over 12 steps as over 6 on Polars 1.42 but
+# 27 times as long on Polars 2.1. Not looked into yet.
+TIME_GROWS_ON_POLARS_2 = {"pivot_longer+wider"}
+POLARS_2 = int(pl.__version__.split(".")[0]) >= 2
+
+
 def _time_case(name):
     marks = []
     if name in TIME_GROWS:
         marks.append(
             pytest.mark.xfail(strict=False, reason="reads its input twice, so planning time doubles per step")
         )
+    if name in TIME_GROWS_ON_POLARS_2 and POLARS_2:
+        marks.append(
+            pytest.mark.xfail(strict=False, reason="planning time multiplies on Polars 2; not yet investigated")
+        )
     return pytest.param(name, id=name, marks=marks)
 
 
 @pytest.mark.parametrize("name", [_time_case(name) for name in C])
 def test_chained_verb_time_grows_gently(name):
-    # Ten steps of a verb that costs a fixed amount per step take about twice as
-    # long as five. One whose work grows by 1.65x or more per step takes over
-    # twelve times as long (rows_insert is about 25 times). The
-    # slack keeps tiny timings from failing on noise.
-    five, ten = _chain_ms(name, 5), _chain_ms(name, 10)
-    assert ten <= 12 * five + 3.0, (round(five, 2), round(ten, 2))
+    # Twelve steps of a verb that costs a fixed amount per step take about twice
+    # as long as six (the slowest ordinary case is 3.5 times). One whose work
+    # grows by 1.4x or more per step takes over five times as long. The slack
+    # keeps tiny timings from failing on noise.
+    six, twelve = _chain_ms(name, 6), _chain_ms(name, 12)
+    assert twelve <= 5 * six + 2.0, (round(six, 2), round(twelve, 2))

@@ -1897,6 +1897,17 @@ How this differs from R:
 
 ### Performance controls
 
+A long pipeline is one lazy query, and Polars plans all of it before running.
+Most verbs add a small, fixed cost per step. A few read their input twice (its
+rows, and its keys or values), and the planning time for a chain of them roughly
+doubles with each step: ten or more in a row become noticeably slow. These are
+`complete`, `symdiff`, `rows_update`, `rows_patch`, `rows_upsert`, `semi_join`
+and `anti_join` with `join_by`, and joins on an inequality. Calling `compute()`
+part-way, after about eight of them, runs the plan so far and starts a fresh one
+from the result; it keeps the table in memory and ends optimization across that
+point. `expand`, `rows_insert`, and joins on equality plan in a fixed amount per
+step.
+
 Grouped `mutate()` expressions automatically reuse embedded or repeated
 statistics. Expressions such as the following compute each group mean and
 standard deviation once; temporary columns never appear in
