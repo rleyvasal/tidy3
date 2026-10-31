@@ -4439,6 +4439,41 @@ def _set_frames(tf: Any, right: Any) -> tuple[Any, Any, list[str]]:
     return left, other, left_columns
 
 
+# symdiff() stacks the two distinct inputs and drops the rows that appear twice,
+# reading each input once. Off only so tests can compare with the two anti joins.
+_ONE_PASS_SYMDIFF = True
+
+_FLAT_TYPES_ONLY = (pl.List, pl.Array, pl.Struct, pl.Object)
+
+
+def _symdiff_types_match(tf: Any, other: pl.LazyFrame) -> bool:
+    """True when both inputs have the same column types, none of them nested.
+
+    Stacking coerces differing types before comparing the rows, which the anti
+    joins would not; nested columns do not compare in a join at all. Either
+    way the joins decide.
+    """
+    mine, theirs = tf._schema(), other.collect_schema()
+    return all(
+        mine[name] == theirs[name] and not isinstance(mine[name], _FLAT_TYPES_ONLY)
+        for name in mine.names()
+    )
+
+
+def _symdiff_one_pass(left: pl.LazyFrame, other: pl.LazyFrame, columns: list[str]) -> pl.LazyFrame:
+    """Rows in exactly one input, x's first: make each side distinct, stack them,
+    and drop the rows that now appear twice (a row repeated after both sides are
+    distinct must be in both). Missing values equal each other, as in a join."""
+    stacked = pl.concat(
+        [
+            left.unique(keep="first", maintain_order=True),
+            other.unique(keep="first", maintain_order=True),
+        ],
+        how="vertical",
+    )
+    return stacked.filter(~pl.struct(columns).is_duplicated())
+
+
 def _set_operation(right: Any, operation: str) -> Verb:
     def _apply(tf):
         left, other, columns = _set_frames(tf, right)
@@ -4448,6 +4483,8 @@ def _set_operation(right: Any, operation: str) -> Verb:
             lf = pl.concat([left, other], how="vertical_relaxed").unique(
                 keep="first", maintain_order=True
             )
+        elif operation == "symdiff" and _ONE_PASS_SYMDIFF and _symdiff_types_match(tf, other):
+            lf = _symdiff_one_pass(left, other, columns)
         else:
             left_unique = left.unique(keep="first", maintain_order=True)
             right_unique = other.unique(keep="first", maintain_order=True)
@@ -4650,6 +4687,106 @@ def _rows_insert_one_pass(
     return tf._with_lf(stacked.drop(tag), groups=tf._groups)
 
 
+# rows_update/patch/upsert read x once: they stack y's rows under x's, find which
+# of y's keys x holds, and then join the values in. Off only so tests can compare
+# with the left join followed by a second query over its matches.
+_ONE_PASS_ROW_CHANGES = True
+
+
+def _same_column_types(tf: Any, y: pl.LazyFrame, y_columns: list[str]) -> bool:
+    """True when every column y shares with x has the same type in both.
+
+    Stacking widens differing types in one place and the old path in another;
+    the old path then decides.
+    """
+    x_types, y_types = tf._schema(), y.collect_schema()
+    return all(x_types[name] == y_types[name] for name in y_columns)
+
+
+def _rows_change_one_pass(
+    tf: Any,
+    y: pl.LazyFrame,
+    payload: pl.LazyFrame,
+    keys: list[str],
+    x_columns: list[str],
+    y_columns: list[str],
+    rename_map: dict[str, str],
+    marker: str,
+    operation: str,
+    right_id: str,
+    y_rows: int | None,
+):
+    """rows_update/patch/upsert reading x once.
+
+    When y's row count is known (a table in memory) and nothing is added, a left
+    join and one check do it: every row of y must have been reached by some row
+    of x. Otherwise:
+
+    y's rows go under x's rows in one table, each tagged with where it came
+    from. A set built from y's few keys is probed with x's keys to find the keys
+    both hold (missing keys match each other), so x is never grouped. Then a y
+    row is an addition when its key is not one of those, which upsert keeps and
+    update and patch (unmatched="error") raise on; the rest of y is dropped. A
+    left join of that table with y brings in the new values, y's keys being
+    unique.
+    """
+    expressions = []
+    for column in x_columns:
+        if column not in rename_map:
+            expressions.append(pl.col(column))
+        elif operation == "rows_patch":
+            expressions.append(
+                pl.coalesce(pl.col(column), pl.col(rename_map[column])).alias(column)
+            )
+        else:
+            expressions.append(
+                pl.when(pl.col(marker).fill_null(False))
+                .then(pl.col(rename_map[column]))
+                .otherwise(pl.col(column))
+                .alias(column)
+            )
+    if operation != "rows_upsert" and y_rows is not None:
+        joined = tf._lf.join(
+            payload, on=keys, how="left", nulls_equal=True, maintain_order="left"
+        )
+        joined = _pl_assert_rows(
+            joined,
+            pl.col(right_id).drop_nulls().n_unique() == y_rows,
+            f"{operation}(): y contains keys absent from x",
+        )
+        return tf._with_lf(joined.select(expressions), groups=tf._groups)
+    tag = _temp_column([*x_columns, *rename_map.values(), marker], "__tidy3_from_x")
+    additions = y.select(
+        *[
+            pl.col(column) if column in y_columns else pl.lit(None).alias(column)
+            for column in x_columns
+        ]
+    )
+    stacked = pl.concat(
+        [
+            tf._lf.with_columns(pl.lit(True).alias(tag)),
+            additions.with_columns(pl.lit(False).alias(tag)),
+        ],
+        how="vertical_relaxed",
+    )
+    key = pl.struct(keys) if len(keys) > 1 else pl.col(keys[0])
+    y_keys = key.filter(~pl.col(tag)).implode()
+    shared = key.filter(pl.col(tag) & key.is_in(y_keys, nulls_equal=True)).unique().implode()
+    new_key = ~key.is_in(shared, nulls_equal=True)
+    if operation == "rows_upsert":
+        stacked = stacked.filter(pl.col(tag) | new_key)
+    else:
+        stacked = _pl_assert_rows(
+            stacked,
+            ~(~pl.col(tag) & new_key).any(),
+            f"{operation}(): y contains keys absent from x",
+        ).filter(pl.col(tag))
+    joined = stacked.join(
+        payload, on=keys, how="left", nulls_equal=True, maintain_order="left"
+    )
+    return tf._with_lf(joined.select(expressions), groups=tf._groups)
+
+
 def _rows_operation(
     right: Any,
     *,
@@ -4756,6 +4893,15 @@ def _rows_operation(
             incoming = _temp_column([*occupied, *rename_map.values()], f"__tidy3_y_{column}")
             rename_map[column] = incoming
         payload = y.rename(rename_map).with_columns(pl.lit(True).alias(marker))
+        if (
+            _ONE_PASS_ROW_CHANGES
+            and (operation == "rows_upsert" or unmatched == "error")
+            and _same_column_types(tf, y, y_columns)
+        ):
+            return _rows_change_one_pass(
+                tf, y, payload, keys, x_columns, y_columns, rename_map, marker,
+                operation, right_id, _known_rows(right),
+            )
         joined = x_lf.join(
             payload,
             on=keys,

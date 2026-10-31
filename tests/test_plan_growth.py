@@ -251,15 +251,11 @@ def test_slice_sample_weight_checks_still_raise():
 # walks a shared plan once per reader, so the time to plan a chain of them roughly
 # doubles with each step. Measured over 6 and 12 steps they take 9 to 22 times as
 # long, where verbs that read once take under 4. Unresolved: each needs a
-# rewrite that reads its input once (rows_insert, expand and the joins got one),
-# or a ``compute()`` between long runs of them. Not strict: a fast machine may
-# hide the growth.
+# rewrite that reads its input once (the joins, expand, symdiff and the rows_*
+# verbs got one), or a ``compute()`` between long runs of them. Not strict: a fast
+# machine may hide the growth.
 TIME_GROWS = {
     "complete",
-    "symdiff",
-    "rows_update",
-    "rows_patch",
-    "rows_upsert",
     "inequality join (between)",
 }
 
