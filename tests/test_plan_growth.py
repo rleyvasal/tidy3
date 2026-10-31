@@ -273,9 +273,11 @@ def _chain_ms(name, steps, repeats=3):
     return best
 
 
-# pivot_wider reads the data while it plans, to name the new columns. Chained after
-# pivot_longer it takes 3.5 times as long over 12 steps as over 6 on Polars 1.42 but
-# 27 times as long on Polars 2.1. Not looked into yet.
+# On Polars 2.1 the first schema lookup of a chain of lazy pivots, and planning it,
+# double with each nested pivot (with every optimization off too), and tidy3 looks the
+# schema up about three times per pivot_longer/pivot_wider round trip. Chained, the
+# pair takes 3.5 times as long over 12 steps as over 6 on Polars 1.42 but 27 times as
+# long on Polars 2.1.
 TIME_GROWS_ON_POLARS_2 = {"pivot_longer+wider"}
 POLARS_2 = int(pl.__version__.split(".")[0]) >= 2
 
@@ -288,7 +290,7 @@ def _time_case(name):
         )
     if name in TIME_GROWS_ON_POLARS_2 and POLARS_2:
         marks.append(
-            pytest.mark.xfail(strict=False, reason="planning time multiplies on Polars 2; not yet investigated")
+            pytest.mark.xfail(strict=False, reason="schema resolution and planning of chained lazy pivots multiply on Polars 2")
         )
     return pytest.param(name, id=name, marks=marks)
 

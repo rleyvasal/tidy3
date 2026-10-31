@@ -1906,7 +1906,7 @@ part-way, after about eight of them, runs the plan so far and starts a fresh one
 from the result; it keeps the table in memory and ends optimization across that
 point. `expand`, `symdiff`, the `rows_*` verbs, and joins, semi joins and anti joins on
 equality plan in a fixed amount per step. (On Polars 2.1, chained `pivot_wider` calls
-also double per step; the cause is in Polars' optimizer.)
+also double per step; resolving and planning a chain of lazy pivots is what slows down there.)
 
 Grouped `mutate()` expressions automatically reuse embedded or repeated
 statistics. Expressions such as the following compute each group mean and

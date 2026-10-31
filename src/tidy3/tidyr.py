@@ -813,6 +813,20 @@ def _any_present(lf: pl.LazyFrame, columns: list[str]) -> pl.Expr:
     )
 
 
+# Polars 2.1 resolves the schema of a chain of lazy pivots in time that doubles with
+# each pivot, and tidy3 asks for it after every pivot_longer and pivot_wider. These
+# verbs therefore work out their result's schema by running the same lazy steps on
+# an empty frame with x's columns, which is shallow, and hand it to the frame. Off on
+# Polars 1, where resolving the real plan is cheap; tests switch it to compare.
+_DERIVE_PIVOT_SCHEMAS = int(pl.__version__.split(".")[0]) >= 2
+
+
+def _derive_schema(result: Any, tf: Any, replay: Any) -> None:
+    """Give *result* the schema of ``replay(empty frame with tf's columns)``."""
+    if _DERIVE_PIVOT_SCHEMAS:
+        result._schema_cache = replay(pl.LazyFrame(schema=tf._schema())).collect_schema()
+
+
 def pivot_longer(
     cols: Any,
     *,
@@ -887,8 +901,44 @@ def pivot_longer(
         ]
         value_column = private("__tidy3_value")
 
+        def shape(source: pl.LazyFrame, discovered: list[Any] | None):
+            """The lazy steps, on x or on an empty frame with x's columns.
+
+            ``discovered`` holds the ``.value`` names (read from the data when
+            None); they come back as the last item so the empty run can reuse them.
+            """
+            return _pivot_longer_steps(
+                source, discovered, identifiers, id_columns, row, variable,
+                key_columns, value_column, name_columns, pivoted, cols_vary,
+                names_prefix, names_sep, names_pattern, value_sentinel,
+                values_to, names_transform, values_transform, names_ptypes,
+                values_ptypes, values_drop_na, names_repair,
+            )
+
+        lf, names, value_names = shape(tf._lf, None)
+        result = tf._with_lf(
+            lf,
+            groups=_result_groups(tf, names),
+            rowwise=False,
+        )
+        # A transform may be a Python function, whose result type Polars reads off
+        # the data; an empty frame cannot say, so those pivots resolve normally.
+        if names_transform is None and values_transform is None:
+            _derive_schema(result, tf, lambda empty: shape(empty, value_names)[0])
+        return result
+
+    return Verb(_apply, "pivot_longer")
+
+
+def _pivot_longer_steps(
+    source, discovered, identifiers, id_columns, row, variable, key_columns,
+    value_column, name_columns, pivoted, cols_vary, names_prefix, names_sep,
+    names_pattern, value_sentinel, values_to, names_transform, values_transform,
+    names_ptypes, values_ptypes, values_drop_na, names_repair,
+):
+    if True:
         lf = (
-            tf._lf.rename(dict(zip(identifiers, id_columns)))
+            source.rename(dict(zip(identifiers, id_columns)))
             .with_row_index(row)
             .unpivot(
                 on=pivoted,
@@ -934,17 +984,19 @@ def pivot_longer(
             for name, key in zip(name_columns, key_columns)
             if name != ".value"
         }
+        value_names = discovered
         if value_sentinel:
-            from tidy3.frame import note_data_read
+            if value_names is None:
+                from tidy3.frame import note_data_read
 
-            note_data_read("pivot_longer() takes .value column names from the data")
-            value_names = (
-                lf.select(".value")
-                .unique(maintain_order=True)
-                .collect()
-                .get_column(".value")
-                .to_list()
-            )
+                note_data_read("pivot_longer() takes .value column names from the data")
+                value_names = (
+                    lf.select(".value")
+                    .unique(maintain_order=True)
+                    .collect()
+                    .get_column(".value")
+                    .to_list()
+                )
             lf = lf.pivot(
                 on=".value",
                 on_columns=value_names,
@@ -970,13 +1022,7 @@ def pivot_longer(
             [*identifiers, *keys, *values], names_repair, "pivot_longer"
         )
         lf = _renamed(lf, [*id_columns, *keys.values(), *values.values()], names)
-        return tf._with_lf(
-            lf,
-            groups=_result_groups(tf, names),
-            rowwise=False,
-        )
-
-    return Verb(_apply, "pivot_longer")
+        return lf, names, value_names
 
 
 def _level_values(tf: Any, name: str) -> list[Any]:
@@ -1644,9 +1690,12 @@ def _pivot_wider_core(
 
         temp_id = private("__tidy3_id") if not identifiers else None
         id_columns = [temp_id] if temp_id else [private("__tidy3_id") for _ in identifiers]
-        lf = tf._lf.rename(dict(zip(identifiers, id_columns)))
-        if temp_id:
-            lf = lf.with_columns(pl.lit(0).alias(temp_id))
+
+        def prepared(source: pl.LazyFrame) -> pl.LazyFrame:
+            frame = source.rename(dict(zip(identifiers, id_columns)))
+            return frame.with_columns(pl.lit(0).alias(temp_id)) if temp_id else frame
+
+        lf = prepared(tf._lf)
         # tidyr turns values that are not uniquely identified into lists, so
         # check for duplicates (with the name discovery when there is one).
         duplicates = None
@@ -1695,6 +1744,7 @@ def _pivot_wider_core(
         if duplicated:
             _warn_not_unique(unsummarised, [*identifiers, *name_columns])
         empty_lists = False
+        summaries = None
         if native:
             empty_lists = values_fn == "list" or duplicated
             aggregate: Any = pl.element() if empty_lists else None
@@ -1710,44 +1760,51 @@ def _pivot_wider_core(
                     summaries.append(pl.col(name))
                 else:
                     summaries.append(_summary_expr(tf, name, fn, keys, "values_fn"))
-            lf = lf.group_by([*id_columns, *name_columns], maintain_order=True).agg(summaries)
             aggregate = "first"
-        out = lf.pivot(
-            on=name_argument,
-            on_columns=on_columns,
-            index=id_columns,
-            values=value_argument,
-            aggregate_function=aggregate,
-            maintain_order=True,
+
+        def widened(base: pl.LazyFrame) -> pl.LazyFrame:
+            frame = base
+            if summaries is not None:
+                frame = frame.group_by(
+                    [*id_columns, *name_columns], maintain_order=True
+                ).agg(summaries)
+            return frame.pivot(
+                on=name_argument,
+                on_columns=on_columns,
+                index=id_columns,
+                values=value_argument,
+                aggregate_function=aggregate,
+                maintain_order=True,
+            )
+
+        out = widened(lf)
+        # A function of each cell's values is typed from the data, which an empty
+        # frame does not have, so only pivots without one derive their schema.
+        derive = _DERIVE_PIVOT_SCHEMAS and not any(
+            callable(fn) and fn is not list for fn in fns.values()
         )
-        output_columns = out.collect_schema().names()
+        template = widened(prepared(pl.LazyFrame(schema=tf._schema()))) if derive else None
+        output_columns = (out if template is None else template).collect_schema().names()
         actual_values = [
             name for name in output_columns if name not in id_columns
         ]
-        if empty_lists:
-            # Combinations with no rows come back as [] — make them missing.
-            out = out.with_columns(
-                pl.when(pl.col(name).list.len() > 0).then(pl.col(name)).alias(name)
-                for name in actual_values
-            )
         # Value columns come out value-major: every combination of the first
         # value column, then the next.
         sources = [value for value in value_columns for _ in combinations]
+        fill_expressions: list[pl.Expr] = []
         if values_fill is not None:
             fills = (
                 values_fill
                 if isinstance(values_fill, dict)
                 else {name: values_fill for name in value_columns}
             )
-            expressions = [
+            fill_expressions = [
                 pl.col(name).fill_null(fills[source]).alias(name)
                 for name, source in zip(actual_values, sources)
                 if source in fills
             ]
-            if expressions:
-                out = out.with_columns(expressions)
+        dropped_id = temp_id
         if temp_id:
-            out = out.drop(temp_id)
             id_columns, identifiers = [], []
         if names_repair is None:
             values = [private("__tidy3_value") for _ in actual_values]
@@ -1770,12 +1827,28 @@ def _pivot_wider_core(
                 names_repair,
                 "pivot_wider",
             )
-        out = _renamed(out, [*id_columns, *actual_values], names_out)
-        return tf._with_lf(
-            out,
+
+        def finish(frame: pl.LazyFrame) -> pl.LazyFrame:
+            if empty_lists:
+                # Combinations with no rows come back as [] — make them missing.
+                frame = frame.with_columns(
+                    pl.when(pl.col(name).list.len() > 0).then(pl.col(name)).alias(name)
+                    for name in actual_values
+                )
+            if fill_expressions:
+                frame = frame.with_columns(fill_expressions)
+            if dropped_id:
+                frame = frame.drop(dropped_id)
+            return _renamed(frame, [*id_columns, *actual_values], names_out)
+
+        result = tf._with_lf(
+            finish(out),
             groups=_result_groups(tf, names_out),
             rowwise=False,
         )
+        if template is not None:
+            result._schema_cache = finish(template).collect_schema()
+        return result
 
     return Verb(_apply, "pivot_wider")
 
