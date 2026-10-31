@@ -463,9 +463,9 @@ def maybe_rewrite_cell(source: str) -> str | None:
         return None
 
     # Backtick preparser (harmless if no backticks)
-    if "`" in text:
-        from tidy3.masking import rewrite_backticks
+    from tidy3.masking import has_formula_call, rewrite_backticks
 
+    if "`" in text or has_formula_call(text):
         text = rewrite_backticks(text)
 
     if ">>" not in text:
@@ -477,7 +477,7 @@ def maybe_rewrite_cell(source: str) -> str | None:
     # Already valid module code — leave alone (after backtick rewrite check)
     try:
         ast.parse(text)
-        if "`" in source:
+        if text != source.strip("\n"):
             return text + ("\n" if not text.endswith("\n") else "")
         return None
     except SyntaxError:
@@ -553,9 +553,9 @@ def partial_run(
     """
     # Backticks + pipe parens (same as IPython source transformers).
     text = source
-    if "`" in text:
-        from tidy3.masking import rewrite_backticks
+    from tidy3.masking import has_formula_call, rewrite_backticks
 
+    if "`" in text or has_formula_call(text):
         text = rewrite_backticks(text)
     code = normalize_pipe_source(text)
 

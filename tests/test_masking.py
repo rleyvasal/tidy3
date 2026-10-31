@@ -330,3 +330,109 @@ def test_notebook_transformer_rewrites_keyword_before_positional():
     assert "__tidy3_assign__('Cus', (NUM))" in out
     plain = ["x = 1\n", "y = dict(a=1, b=2)\n"]
     assert tidy3_backtick_transform(plain) == plain
+
+
+def _penguins():
+    from tidy3 import tidy
+
+    return tidy(
+        {
+            "species": ["Adelie", "Gentoo", "Chinstrap", None],
+            "island": ["Biscoe", "Dream", "Unknown", "Torgersen"],
+            "bill_len": [39.1, 47.5, 49.0, None],
+            "bill length": [39.1, 47.5, 49.0, None],
+        }
+    )
+
+
+def test_formula_rules_for_each_function_run():
+    df = _penguins()
+    cases = {
+        'mutate(z=case_when(bill_len > 45 ~ "long", bill_len <= 45 ~ "short", default="?"))':
+            ["short", "long", "long", "?"],
+        'mutate(z=replace_when(island, island == "Unknown" ~ "Other"))':
+            ["Biscoe", "Dream", "Other", "Torgersen"],
+        'mutate(z=case_match(species, "Adelie" ~ "A", ["Gentoo", "Chinstrap"] ~ "B", default="?"))':
+            ["A", "B", "B", "?"],
+        'mutate(z=recode_values(species, "Adelie" ~ "A", None ~ "none", default="?"))':
+            ["A", "?", "?", "none"],
+        'mutate(z=replace_values(island, "Unknown" ~ None))':
+            ["Biscoe", "Dream", None, "Torgersen"],
+    }
+    for call, want in cases.items():
+        assert _run_verb(call, df=df)["z"].to_list() == want, call
+
+
+def test_formula_rules_match_tuple_rules_and_mix_with_them():
+    df = _penguins()
+    formula = _run_verb('mutate(z=case_when(bill_len > 45 ~ "long", default="short"))', df=df)
+    tuples = _run_verb('mutate(z=case_when((bill_len > 45, "long"), default="short"))', df=df)
+    mixed = _run_verb('mutate(z=case_when((bill_len > 48, "huge"), bill_len > 45 ~ "long", default="short"))', df=df)
+    assert formula["z"].to_list() == tuples["z"].to_list() == ["short", "long", "long", "short"]
+    assert mixed["z"].to_list() == ["short", "long", "huge", "short"]
+
+
+def test_formula_rules_with_backticks_negation_and_nesting():
+    df = _penguins()
+    out = _run_verb('mutate(z=case_when(`bill length` > 45 ~ "long", default="short"))', df=df)
+    assert out["z"].to_list() == ["short", "long", "long", "short"]
+    # Both spellings of negation, then the separator.
+    for neg in ("!is_na(bill_len)", "~is_na(bill_len)"):
+        out = _run_verb(f'mutate(z=case_when({neg} ~ "has", default="none"))', df=df)
+        assert out["z"].to_list() == ["has", "has", "has", "none"], neg
+    out = _run_verb(
+        'mutate(z=case_when(bill_len > 45 ~ case_when(bill_len > 48 ~ "huge", default="long"), default="short"))',
+        df=df,
+    )
+    assert out["z"].to_list() == ["short", "long", "huge", "short"]
+
+
+def test_formula_tilde_in_strings_and_other_places_is_left_alone():
+    from tidy3.masking import rewrite_backticks
+
+    df = _penguins()
+    out = _run_verb('mutate(z=case_when(island == "Dream" ~ "a ~ b", default="x ~ y"))', df=df)
+    assert out["z"].to_list() == ["x ~ y", "a ~ b", "x ~ y", "x ~ y"]
+    for text in (
+        'case_when((a, 1), default=2)',
+        'case_when(~a, default=2)',
+        'x = ~y',
+        'mutate(z = a ~ b)',
+        'filter(~is_na(x))',
+        'case_when(a, b, default="~")',
+    ):
+        assert rewrite_backticks(text) == text, text
+
+
+def test_formula_rule_errors_are_clear():
+    import pytest
+
+    from tidy3.masking import rewrite_backticks
+
+    cases = {
+        "case_when(a ~ b ~ c)": "more than one ~",
+        "case_when(a ~)": "both sides",
+        "case_when(~ b ~)": "both sides",
+        "recode_values(a ~ b)": "takes the column first",
+    }
+    for text, message in cases.items():
+        with pytest.raises(SyntaxError, match=message):
+            rewrite_backticks(text)
+
+
+def test_formula_rules_reach_every_notebook_route(monkeypatch):
+    from tidy3 import jupyter
+    from tidy3.export import transform_source
+    from tidy3.masking import tidy3_backtick_transform
+    from tidy3.partial_run import maybe_rewrite_cell
+
+    cell = 'df >> mutate(z=case_when(bill_len > 45 ~ "long", default="short"))\n'
+    want = '(bill_len > 45, "long")'
+    assert want in "".join(tidy3_backtick_transform([cell]))
+    monkeypatch.setattr(jupyter, "_R_STYLE_ON", True)
+    assert want in jupyter.tidy3_craft_transform(cell)
+    assert want in maybe_rewrite_cell(cell)
+    # An exported script holds ordinary tuples and compiles as plain Python.
+    exported = transform_source(cell, known={"bill_len"})
+    compile(exported, "<export>", "exec")
+    assert "~" not in exported.replace("__tidy3", "")

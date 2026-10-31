@@ -43,6 +43,7 @@ from tidy3.masking import (
     Tidy3MaskTransformer,
     is_backtick_transformer,
     is_mask_transformer,
+    has_formula_call,
     make_named_assign,
     tidy3_backtick_transform,
 )
@@ -133,7 +134,7 @@ def tidy3_craft_transform(source: str) -> str:
             return source
     text = source
     # Match IPython path: bang/backticks only while R-style masking is on.
-    if _R_STYLE_ON and ("`" in text or "!" in text):
+    if _R_STYLE_ON and ("`" in text or "!" in text or has_formula_call(text)):
         from tidy3.masking import rewrite_backticks
 
         text = rewrite_backticks(text)

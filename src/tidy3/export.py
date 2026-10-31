@@ -98,7 +98,9 @@ def collect_known_names(sources: Iterable[str]) -> set[str]:
     known = default_known_names()
     for src in sources:
         text = src
-        if "`" in text:
+        from tidy3.masking import has_formula_call
+
+        if "`" in text or has_formula_call(text):
             from tidy3.masking import rewrite_backticks
 
             try:

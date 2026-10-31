@@ -257,6 +257,36 @@ ggplot(cars_space, aes(x=`hp new`, y=mpg)) + geom_point()
   like R does, so `n()` still counts rows after `n = 7`.
 - **plot3** `aes` / `facet_wrap` use the same style in Jupyter
 
+#### `left ~ right` rules
+
+Where R writes a rule as `condition ~ result`, a notebook cell may too, in
+`case_when`, `replace_when`, `case_match`, `recode_values` and
+`replace_values`. The rewriting turns each `left ~ right` into the
+`(left, right)` pair those functions already take, so the two spellings can
+share a call and give the same result:
+
+```python notest
+cars >> mutate(
+    size = case_when(cyl > 6 ~ "big", cyl > 4 ~ "mid", default = "small"),
+    gears = recode_values(gear, 3 ~ "low", 4 ~ "mid", default = "high"),
+    cyl2 = replace_values(cyl, 8 ~ None),
+)
+cars >> mutate(known = case_when(!is_na(mpg) ~ mpg, default = 0))    # ! or ~ negates
+cars >> mutate(size = case_when((cyl > 6, "big"), cyl > 4 ~ "mid", default = "small"))
+```
+
+- The separator is a `~` that follows a value. A `~` before a value is still
+  negation, so `~is_na(mpg) ~ mpg` is the rule "not missing → mpg".
+- `case_match`, `recode_values`, `replace_values` and `replace_when` take the
+  column first, then the rules. Keyword arguments such as `default=` keep
+  their spelling.
+- A `~` inside a string, a backtick name, or brackets is left alone. A rule
+  with no value on one side, or with two separators, is an error that names
+  the function and the rule.
+- Python itself has no binary `~`, so this works only where tidy3 rewrites
+  the cell. A plain `.py` file needs the tuple spelling, and
+  `nb_export` writes tuples into the script it produces.
+
 #### Export notebook → plain Python script (`nb_export`)
 
 R-style is the **authoring** form. For automation / CI, export rewrites it to

@@ -1738,6 +1738,10 @@ change some values and keep the rest. `when_any()` and `when_all()` combine
 conditions with `|` and `&`; `na_rm=True` ignores missing values. They
 supersede `case_match()` and `recode()`, which still work.
 
+In a notebook, each pair may also be written R-style as `left ~ right`, for
+example `recode_values("team", "red" ~ "Red Rockets")`; see
+[notebooks](notebooks.md). Scripts keep the tuple form.
+
 Ranking helpers are `row_number`, `min_rank`, `dense_rank`, `percent_rank`,
 `cume_dist`, and `ntile`. Window and value helpers include `lead`, `lag`,
 `cummean`, `cumall`, `cumany`, `n_distinct`, `coalesce`, `if_else`, and

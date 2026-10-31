@@ -4,6 +4,16 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- In a notebook, the rules of `case_when`, `replace_when`, `case_match`, `recode_values` and `replace_values` may be written R-style as `left ~ right`, as in ``case_when(cyl > 6 ~ "big", default="small")``. The notebook translator rewrites each rule into the `(left, right)` pair these functions already take, before Python parses the cell, so tuples keep working and can be mixed in. A `~` before a value is still negation, `!` still works, and a `~` inside a string, backtick name or brackets is left alone. A rule with nothing on one side, or two separators, raises an error naming the function. The CRAFT, partial-run and `nb_export` routes use the same rewrite; plain `.py` files still need tuples.
+
+### Fixed
+
+- A single-line pipe cell whose only R-style syntax needed rewriting was passed on unchanged by the partial-run rewriter unless it held a backtick.
+
 ## 0.12.7 — 2026-10-30
 
 ### Fixed

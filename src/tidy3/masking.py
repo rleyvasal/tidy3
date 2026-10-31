@@ -322,8 +322,18 @@ def rewrite_backtick_keyword_assigns(source: str) -> str:
 
 # Verbs whose call *arguments* may use R-style ``!`` as tidy3 negation.
 # Outside these calls, ``!`` is left alone (Jupyter ``!pip``, shell, etc.).
+# Functions whose rules may be written ``left ~ right`` in a notebook.
+# The first group takes its rules from the first argument on; the second
+# takes the column first, then the rules.
+_FORMULA_RULES_ONLY = frozenset({"case_when"})
+_FORMULA_AFTER_COLUMN = frozenset(
+    {"replace_when", "case_match", "recode_values", "replace_values"}
+)
+_FORMULA_FUNCTIONS = _FORMULA_RULES_ONLY | _FORMULA_AFTER_COLUMN
+
 _TIDY3_BANG_VERBS = (
-    _EXPR_ARG_VERBS
+    _FORMULA_FUNCTIONS
+    | _EXPR_ARG_VERBS
     | _ASSIGN_VERBS
     | _SELECTOR_ARG_VERBS
     | _GROUP_VERBS
@@ -591,20 +601,148 @@ def rewrite_keywords_before_positional(source: str) -> str:
     return source
 
 
+_FORMULA_CALL_RE = re.compile(
+    r"(?<![\w])(" + "|".join(sorted(_FORMULA_FUNCTIONS)) + r")\s*\("
+)
+# Words after which a ``~`` is the unary "not" (``a and ~b``), not a separator.
+_OPERATOR_WORDS = frozenset(
+    {"and", "or", "not", "in", "is", "if", "else", "lambda", "return", "yield", "await", "for"}
+)
+
+
+def has_formula_call(source: str) -> bool:
+    """True when *source* may hold ``left ~ right`` rules (a cheap pre-check)."""
+    return "~" in source and _FORMULA_CALL_RE.search(source) is not None
+
+
+def _binary_tildes(text: str) -> list[int]:
+    """Indexes of ``~`` used between two operands at the top level of *text*.
+
+    ``~`` is only a unary operator in Python, so a ``~`` that follows an
+    operand (a name, number, string, backtick name, or closing bracket) can
+    only be the formula separator. ``~is_na(x)`` and ``a and ~b`` are not.
+    """
+    found: list[int] = []
+    depth = 0
+    after_operand = False
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c in "'\"`":
+            j = i + 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == "\\" and c != "`" else 1
+            i = j + 1
+            after_operand = True
+            continue
+        if c == "#":
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if c.isalnum() or c == "_":
+            j = i
+            while j < n and (text[j].isalnum() or text[j] in "_."):
+                j += 1
+            after_operand = text[i:j] not in _OPERATOR_WORDS
+            i = j
+            continue
+        if c in "([{":
+            depth += 1
+            after_operand = False
+        elif c in ")]}":
+            depth -= 1
+            after_operand = True
+        elif c == "~":
+            if depth == 0 and after_operand:
+                found.append(i)
+            after_operand = False
+        elif not c.isspace():
+            after_operand = False
+        i += 1
+    return found
+
+
+def rewrite_formula_rules(source: str) -> str:
+    """Turn R-style ``left ~ right`` rules into the tuples these functions take.
+
+    In ``case_when``, ``replace_when``, ``case_match``, ``recode_values`` and
+    ``replace_values``, an argument written ``left ~ right`` becomes the pair
+    ``(left, right)``, which they already accept::
+
+        case_when(bill_len > 45 ~ "long", default="short")
+        →  case_when((bill_len > 45, "long"), default="short")
+
+    Python has no binary ``~``, so this must happen before parsing and code
+    that was already valid Python is never changed. ``~`` before a value
+    stays negation (``~is_na(x) ~ 0`` is the rule ``(~is_na(x), 0)``), and
+    ``~`` inside strings, backtick names, brackets, or ``default=``-style
+    keyword arguments is left alone. Tuples keep working beside formulas.
+    Raises :class:`SyntaxError` for a rule that is not exactly ``left ~ right``.
+    """
+    if not has_formula_call(source):
+        return source
+    calls = [(m.group(1), m.end() - 1) for m in _FORMULA_CALL_RE.finditer(source)]
+    # Right to left, so an edit never moves a call still to be handled.
+    for name, open_at in reversed(calls):
+        found = _call_arguments(source, open_at)
+        if found is None:
+            continue
+        _, spans = found
+        first_rule = 1 if name in _FORMULA_AFTER_COLUMN else 0
+        edits: list[tuple[int, int, str]] = []
+        seen = 0
+        for a, b in spans:
+            text = source[a:b]
+            if not text.strip():
+                continue
+            seen += 1
+            if _KEYWORD_ARG_RE.match(text) or text.lstrip().startswith("*"):
+                continue
+            tildes = _binary_tildes(text)
+            if not tildes:
+                continue
+            if seen <= first_rule:
+                raise SyntaxError(
+                    f"{name}() takes the column first, then rules: "
+                    f"{text.strip()!r} is a rule, not a column"
+                )
+            if len(tildes) > 1:
+                raise SyntaxError(
+                    f"{name}() rule {text.strip()!r} has more than one ~; "
+                    "write one `left ~ right` per rule, with parentheses around "
+                    "anything that itself contains ~"
+                )
+            left, right = text[: tildes[0]].strip(), text[tildes[0] + 1 :].strip()
+            if not left or not right:
+                raise SyntaxError(
+                    f"{name}() rule {text.strip()!r} needs a value on both sides of ~"
+                )
+            lead = text[: len(text) - len(text.lstrip())]
+            tail = text[len(text.rstrip()) :]
+            edits.append((a, b, f"{lead}({left}, {right}){tail}"))
+        for a, b, text in reversed(edits):
+            source = source[:a] + text + source[b:]
+    return source
+
+
 def rewrite_backticks(source: str) -> str:
     """Preparse R-style tokens for Python (tidy3 contexts only for ``!``).
 
     1. ``!`` → ``~`` inside tidy3 verb args only (not shell ``!pip``, not ``!=``)
     2. `` `new col` = expr `` → ``__tidy3_assign__("new col", (expr))``
-    3. ``select(a = x, b)`` → ``select(__tidy3_assign__('a', (x)), b)``
+    3. ``case_when(x > 1 ~ "a")`` → ``case_when((x > 1, "a"))``
+       (``left ~ right`` rules; see :func:`rewrite_formula_rules`)
+    4. ``select(a = x, b)`` → ``select(__tidy3_assign__('a', (x)), b)``
        (a keyword before a positional argument, which Python rejects)
-    4. remaining `` `col` `` → ``__tidy3_bt__("col")``
+    5. remaining `` `col` `` → ``__tidy3_bt__("col")``
 
     Prefer writing ``~`` for negation — it needs no preparser.
     """
     source = rewrite_bang_not(source)
     source = rewrite_backtick_keyword_assigns(source)
     source = rewrite_keywords_before_positional(source)
+    source = rewrite_formula_rules(source)
     return _BT_RE.sub(lambda m: f"{BT_NAME}({m.group(1)!r})", source)
 
 
@@ -657,7 +795,7 @@ def tidy3_backtick_transform(lines: list[str]) -> list[str]:
             for ln in non_empty
         ):
             return lines
-    if "`" not in src and "!" not in src and "=" not in src:
+    if "`" not in src and "!" not in src and "=" not in src and not has_formula_call(src):
         return lines
     out = rewrite_backticks(src)
     if out == src:
