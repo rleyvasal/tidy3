@@ -186,3 +186,44 @@ def test_multiple_first_leaves_orphaned_y_rows_unmatched_as_in_dplyr():
         {"k": 1, "a": None, "b": 1},
         {"k": 3, "a": None, "b": 3},
     ]
+
+
+def test_multiple_picks_first_or_last_y_row_with_duplicate_keys(monkeypatch):
+    x = pl.DataFrame({"k": [2, 1, 9, 1], "a": [0, 1, 2, 3]})
+    y = pl.DataFrame({"k": [1, 2, 1, 1, 2], "b": [10, 20, 11, 12, 21]})
+    first = (tidy(x) >> left_join(y, on=join_by("k"), multiple="first")).collect()
+    last = (tidy(x) >> left_join(y, on=join_by("k"), multiple="last")).collect()
+    assert first["b"].to_list() == [20, 10, None, 10]
+    assert last["b"].to_list() == [21, 12, None, 12]
+    inner = (tidy(x) >> inner_join(y, on=join_by("k"), multiple="first")).collect()
+    assert inner["a"].to_list() == [0, 1, 3]
+    # The same rows come out when the general path builds every pair first.
+    monkeypatch.setattr(verbs, "_COMPACT_EQUALITY_JOINS", False)
+    assert (tidy(x) >> left_join(y, on=join_by("k"), multiple="first")).collect().equals(first)
+    assert (tidy(x) >> left_join(y, on=join_by("k"), multiple="last")).collect().equals(last)
+
+
+def test_multiple_with_float_keys_that_compare_equal_but_differ_in_bits(monkeypatch):
+    x = pl.DataFrame({"k": [0.0, -0.0, float("nan"), None, 1.5], "a": [0, 1, 2, 3, 4]})
+    y = pl.DataFrame({"k": [-0.0, 0.0, float("nan"), float("nan"), None, None, 1.5], "b": list(range(7))})
+    for how in ("left", "inner"):
+        for multiple in ("first", "last"):
+            for na in ("na", "never"):
+                options = {"multiple": multiple, "na_matches": na}
+                general = _run(False, monkeypatch, x, y, how, join_by("k"), **options)
+                compact = _run(True, monkeypatch, x, y, how, join_by("k"), **options)
+                assert repr(compact[1].to_dicts()) == repr(general[1].to_dicts()), (how, options)
+                # One row of y at most for each row of x.
+                assert compact[1].height <= x.height
+
+
+def test_checks_still_see_every_row_of_y_when_multiple_is_set():
+    x = pl.DataFrame({"k": [1, 2], "a": [1, 2]})
+    y = pl.DataFrame({"k": [1, 1, 2], "b": [1, 2, 3]})
+    # many-to-one would be violated by x's row 1 matching two rows of y; picking
+    # one row of y first must not hide that.
+    with pytest.raises(ValueError, match="a row in x matches multiple rows in y"):
+        (tidy(x) >> left_join(y, on=join_by("k"), multiple="first", relationship="many-to-one")).collect()
+    # A y row that is never the first match is still a matched row of y.
+    ok = tidy(x) >> left_join(y, on=join_by("k"), multiple="first", unmatched="error")
+    assert ok.collect()["b"].to_list() == [1, 3]

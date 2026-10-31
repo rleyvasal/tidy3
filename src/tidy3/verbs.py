@@ -3639,6 +3639,16 @@ def _compact_equality_join(
     left = left_frame.with_row_index(left_id) if needs_ids else left_frame
     y = right_frame.with_row_index(right_id) if needs_ids else right_frame
     y = y.rename(right_names)
+    if multiple != "all" and how in {"left", "inner"} and not checks and unmatched == "drop":
+        # Only one match per row of x is wanted and nothing checks the others,
+        # so keep one row of y per key before joining, not after: duplicate keys
+        # would otherwise build every pair first. The filter below still runs,
+        # in case a key Polars joins is not one it treats as equal here.
+        y = y.unique(
+            subset=list(dict.fromkeys(right_names[c.right] for c in equality)),
+            keep="last" if multiple == "last" else "first",
+            maintain_order=True,
+        )
     x_keys_final = join_how in {"left", "inner"} and not keep
     combined = left.join(
         y,
