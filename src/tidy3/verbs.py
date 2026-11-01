@@ -3486,7 +3486,11 @@ def _polars_join_by(
             )
 
     if multiple != "all":
-        candidates = candidates.unique(
+        # The first or last match is the one with the lowest or highest row of y,
+        # so put the pairs in that order: the joins above keep x's order but not
+        # y's within a row of x (and join_where keeps neither), which is left to
+        # how many threads happen to run.
+        candidates = candidates.sort([left_id, right_id], maintain_order=True).unique(
             subset=[left_id],
             keep="last" if multiple == "last" else "first",
             maintain_order=True,

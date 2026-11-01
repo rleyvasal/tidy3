@@ -37,8 +37,14 @@ def _table(rng, rows):
 def _run(monkeypatch, one_pass, frame, verb):
     monkeypatch.setattr(tidyr_module, "_SINGLE_READ_EXPAND", one_pass)
     out = (tidy(frame) >> verb).collect()
-    # repr compares NaN and signed zero by their text, which == would not.
-    return repr(out.to_dicts()), out.columns, out.schema
+    # Which of 0.0 and -0.0 unique() keeps depends on how many threads split the
+    # work, and they are equal values, so both are written as 0.0 here. repr then
+    # compares NaN by its text, which == would not.
+    rows = [
+        {name: 0.0 if isinstance(value, float) and value == 0 else value for name, value in row.items()}
+        for row in out.to_dicts()
+    ]
+    return repr(rows), out.columns, out.schema
 
 
 @pytest.mark.parametrize("name", VERBS)

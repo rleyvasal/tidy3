@@ -227,3 +227,45 @@ def test_checks_still_see_every_row_of_y_when_multiple_is_set():
     # A y row that is never the first match is still a matched row of y.
     ok = tidy(x) >> left_join(y, on=join_by("k"), multiple="first", unmatched="error")
     assert ok.collect()["b"].to_list() == [1, 3]
+
+
+def test_multiple_first_and_last_do_not_depend_on_the_thread_count():
+    # The general path used to leave the first or last match of a row of x to the
+    # order the joins produced, which changes with the number of threads (Polars 2
+    # on two threads returned the other match every time). Run it in a process
+    # with two threads, on the general path (inequality and equality joins).
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(
+        """
+        import polars as pl
+        import tidy3.verbs as verbs
+        from tidy3 import ge, join_by, left_join, tidy
+
+        x = pl.DataFrame({"k": [2, 1, 9, 1], "a": [0, 1, 2, 3], "t": [5, 15, 25, 15]})
+        y = pl.DataFrame({"k": [1, 2, 1, 1, 2], "b": [10, 20, 11, 12, 21], "lo": [0, 0, 10, 20, 30]})
+        for compact in (True, False):
+            verbs._COMPACT_EQUALITY_JOINS = compact
+            for multiple, want in (("first", [20, 10, None, 10]), ("last", [21, 12, None, 12])):
+                got = (tidy(x) >> left_join(y, on=join_by("k"), multiple=multiple)).collect()["b"].to_list()
+                assert got == want, ("equality", compact, multiple, got)
+        # An inequality join: the first match is the lowest row of y, the last the highest.
+        # t = 5, 15, 25, 15 match y rows (b = 10, 20), (10, 20, 11), (10, 20, 11, 12), (10, 20, 11).
+        on = join_by(ge("t", "lo"))
+        first = (tidy(x) >> left_join(y.select("lo", "b"), on=on, multiple="first")).collect()["b"].to_list()
+        last = (tidy(x) >> left_join(y.select("lo", "b"), on=on, multiple="last")).collect()["b"].to_list()
+        assert first == [10, 10, 10, 10], first
+        assert last == [20, 11, 12, 11], last
+        print("ok")
+        """
+    )
+    for threads in ("1", "2", "3"):
+        done = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env={**__import__("os").environ, "POLARS_MAX_THREADS": threads},
+        )
+        assert done.returncode == 0 and done.stdout.strip() == "ok", (threads, done.stdout, done.stderr[-400:])
