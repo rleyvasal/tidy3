@@ -1908,6 +1908,13 @@ point. `expand`, `symdiff`, the `rows_*` verbs, and joins, semi joins and anti j
 equality plan in a fixed amount per step. (On Polars 2.1, chained `pivot_wider` calls
 also double per step; resolving and planning a chain of lazy pivots is what slows down there.)
 
+`pivot_wider()` normally reads the data while the pipeline is being built, to find
+the new column names and to check whether any cell holds more than one value, and
+that read runs everything before it. Passing `names=` and a `values_fn=` skips both
+reads, so a long pipeline of pivots builds without touching the data. Use
+`values_fn="first"` only when every cell is known to hold one value: where a cell has
+several, it keeps the first instead of making a list column with a warning.
+
 Grouped `mutate()` expressions automatically reuse embedded or repeated
 statistics. Expressions such as the following compute each group mean and
 standard deviation once; temporary columns never appear in
