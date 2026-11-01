@@ -4,7 +4,9 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.13.0 — 2026-10-31
+
+Long pipelines plan and run much faster. Verbs that read their input twice made the planning time of a chain of them double (or worse) with every step; the ones below now read it once, so a chain grows by a small fixed amount per step instead. On a small table, 12 chained steps went from 4.7 s to 3 ms for `rows_insert` and from 2.9 s to 43 ms for `complete`, and 8 chained steps of `slice_sample(weight_by=...)` from 8.4 s to 3 ms; checked joins, `expand`, `symdiff`, `rows_update`, `rows_patch`, `rows_upsert`, and semi and anti joins on `join_by` went from tens or hundreds of milliseconds to a few, and chained pivots on Polars 2 are about 2.4 times faster. Results, row order, column order and errors are unchanged, and each fast path falls back to the old one where its assumptions do not hold. `complete` and joins on an inequality still double per step, and `compute()` part-way through a long chain of them is the workaround; a new timing test lists them. Plain single calls are within a few milliseconds of before, and `rows_upsert` into a very large table is the one that pays (4.2 ms to 7.5 ms for 1,000,000 rows).
 
 ### Fixed
 
