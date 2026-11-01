@@ -2998,10 +2998,15 @@ def slice_sample(
             draws = group_info.with_columns(
                 (uniform * pl.col(total)).alias(key_name)
             )
+            # A draw takes the first row whose running total passes its key. A row
+            # of weight 0 has the same running total as the row before it, so it
+            # would tie with that row, and the join leaves the tie to chance: such
+            # rows are left out (they can never be drawn), and the row number
+            # breaks any other tie in the data's order.
             candidates = (
-                draws.join(base, on=group_keys, how="inner")
+                draws.join(base.filter(pl.col(weight_name) > 0), on=group_keys, how="inner")
                 .filter(pl.col(cumulative) > pl.col(key_name))
-                .sort([*group_keys, draw, cumulative], maintain_order=True)
+                .sort([*group_keys, draw, cumulative, row_name], maintain_order=True)
                 .unique(
                     subset=[*group_keys, draw],
                     keep="first",
