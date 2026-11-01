@@ -24,6 +24,10 @@ import re
 from types import ModuleType
 from typing import Any, Iterable, Literal
 
+import tidysyntax
+from tidysyntax import repairs
+from tidysyntax.scanner import Spans, apply
+
 # Sentinel / injected names (must match jupyter registration).
 BT_NAME = "__tidy3_bt__"
 COL_NAME = "__tidy3_col__"
@@ -233,9 +237,6 @@ _ALL_COLUMN_ARGS = frozenset(
     }
 )
 
-_BT_RE = re.compile(r"`([^`\n]+)`")
-
-
 def rewrite_backtick_keyword_assigns(source: str) -> str:
     """Rewrite R-style `` `new col` = expr `` to a positional assign sentinel.
 
@@ -248,76 +249,10 @@ def rewrite_backtick_keyword_assigns(source: str) -> str:
         mutate(__tidy3_assign__("new hp", (hp)))
 
     Runtime :class:`NamedAssign` objects are expanded inside mutate/select/rename.
-    Uses ``=`` only (not ``==`` / ``!=`` / ``<=`` / ``>=``).
+    Uses ``=`` only (not ``==`` / ``!=`` / ``<=`` / ``>=``). The rewrite is
+    tidysyntax's, shared with tidy3a, plot3 and stats3.
     """
-    if "`" not in source or "=" not in source:
-        return source
-    out: list[str] = []
-    i = 0
-    n = len(source)
-    while i < n:
-        ch = source[i]
-        if ch != "`":
-            out.append(ch)
-            i += 1
-            continue
-        j = source.find("`", i + 1)
-        if j < 0:
-            out.append(source[i:])
-            break
-        name = source[i + 1 : j]
-        k = j + 1
-        while k < n and source[k] in " \t":
-            k += 1
-        is_assign = (
-            k < n
-            and source[k] == "="
-            and not (k + 1 < n and source[k + 1] in "=~")
-        )
-        if is_assign:
-            p = i - 1
-            while p >= 0 and source[p] in " \t":
-                p -= 1
-            if p >= 0 and source[p] in "!<>":
-                is_assign = False
-        if not is_assign:
-            out.append(source[i : j + 1])
-            i = j + 1
-            continue
-        k += 1  # skip '='
-        while k < n and source[k] in " \t":
-            k += 1
-        expr_start = k
-        depth = 0
-        in_str: str | None = None
-        while k < n:
-            c = source[k]
-            if in_str is not None:
-                if c == "\\" and k + 1 < n:
-                    k += 2
-                    continue
-                if c == in_str:
-                    in_str = None
-                k += 1
-                continue
-            if c in ("'", '"'):
-                in_str = c
-                k += 1
-                continue
-            if c in "([{":
-                depth += 1
-            elif c in ")]}":
-                if depth == 0:
-                    break
-                depth -= 1
-            elif c == "," and depth == 0:
-                break
-            k += 1
-        expr = source[expr_start:k].rstrip()
-        # Positional sentinel — valid before/after other arguments.
-        out.append(f"{ASSIGN_NAME}({name!r}, ({expr}))")
-        i = k
-    return "".join(out)
+    return _tidy3_names(repairs.backtick_assignments(source))
 
 
 # Verbs whose call *arguments* may use R-style ``!`` as tidy3 negation.
@@ -342,14 +277,6 @@ _TIDY3_BANG_VERBS = (
     | _SLICE_ORDER_VERBS
     | _SLICE_BY_VERBS
 )
-
-
-def _out_at_line_start(out: list[str]) -> bool:
-    """True if *out* is empty or only whitespace since the last newline."""
-    i = len(out) - 1
-    while i >= 0 and out[i] in " \t":
-        i -= 1
-    return i < 0 or out[i] == "\n"
 
 
 def is_jupyter_shell_cell(source: str) -> bool:
@@ -381,125 +308,16 @@ def rewrite_bang_not(source: str) -> str:
         !whoami                       → !whoami              (unchanged)
         x = !ls                       → x = !ls              (unchanged)
 
-    Hard rules (never rewrite):
-
-    - line-leading ``!`` / ``!!`` (Jupyter shell escapes)
-    - pure shell cells
-    - ``!=`` and string / comment contents
+    A ``!`` that starts a line inside a tidy3 call is negation. ``!=`` and
+    string / comment contents are never rewritten. The rewrite is
+    tidysyntax's, shared with tidy3a, plot3 and stats3.
 
     :class:`~tidy3.expr.Expr` and :class:`~tidy3.tidyselect.Selector` both
     implement ``__invert__`` (used by ``~`` / rewritten ``!``).
     """
-    if "!" not in source:
+    if repairs.is_shell_cell(source):
         return source
-    # Whole-cell shell (``!whoami``, ``!pip …``) — do not touch anything.
-    if is_jupyter_shell_cell(source) and source.count("\n") <= 1:
-        # Single-line shell cell (optional trailing newline only).
-        body = source.strip("\n")
-        if "\n" not in body.lstrip(" \t"):
-            return source
-    out: list[str] = []
-    i = 0
-    n = len(source)
-    in_str: str | None = None
-    # True for each paren depth opened by a tidy3 verb call.
-    tidy_stack: list[bool] = []
-    last_ident: str | None = None
-    ident_chars: list[str] = []
-
-    def _flush_ident() -> None:
-        nonlocal last_ident, ident_chars
-        if ident_chars:
-            last_ident = "".join(ident_chars)
-            ident_chars = []
-
-    while i < n:
-        c = source[i]
-        if in_str is not None:
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(source[i + 1])
-                i += 2
-                continue
-            if c == in_str:
-                in_str = None
-            i += 1
-            continue
-        if c in ("'", '"'):
-            _flush_ident()
-            last_ident = None
-            in_str = c
-            out.append(c)
-            i += 1
-            continue
-        if c == "#":
-            # Line comment — copy through newline; never rewrite bangs here.
-            _flush_ident()
-            last_ident = None
-            while i < n:
-                out.append(source[i])
-                if source[i] == "\n":
-                    i += 1
-                    break
-                i += 1
-            continue
-        if c == ".":
-            # Attribute: ``obj.select(`` still counts (last_ident becomes select).
-            _flush_ident()
-            # Keep last_ident only for the attribute name that follows.
-            last_ident = None
-            out.append(c)
-            i += 1
-            continue
-        if c.isalpha() or c == "_" or (ident_chars and c.isdigit()):
-            # Identifier start (letter/_) or continuation (alnum/_)
-            ident_chars.append(c)
-            out.append(c)
-            i += 1
-            continue
-        if c == "(":
-            _flush_ident()
-            is_tidy = last_ident in _TIDY3_BANG_VERBS if last_ident else False
-            tidy_stack.append(is_tidy)
-            last_ident = None
-            out.append(c)
-            i += 1
-            continue
-        if c == ")":
-            _flush_ident()
-            last_ident = None
-            if tidy_stack:
-                tidy_stack.pop()
-            out.append(c)
-            i += 1
-            continue
-        if c == "!":
-            _flush_ident()
-            last_ident = None
-            if i + 1 < n and source[i + 1] == "=":
-                out.append("!=")
-                i += 2
-                continue
-            # Jupyter shell: ``!cmd`` / ``!!cmd`` at the start of a line,
-            # but not on a continuation line inside a tidy3 call.
-            if _out_at_line_start(out) and not any(tidy_stack):
-                out.append("!")
-                i += 1
-                continue
-            # Only tidy3-context negation; never touch shell / other Python.
-            if any(tidy_stack):
-                out.append("~")
-            else:
-                out.append("!")
-            i += 1
-            continue
-        # Other punctuation / whitespace ends an identifier.
-        _flush_ident()
-        if c not in " \t\n":
-            last_ident = None
-        out.append(c)
-        i += 1
-    return "".join(out)
+    return repairs.negation(source, [DIALECT])
 
 
 # Verbs where ``name = expr`` makes a column (the named-assign carrier works).
@@ -509,43 +327,33 @@ _CONTROL_KW = frozenset(
     {"by", "keep", "keep_all", "before", "after", "groups", "add", "drop", "sort",
      "name", "wt", "weight", "order_by", "where"}
 )
-_KEYWORD_ARG_RE = re.compile(r"\s*([A-Za-z_]\w*)\s*=(?!=)")
-_NAMED_VERB_CALL_RE = re.compile(
-    r"(?<![\w.])(" + "|".join(sorted(_NAMED_ASSIGN_VERBS)) + r")\s*\("
+
+# tidy3's part of the notebook syntax tidy3, tidy3a, plot3 and stats3 share.
+DIALECT = tidysyntax.Dialect(
+    "tidy3",
+    negation_calls=_TIDY3_BANG_VERBS,
+    ordered_calls=_NAMED_ASSIGN_VERBS,
+    settings=_CONTROL_KW,
+    rule_calls=_FORMULA_FUNCTIONS,
+    rule_after_column=_FORMULA_AFTER_COLUMN,
 )
 
+_NEUTRAL = re.compile(r"\b(" + re.escape(tidysyntax.NAME) + "|" + re.escape(tidysyntax.ASSIGN) + r")(?=\s*\()")
 
-def _call_arguments(source: str, open_at: int) -> tuple[int, list[tuple[int, int]]] | None:
-    """Close index and top-level ``(start, end)`` argument spans of the call at *open_at*."""
-    spans: list[tuple[int, int]] = []
-    depth = 0
-    start = open_at + 1
-    i = open_at
-    n = len(source)
-    while i < n:
-        c = source[i]
-        if c in "'\"`":
-            j = i + 1
-            while j < n and source[j] != c:
-                j += 2 if source[j] == "\\" and c != "`" else 1
-            i = j + 1
-            continue
-        if c == "#":
-            j = source.find("\n", i)
-            i = n if j < 0 else j
-            continue
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-            if depth == 0:
-                spans.append((start, i))
-                return i, spans
-        elif c == "," and depth == 1:
-            spans.append((start, i))
-            start = i + 1
-        i += 1
-    return None
+
+def _tidy3_names(source: str) -> str:
+    """tidysyntax's neutral placeholders as tidy3's own: ``__r_name__`` → ``__tidy3_bt__``,
+    ``__r_assign__`` → ``__tidy3_assign__``, outside strings and comments.
+
+    Until plot3, stats3 and tidy3a all read the neutral names, tidy3 keeps
+    writing the names they read today, and ``nb_export`` keeps its output.
+    """
+    if tidysyntax.NAME not in source and tidysyntax.ASSIGN not in source:
+        return source
+    spans = Spans.of(source)
+    own = {tidysyntax.NAME: BT_NAME, tidysyntax.ASSIGN: ASSIGN_NAME}
+    edits = [(m.start(), m.end(), own[m.group(1)]) for m in _NEUTRAL.finditer(source) if m.start() in spans]
+    return apply(source, edits)
 
 
 def rewrite_keywords_before_positional(source: str) -> str:
@@ -561,107 +369,20 @@ def rewrite_keywords_before_positional(source: str) -> str:
     Keywords after the last positional argument, ``*args``, ``**kwargs`` and
     verb settings such as ``by=`` are left alone. Code that was already valid
     Python is not changed. Run after :func:`rewrite_backtick_keyword_assigns`,
-    whose backtick assignments count as positional arguments.
+    whose backtick assignments count as positional arguments. The rewrite is
+    tidysyntax's, shared with tidy3a, plot3 and stats3.
     """
-    if "=" not in source:
-        return source
-    calls = [m.end() - 1 for m in _NAMED_VERB_CALL_RE.finditer(source)]
-    # Right to left, so an edit never moves a call still to be handled.
-    for open_at in reversed(calls):
-        found = _call_arguments(source, open_at)
-        if found is None:
-            continue
-        close, spans = found
-        kinds = []
-        for a, b in spans:
-            text = source[a:b]
-            match = _KEYWORD_ARG_RE.match(text)
-            if match:
-                kinds.append("keyword")
-            elif text.strip() and not text.lstrip().startswith("*"):
-                kinds.append("positional")
-            else:
-                kinds.append("other")
-        if "positional" not in kinds:
-            continue
-        last = len(kinds) - 1 - kinds[::-1].index("positional")
-        edits = []
-        for (a, b), kind in zip(spans[:last], kinds[:last]):
-            if kind != "keyword":
-                continue
-            match = _KEYWORD_ARG_RE.match(source[a:b])
-            name = match.group(1)
-            if name in _CONTROL_KW:
-                continue
-            value = source[a + match.end() : b].strip()
-            lead = source[a:b][: len(source[a:b]) - len(source[a:b].lstrip())]
-            tail = source[a:b][len(source[a:b].rstrip()) :]
-            edits.append((a, b, f"{lead}{ASSIGN_NAME}({name!r}, ({value})){tail}"))
-        for a, b, text in reversed(edits):
-            source = source[:a] + text + source[b:]
-    return source
+    return _tidy3_names(repairs.keywords_before_positional(source, [DIALECT]))
 
 
 _FORMULA_CALL_RE = re.compile(
     r"(?<![\w])(" + "|".join(sorted(_FORMULA_FUNCTIONS)) + r")\s*\("
-)
-# Words after which a ``~`` is the unary "not" (``a and ~b``), not a separator.
-_OPERATOR_WORDS = frozenset(
-    {"and", "or", "not", "in", "is", "if", "else", "lambda", "return", "yield", "await", "for"}
 )
 
 
 def has_formula_call(source: str) -> bool:
     """True when *source* may hold ``left ~ right`` rules (a cheap pre-check)."""
     return "~" in source and _FORMULA_CALL_RE.search(source) is not None
-
-
-def _binary_tildes(text: str) -> list[int]:
-    """Indexes of ``~`` used between two operands at the top level of *text*.
-
-    ``~`` is only a unary operator in Python, so a ``~`` that follows an
-    operand (a name, number, string, backtick name, or closing bracket) can
-    only be the formula separator. ``~is_na(x)`` and ``a and ~b`` are not.
-    """
-    found: list[int] = []
-    depth = 0
-    after_operand = False
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if c in "'\"`":
-            j = i + 1
-            while j < n and text[j] != c:
-                j += 2 if text[j] == "\\" and c != "`" else 1
-            i = j + 1
-            after_operand = True
-            continue
-        if c == "#":
-            j = text.find("\n", i)
-            i = n if j < 0 else j
-            continue
-        if c.isalnum() or c == "_":
-            j = i
-            while j < n and (text[j].isalnum() or text[j] in "_."):
-                j += 1
-            after_operand = text[i:j] not in _OPERATOR_WORDS
-            i = j
-            continue
-        if c in "([{":
-            depth += 1
-            after_operand = False
-        elif c in ")]}":
-            depth -= 1
-            after_operand = True
-        elif c == "~":
-            if depth == 0 and after_operand:
-                found.append(i)
-            after_operand = False
-        elif not c.isspace():
-            after_operand = False
-        i += 1
-    return found
 
 
 def rewrite_formula_rules(source: str) -> str:
@@ -680,51 +401,11 @@ def rewrite_formula_rules(source: str) -> str:
     ``~`` inside strings, backtick names, brackets, or ``default=``-style
     keyword arguments is left alone. Tuples keep working beside formulas.
     Raises :class:`SyntaxError` for a rule that is not exactly ``left ~ right``.
+    The rewrite is tidysyntax's, shared with tidy3a, plot3 and stats3.
     """
     if not has_formula_call(source):
         return source
-    calls = [(m.group(1), m.end() - 1) for m in _FORMULA_CALL_RE.finditer(source)]
-    # Right to left, so an edit never moves a call still to be handled.
-    for name, open_at in reversed(calls):
-        found = _call_arguments(source, open_at)
-        if found is None:
-            continue
-        _, spans = found
-        first_rule = 1 if name in _FORMULA_AFTER_COLUMN else 0
-        edits: list[tuple[int, int, str]] = []
-        seen = 0
-        for a, b in spans:
-            text = source[a:b]
-            if not text.strip():
-                continue
-            seen += 1
-            if _KEYWORD_ARG_RE.match(text) or text.lstrip().startswith("*"):
-                continue
-            tildes = _binary_tildes(text)
-            if not tildes:
-                continue
-            if seen <= first_rule:
-                raise SyntaxError(
-                    f"{name}() takes the column first, then rules: "
-                    f"{text.strip()!r} is a rule, not a column"
-                )
-            if len(tildes) > 1:
-                raise SyntaxError(
-                    f"{name}() rule {text.strip()!r} has more than one ~; "
-                    "write one `left ~ right` per rule, with parentheses around "
-                    "anything that itself contains ~"
-                )
-            left, right = text[: tildes[0]].strip(), text[tildes[0] + 1 :].strip()
-            if not left or not right:
-                raise SyntaxError(
-                    f"{name}() rule {text.strip()!r} needs a value on both sides of ~"
-                )
-            lead = text[: len(text) - len(text.lstrip())]
-            tail = text[len(text.rstrip()) :]
-            edits.append((a, b, f"{lead}({left}, {right}){tail}"))
-        for a, b, text in reversed(edits):
-            source = source[:a] + text + source[b:]
-    return source
+    return repairs.rule_pairs(source, [DIALECT])
 
 
 def rewrite_backticks(source: str) -> str:
@@ -736,15 +417,19 @@ def rewrite_backticks(source: str) -> str:
        (``left ~ right`` rules; see :func:`rewrite_formula_rules`)
     4. ``select(a = x, b)`` → ``select(__tidy3_assign__('a', (x)), b)``
        (a keyword before a positional argument, which Python rejects)
-    5. remaining `` `col` `` → ``__tidy3_bt__("col")``
+    5. remaining `` `col` `` → ``__tidy3_bt__("col")``, outside strings
+       and comments
+
+    These are tidysyntax's repairs, run with tidy3's dialect. They leave the
+    neutral placeholders ``__r_name__`` and ``__r_assign__``, which
+    :func:`_tidy3_names` turns back into tidy3's own: plot3, stats3 and
+    tidy3a read those today, and ``nb_export`` writes them into files.
 
     Prefer writing ``~`` for negation — it needs no preparser.
     """
-    source = rewrite_bang_not(source)
-    source = rewrite_backtick_keyword_assigns(source)
-    source = rewrite_keywords_before_positional(source)
-    source = rewrite_formula_rules(source)
-    return _BT_RE.sub(lambda m: f"{BT_NAME}({m.group(1)!r})", source)
+    if repairs.is_shell_cell(source):
+        return source
+    return _tidy3_names(tidysyntax.repair(source, [DIALECT]))
 
 
 class NamedAssign:
@@ -769,7 +454,7 @@ def _is_assign_call(node: ast.AST) -> bool:
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == ASSIGN_NAME
+        and node.func.id in (ASSIGN_NAME, tidysyntax.ASSIGN)
         and len(node.args) >= 2
         and isinstance(node.args[0], ast.Constant)
         and isinstance(node.args[0].value, str)
@@ -819,7 +504,7 @@ def _is_bt_call(node: ast.AST) -> bool:
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == BT_NAME
+        and node.func.id in (BT_NAME, tidysyntax.NAME)
         and len(node.args) == 1
         and isinstance(node.args[0], ast.Constant)
         and isinstance(node.args[0].value, str)

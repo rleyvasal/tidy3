@@ -310,12 +310,13 @@ def test_keyword_rewrite_leaves_valid_code_alone():
         "select(a=NUM, b=g)",
         "mutate(a=1, b=2)",
         "select(Source_Row, Cus=NUM)",
-        "df.select(a=NUM, b)",
         "dict(a=1, b=2)",
         "select(a=NUM, *rest, b=g)",
         "mutate(by='g', z=1)",
     ):
         assert rewrite_backticks(text) == text, text
+    # A method call is rewritten like the verb, as `!` in one already is.
+    assert rewrite_backticks("df.select(a=NUM, b)") == "df.select(__tidy3_assign__('a', (NUM)), b)"
     # Verb settings are never turned into columns.
     out = rewrite_backticks("select(by='g', Cus=NUM, Source_Row)")
     assert "by='g'" in out and "__tidy3_assign__('Cus'" in out

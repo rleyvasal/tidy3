@@ -27,6 +27,10 @@ dependencies = [
   # Polars serializes plans with Python steps through cloudpickle;
   # to_polars_code() reads those plans.
   "cloudpickle>=2.0",
+  # The notebook syntax tidy3, tidy3a, plot3 and stats3 share (`!`, keywords
+  # before positional arguments, `left ~ right` rules, backtick names).
+  # Standard library only.
+  "tidysyntax>=0.1,<0.2",
 ]
 
 [project.optional-dependencies]

@@ -4,6 +4,27 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- The notebook's R-syntax rewrites (`!` for negation, a keyword before a
+  positional argument, `left ~ right` rules, backtick names and backtick
+  assignments) come from tidysyntax, the notebook syntax tidy3, tidy3a,
+  plot3 and stats3 now share, which tidy3 requires (`tidysyntax>=0.1,<0.2`,
+  standard library only). Rewritten cells keep tidy3's names
+  (`__tidy3_bt__`, `__tidy3_assign__`), so `nb_export` writes the same files.
+  Two differences: a keyword before a positional argument in a method call,
+  `df.select(a = x, b)`, is rewritten like the verb, as `!` in one already
+  was; and backticks inside string literals and comments are left as written,
+  so ``labs(title="see `hp`")`` keeps its text and another package's quoted
+  formula holding a backtick name is no longer broken.
+
+### Fixed
+
+- `test_today_and_now_default_to_utc` failed from the first Sunday of
+  November, when Los Angeles is 8 hours behind UTC, not 7.
+
 ## 0.14.1 — 2026-10-31
 
 ### Fixed

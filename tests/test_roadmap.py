@@ -385,7 +385,9 @@ def test_today_and_now_default_to_utc():
     local = now("America/Los_Angeles")
     utc = now("UTC")
     delta = (utc - local).total_seconds()
-    assert 6 * 3600 < delta < 8 * 3600
+    # Los Angeles is 7 hours behind UTC in summer and 8 from the first Sunday
+    # of November; the two calls are microseconds apart, so round to hours.
+    assert int(delta / 3600 + 0.5) in (7, 8)  # this module's round() is tidy3's
     with pytest.raises(ValueError, match="time zone"):
         now("Not/Azone")
 
