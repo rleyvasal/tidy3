@@ -4,6 +4,13 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- `rows_update()`, `rows_patch()` and `rows_upsert()` take their single left join when y is `tidy(table)` or `table.lazy()` with nothing on top, as they already did for a plain table: such a plan is the table itself, so its row count is known without a query. They used to stack x and y and check x's keys against y's first. Updating 10,000 rows of a 2,000,000-row table takes 7.1 ms instead of 18.2 on Polars 1.42 (plain Polars' `update`, which checks nothing, takes 5.9); on Polars 2.1 it is unchanged at about 16.5 ms, where the check that every row of y was matched costs about 4 ms of it. Joins keep their own rule for a lazy y.
+- `pivot_wider(values_fn="first")` and `values_fn="last"` let Polars' pivot take the value directly instead of summarising each cell in a `group_by` first; both leave an absent cell missing, so the results are the same. With `names=` given, 2,000 rows pivoted to 20 columns take 4.3 ms instead of 5.0 on Polars 2.1, as fast as Polars' own eager pivot.
+
 ## 0.14.0 — 2026-10-31
 
 ### Changed

@@ -10,6 +10,14 @@ import tidy3.verbs as verbs
 from tidy3 import group_by, rows_patch, rows_update, rows_upsert, tidy
 
 VERBS = {"rows_update": rows_update, "rows_patch": rows_patch, "rows_upsert": rows_upsert}
+# How y is passed: a table, or a lazy frame whose row count is known without a
+# query (tidy(table), table.lazy()), or one where it is not (a step on top).
+Y_FORMS = {
+    "table": lambda y: y,
+    "tidy": lambda y: tidy(y),
+    "lazy": lambda y: y.lazy(),
+    "lazy_step": lambda y: y.lazy().filter(pl.lit(True)),
+}
 
 
 def _x(rng, rows, two_keys):
@@ -46,7 +54,7 @@ def _run(monkeypatch, one_pass, x, y, verb, by, options, grouped, lazy):
         frame = tidy(x)
         if grouped:
             frame = frame >> group_by("g")
-        out = frame >> VERBS[verb](y.lazy() if lazy else y, by=by, **options)
+        out = frame >> VERBS[verb](Y_FORMS[lazy](y), by=by, **options)
         result = out.collect()
     except Exception as error:
         return type(error).__name__, str(error).splitlines()[0]
@@ -54,7 +62,7 @@ def _run(monkeypatch, one_pass, x, y, verb, by, options, grouped, lazy):
 
 
 @pytest.mark.parametrize("verb", VERBS)
-@pytest.mark.parametrize("lazy", [False, True], ids=["table", "lazy"])
+@pytest.mark.parametrize("lazy", Y_FORMS)
 def test_one_pass_matches_the_old_path(monkeypatch, verb, lazy):
     rng = random.Random(31)
     for two_keys in (False, True):
@@ -76,7 +84,7 @@ def test_repeated_y_keys_and_type_differences_are_unchanged(monkeypatch, verb):
     repeated = pl.concat([_y(rng, 3, False), _y(rng, 3, False).head(1)])
     other_type = _y(rng, 3, False).with_columns(pl.col("v").cast(pl.Float32))
     for y in (repeated, other_type):
-        args = (x, y, verb, "k", {}, False, False)
+        args = (x, y, verb, "k", {}, False, "table")
         assert _run(monkeypatch, True, *args) == _run(monkeypatch, False, *args)
 
 
@@ -102,3 +110,16 @@ def test_chained_changes_read_x_once():
         frame = frame >> rows_update(pl.DataFrame({"k": [i], "v": [float(i)]}), by="k")
     assert frame._lf.explain(optimized=False).count("DF [") <= 9 + 1
     assert frame.collect()["v"].to_list()[:9] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+
+
+@pytest.mark.parametrize("form", Y_FORMS)
+def test_update_joins_once_when_y_rows_are_known_without_a_query(form):
+    # A y whose plan is a table takes the left join and one check; a y that
+    # needs a query to count takes the stacked path, which reads it once more.
+    x = pl.DataFrame({"k": [1, 2, 3], "v": [1.0, 2.0, 3.0]})
+    y = pl.DataFrame({"k": [2], "v": [9.0]})
+    out = tidy(x) >> rows_update(Y_FORMS[form](y), by="k")
+    assert ("UNION" in out._lf.explain()) == (form == "lazy_step")
+    assert out.collect()["v"].to_list() == [1.0, 9.0, 3.0]
+    with pytest.raises(ValueError, match="y contains keys absent from x"):
+        (tidy(x) >> rows_update(Y_FORMS[form](pl.DataFrame({"k": [7], "v": [0.0]})), by="k")).collect()

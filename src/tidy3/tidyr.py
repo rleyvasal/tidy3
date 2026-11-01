@@ -1748,6 +1748,10 @@ def _pivot_wider_core(
         if native:
             empty_lists = values_fn == "list" or duplicated
             aggregate: Any = pl.element() if empty_lists else None
+        elif len({fns[name] for name in value_columns}) == 1 and fns[value_columns[0]] in ("first", "last"):
+            # Polars' own first and last leave an absent cell missing, as tidyr
+            # does, so the pivot takes them directly, without a group_by first.
+            aggregate = fns[value_columns[0]]
         else:
             # Summarise each cell first, then pivot one value per cell.
             keys = [*identifiers, *name_columns]

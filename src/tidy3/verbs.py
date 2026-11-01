@@ -3967,6 +3967,21 @@ def _known_rows(frame: Any) -> int | None:
     return len(frame) if isinstance(frame, pd.DataFrame) else None
 
 
+def _table_rows(frame: Any) -> int | None:
+    """``_known_rows``, and also the row count of ``tidy(table)`` or
+    ``table.lazy()`` with nothing on top: that plan is the table itself, so
+    counting its rows reads no data. Any other plan, or a plan text this check
+    does not recognise, stays unknown. (Joins keep ``_known_rows``: they run a
+    lazy y as an IE join on purpose.)"""
+    rows = _known_rows(frame)
+    lazy = getattr(frame, "_data", frame)
+    if rows is None and isinstance(lazy, pl.LazyFrame):
+        plan = lazy.explain(optimizations=pl.QueryOptFlags.none())
+        if "\n" not in plan and plan.startswith("DF "):
+            rows = lazy.select(pl.len()).collect().item()
+    return rows
+
+
 def _join_by_operation(
     tf: Any,
     right: Any,
@@ -5006,7 +5021,7 @@ def _rows_operation(
         ):
             return _rows_change_one_pass(
                 tf, y, payload, keys, x_columns, y_columns, rename_map, marker,
-                operation, right_id, _known_rows(right),
+                operation, right_id, _table_rows(right),
             )
         joined = x_lf.join(
             payload,
