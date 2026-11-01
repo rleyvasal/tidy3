@@ -4,6 +4,16 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- Grouped `slice()`, `slice_head()`, `slice_tail()`, `slice_min()`, `slice_max()` and `slice_sample()` (and `head()`, which is `slice_head()`) return their rows group by group in dplyr's order. After `group_by()` the groups come in key order with the missing key last, as dplyr's groups and tidy3's `summarise()` do; with `by=` they come in order of first appearance. Each group's rows keep the order they had before: their row order for `slice_head()`, `slice_tail()` and `slice_sample()`, the order of the positions for `slice()`, and the order of the values for `slice_min()` and `slice_max()`. Before, `slice_head()`, `slice_tail()` and `slice_sample()` left the rows in their original order, interleaving the groups, and the others listed groups by first appearance after `group_by()` as well. Ungrouped slices are unchanged. The R oracle now checks a dozen grouped and `by=` slices against dplyr 1.2.1. The extra sort costs little: on 2,000,000 rows in 100 groups, `group_by() |> slice_head(n=5)` takes 8.0 ms where it took 7.4, `slice_tail(n=5, by=)` 10.5 ms where it took 9.0, and `group_by() |> slice_max(n=3)` is faster, 17 ms instead of 19 (24 instead of 29 on Polars 1.42), because it no longer numbers the rows.
+
+### Fixed
+
+- `slice_sample(weight_by=..., replace=True)` grouped by a column with missing values drew no rows for the missing-key group: the join that matches each draw to its row did not match missing keys.
+
 ## 0.13.1 — 2026-10-31
 
 ### Fixed

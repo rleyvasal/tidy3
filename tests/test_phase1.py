@@ -73,11 +73,13 @@ def test_slice_head_tail_and_extremes_are_grouped():
     assert values(frame >> slice_max("x", n=1, with_ties=False), "x") == [3, 5]
 
 
-def test_slice_extremes_preserve_first_seen_group_order():
-    frame = tidy(
-        {"g": ["b", "b", "a", "a"], "x": [2, 1, 4, 3]}
-    ).group_by("g")
-    out = (frame >> slice_min("x", n=1)).collect(as_="pandas")
+def test_slice_extremes_list_groups_like_dplyr():
+    data = {"g": ["b", "b", "a", "a"], "x": [2, 1, 4, 3]}
+    # In key order after group_by(), as dplyr's groups are...
+    out = (tidy(data).group_by("g") >> slice_min("x", n=1)).collect(as_="pandas")
+    assert list(out.itertuples(index=False, name=None)) == [("a", 3), ("b", 1)]
+    # ...and in order of first appearance with by=.
+    out = (tidy(data) >> slice_min("x", n=1, by="g")).collect(as_="pandas")
     assert list(out.itertuples(index=False, name=None)) == [("b", 1), ("a", 3)]
 
 

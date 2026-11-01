@@ -363,6 +363,32 @@ def _slices():
         "tail": frame >> slice_tail(n=2),
         "minimum": frame >> slice_min("x", n=2),
         "maximum": frame >> slice_max("x", n=2),
+        **_grouped_slices(),
+    }
+
+
+def _grouped_slices():
+    frame = tidy(
+        {
+            "id": [0, 1, 2, 3, 4, 5],
+            "g": ["b", "a", "b", None, "a", "c"],
+            "x": [0.1, 0.9, 0.5, 0.3, 0.2, 0.4],
+        }
+    )
+    grouped = frame >> group_by("g")
+    return {
+        "grouped_head": grouped >> slice_head(n=2) >> ungroup(),
+        "by_head": frame >> slice_head(n=2, by="g"),
+        "grouped_tail": grouped >> slice_tail(n=1) >> ungroup(),
+        "by_tail": frame >> slice_tail(n=1, by="g"),
+        "grouped_tail_prop": grouped >> slice_tail(prop=0.5) >> ungroup(),
+        "grouped_positions": grouped >> slice(2, 1) >> ungroup(),
+        "by_positions": frame >> slice(2, 1, by="g"),
+        "grouped_exclude": grouped >> slice(-1) >> ungroup(),
+        "by_exclude": frame >> slice(-1, by="g"),
+        "grouped_maximum": grouped >> slice_max("x", n=1) >> ungroup(),
+        "by_maximum": frame >> slice_max("x", n=1, by="g"),
+        "grouped_minimum": grouped >> slice_min("x", n=2, with_ties=False) >> ungroup(),
     }
 
 

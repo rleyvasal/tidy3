@@ -1703,6 +1703,10 @@ tidy(sales) >> slice_max("amount", n=2, by="region")
 `summarise`, `reframe`, `slice`, and every `slice_*` variant. Like dplyr,
 it cannot be combined with an already grouped or rowwise frame.
 
+A grouped slice returns its rows group by group, as dplyr does: in key
+order (missing key last) after `group_by()`, and in order of first
+appearance with `by=`.
+
 Portable helpers run with dplyr's grouped semantics:
 
 ```python

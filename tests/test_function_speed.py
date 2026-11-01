@@ -291,7 +291,7 @@ def _native_grouped(data, name):
     elif name == "slice_max":
         out = data.filter(pl.col("mass") == pl.col("mass").max().over("g")).sort("g", maintain_order=True)
     elif name == "slice_head":
-        out = data.filter(pl.int_range(pl.len()).over("g") < 2)
+        out = data.filter(pl.int_range(pl.len()).over("g") < 2).sort("g", maintain_order=True)
     elif name == "slice_sample":
         out = data.group_by("g", maintain_order=True).agg(
             pl.struct(pl.exclude("g")).sample(n=1, seed=1).alias("sample"),

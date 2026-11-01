@@ -62,6 +62,11 @@ cases <- if (batch) args[-1] else args[[1]]
 # in the same case would come out as 0.
 negative_zero <- function() -as.numeric("0")
 
+slice_groups <- tibble(
+  id=0:5,
+  g=c("b", "a", "b", NA, "a", "c"),
+  x=c(0.1, 0.9, 0.5, 0.3, 0.2, 0.4)
+)
 base <- tibble(
   id=1:4,
   g=c("b", "a", "b", "a"),
@@ -1081,7 +1086,21 @@ run_case <- function(case_name) switch(
     head=base |> slice_head(n=2),
     tail=base |> slice_tail(n=2),
     minimum=base |> slice_min(x, n=2),
-    maximum=base |> slice_max(x, n=2)
+    maximum=base |> slice_max(x, n=2),
+    # Grouped slices return rows group by group: key order (missing key
+    # last) after group_by(), first appearance with .by.
+    grouped_head=slice_groups |> group_by(g) |> slice_head(n=2) |> ungroup(),
+    by_head=slice_groups |> slice_head(n=2, by=g),
+    grouped_tail=slice_groups |> group_by(g) |> slice_tail(n=1) |> ungroup(),
+    by_tail=slice_groups |> slice_tail(n=1, by=g),
+    grouped_tail_prop=slice_groups |> group_by(g) |> slice_tail(prop=0.5) |> ungroup(),
+    grouped_positions=slice_groups |> group_by(g) |> slice(c(2, 1)) |> ungroup(),
+    by_positions=slice_groups |> slice(c(2, 1), .by=g),
+    grouped_exclude=slice_groups |> group_by(g) |> slice(-1) |> ungroup(),
+    by_exclude=slice_groups |> slice(-1, .by=g),
+    grouped_maximum=slice_groups |> group_by(g) |> slice_max(x, n=1) |> ungroup(),
+    by_maximum=slice_groups |> slice_max(x, n=1, by=g),
+    grouped_minimum=slice_groups |> group_by(g) |> slice_min(x, n=2, with_ties=FALSE) |> ungroup()
   ),
   grouping = list(
     persistent=base |> group_by(g) |> summarise(n=n(), avg=mean(y), .groups="drop"),

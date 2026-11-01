@@ -1777,6 +1777,7 @@ def slice(*rows: Any, by: Any = None) -> Verb:  # noqa: A001
 
     def _apply(tf):
         groups, transient = _operation_groups(tf, by, "slice")
+        by_key = _groups_sort_by_key(tf, groups, transient)
         if not groups and positions and _contiguous(positions):
             # slice(3, 4, 5) without groups is rows 3..5; rows past the end
             # are dropped, as Polars' slice does.
@@ -1797,12 +1798,15 @@ def slice(*rows: Any, by: Any = None) -> Verb:  # noqa: A001
         base = tf._lf.with_row_index(global_name).with_columns(
             local_index.alias(row_name)
         )
-        if groups:
+        if groups and not by_key:
             base = base.with_columns(
                 pl.col(global_name).min().over(groups).alias(group_name)
             )
         else:
             base = base.with_columns(pl.lit(0).alias(group_name))
+        group_order = (
+            _dplyr_sort_expressions(base, groups) if by_key else [pl.col(group_name)]
+        )
 
         positive = [position - 1 for position in positions if position > 0]
         excluded = [abs(position) - 1 for position in positions if position < 0]
@@ -1817,13 +1821,14 @@ def slice(*rows: Any, by: Any = None) -> Verb:  # noqa: A001
                     how="inner",
                     maintain_order="left_right",
                 )
-                .sort([group_name, order_name])
+                .sort([*group_order, order_name], nulls_last=True)
                 .drop(row_name, global_name, group_name, order_name)
             )
         elif excluded:
-            lf = base.filter(~pl.col(row_name).is_in(excluded)).drop(
-                row_name, global_name, group_name
-            )
+            lf = base.filter(~pl.col(row_name).is_in(excluded))
+            if groups:
+                lf = lf.sort(group_order, nulls_last=True, maintain_order=True)
+            lf = lf.drop(row_name, global_name, group_name)
         else:
             lf = base.head(0).drop(row_name, global_name, group_name)
         return tf._with_lf(lf, groups=None if transient else tf._groups)
@@ -1865,6 +1870,46 @@ def _slice_group_len(groups: list[str] | None) -> pl.Expr:
     return pl.len().over(groups) if groups else pl.len()
 
 
+def _groups_sort_by_key(tf: Any, groups: list[str] | None, transient: bool) -> bool:
+    """Whether sliced rows come out in group-key order.
+
+    dplyr returns the rows of a slice group by group: in key order after
+    ``group_by()``, as its groups are, and in order of first appearance with
+    ``by=``. A rowwise frame keeps its rows' order.
+    """
+    return bool(groups) and not transient and not tf._rowwise
+
+
+def _slice_in_group_order(
+    tf: Any,
+    groups: list[str] | None,
+    by_key: bool,
+    keep: Callable[[pl.LazyFrame], pl.LazyFrame],
+    *,
+    keeps_first_rows: bool = False,
+) -> pl.LazyFrame:
+    """Rows that ``keep`` leaves, group by group in dplyr's order (see
+    ``_groups_sort_by_key``), each group's rows in the order ``keep`` left them.
+
+    ``keeps_first_rows`` says every group ``keep`` leaves keeps its first row,
+    so first appearance among the rows left is first appearance in the input.
+    """
+    if not groups:
+        return keep(tf._lf)
+    if by_key:
+        out = keep(tf._lf)
+        return out.sort(_dplyr_sort_expressions(out, groups), nulls_last=True, maintain_order=True)
+    first = _temp_column(_frame_columns(tf), "__tidy3_slice_first")
+    place = pl.col(first).min().over(groups)
+    if keeps_first_rows:
+        # Numbered after keep, on the few rows it leaves.
+        out = keep(tf._lf).with_row_index(first).with_columns(place)
+    else:
+        # A group's place is its first row in the input, which keep may drop.
+        out = keep(tf._lf.with_row_index(first).with_columns(place))
+    return out.sort(first, maintain_order=True).drop(first)
+
+
 def slice_head(
     *, n: int | None = None, prop: float | None = None, by: Any = None
 ) -> Verb:
@@ -1872,31 +1917,49 @@ def slice_head(
 
     def _apply(tf):
         groups, transient = _operation_groups(tf, by, "slice_head")
-        lf = _slice_end(tf._lf, groups, n, prop, first=True)
+        by_key = _groups_sort_by_key(tf, groups, transient)
+        lf = _slice_end(tf, groups, by_key, n, prop, first=True)
         if lf is None:
             target = _windowed(_slice_target(n, prop), groups)
-            lf = tf._lf.filter(_slice_local_index(groups) < target)
+            lf = _slice_in_group_order(
+                tf,
+                groups,
+                by_key,
+                lambda lf: lf.filter(_slice_local_index(groups) < target),
+                keeps_first_rows=True,
+            )
         return tf._with_lf(lf, groups=None if transient else tf._groups)
 
     return Verb(_apply, "slice_head")
 
 
-def _slice_end(lf: pl.LazyFrame, groups: list[str] | None, n: int | None, prop: float | None, *, first: bool) -> pl.LazyFrame | None:
+def _slice_end(
+    tf: Any, groups: list[str] | None, by_key: bool, n: int | None, prop: float | None, *, first: bool
+) -> pl.LazyFrame | None:
     """The first or last *n* rows as a slice, or one row per group as a
     ``unique``, when either says the same as the row-number filter: a
     whole count, not a proportion or a count from the other end.
 
     A slice lets Polars stop early; ``unique`` on the keys costs half the
-    filter over ``int_range().over(groups)`` and keeps the rows' order.
+    filter over ``int_range().over(groups)``. It lists groups in the order
+    of the rows it keeps, which is their first appearance only for first
+    rows, so last rows take it only when they are sorted by key afterwards.
     Nulls and NaNs are one group each in both forms.
+
+    ``group_by(...).head(n)`` would give the order directly, but Polars 2
+    then reads every column, used or not, and the plan needs an explode.
     """
+    lf = tf._lf
     if prop is not None or n is None or n < 0:
         return None
     if not groups:
         return lf.head(n) if first else lf.tail(n)
-    if n == 1:
-        return lf.unique(subset=groups, keep="first" if first else "last", maintain_order=True)
-    return None
+    if n != 1 or not (first or by_key):
+        return None
+    out = lf.unique(subset=groups, keep="first" if first else "last", maintain_order=True)
+    if by_key:
+        out = out.sort(_dplyr_sort_expressions(out, groups), nulls_last=True, maintain_order=True)
+    return out
 
 
 def slice_tail(
@@ -1906,14 +1969,20 @@ def slice_tail(
 
     def _apply(tf):
         groups, transient = _operation_groups(tf, by, "slice_tail")
-        lf = _slice_end(tf._lf, groups, n, prop, first=False)
+        by_key = _groups_sort_by_key(tf, groups, transient)
+        lf = _slice_end(tf, groups, by_key, n, prop, first=False)
         if lf is None:
             target = _windowed(_slice_target(n, prop), groups)
             # Signed: a group shorter than n keeps all its rows, where the
             # unsigned length minus n would wrap and keep none.
-            lf = tf._lf.filter(
-                _slice_local_index(groups)
-                >= (_slice_group_len(groups).cast(pl.Int64) - target)
+            lf = _slice_in_group_order(
+                tf,
+                groups,
+                by_key,
+                lambda lf: lf.filter(
+                    _slice_local_index(groups)
+                    >= (_slice_group_len(groups).cast(pl.Int64) - target)
+                ),
             )
         return tf._with_lf(lf, groups=None if transient else tf._groups)
 
@@ -1946,6 +2015,7 @@ def _slice_extreme(
                 needed |= _expr_column_names(by)
         wide, widened = _maybe_widen_for_select_base(tf, needed)
         groups, transient = _operation_groups(wide, by, verb_name)
+        by_key = _groups_sort_by_key(wide, groups, transient)
         keep_base = wide._select_base
         columns = _frame_columns(wide)
         order_name = _temp_column(columns, "__tidy3_slice_order")
@@ -1967,11 +2037,15 @@ def _slice_extreme(
             )
         lf = wide._lf.with_columns(value.alias(order_name))
         cleanup = [order_name]
-        if groups:
+        if groups and not by_key:
             lf = lf.with_row_index(global_name).with_columns(
                 pl.col(global_name).min().over(groups).alias(group_name)
             )
             cleanup.extend([global_name, group_name])
+        group_order = (
+            _dplyr_sort_expressions(lf, groups) if by_key
+            else [pl.col(group_name)] if groups else []
+        )
         if na_rm:
             lf = lf.filter(pl.col(order_name).is_not_null())
         target = _windowed(_slice_target(n, prop), groups)
@@ -1982,18 +2056,16 @@ def _slice_extreme(
                 _windowed(null_rank, groups)
             )
             lf = lf.filter(rank <= target)
-            sort_columns = [*([group_name] if groups else []), order_name]
             lf = lf.sort(
-                sort_columns,
-                descending=[False] * bool(groups) + [largest],
+                [*group_order, order_name],
+                descending=[False] * len(group_order) + [largest],
                 nulls_last=True,
                 maintain_order=True,
             )
         else:
-            sort_columns = [*([group_name] if groups else []), order_name]
             lf = lf.sort(
-                sort_columns,
-                descending=[False] * bool(groups) + [largest],
+                [*group_order, order_name],
+                descending=[False] * len(group_order) + [largest],
                 nulls_last=True,
                 maintain_order=True,
             )
@@ -2860,6 +2932,7 @@ def slice_sample(
 
     def _apply(tf):
         groups, transient = _operation_groups(tf, by, "slice_sample")
+        by_key = _groups_sort_by_key(tf, groups, transient)
         if weight_by is not None:
             columns = _frame_columns(tf)
             row_name = _temp_column(columns, "__tidy3_sample_row")
@@ -2915,12 +2988,18 @@ def slice_sample(
                 ) / modulus
                 key = (-uniform.log() / pl.col(weight_name)).alias(key_name)
                 lf = base.with_columns(key)
+                if groups and not by_key:
+                    # A group's place is its first row, which the draw may skip.
+                    lf = lf.with_columns(pl.col(row_name).min().over(groups))
+                group_order = (
+                    _dplyr_sort_expressions(lf, groups) if by_key
+                    else [pl.col(row_name)] if groups else []
+                )
                 rank = _windowed(
                     pl.col(key_name).rank(method="ordinal"), groups
                 )
                 lf = lf.filter(rank <= target)
-                sort_keys = [*(groups or []), key_name]
-                lf = lf.sort(sort_keys, maintain_order=True)
+                lf = lf.sort([*group_order, key_name], nulls_last=True, maintain_order=True)
                 return tf._with_lf(
                     lf.select(columns),
                     groups=None if transient else tf._groups,
@@ -2971,12 +3050,16 @@ def slice_sample(
             base = base.with_columns(
                 pl.col(weight_name).cum_sum().over(group_keys).alias(cumulative)
             )
+            group_place = _temp_column(
+                [*columns, row_name, weight_name, key_name, cumulative, total, length],
+                "__tidy3_sample_place",
+            )
             group_info = base.group_by(
                 group_keys, maintain_order=True
             ).agg(
                 pl.col(weight_name).sum().alias(total),
                 pl.len().alias(length),
-            )
+            ).with_row_index(group_place)
             if n is not None:
                 target_count = (
                     pl.lit(n) if n >= 0 else pl.col(length) + n
@@ -3004,7 +3087,9 @@ def slice_sample(
             # rows are left out (they can never be drawn), and the row number
             # breaks any other tie in the data's order.
             candidates = (
-                draws.join(base.filter(pl.col(weight_name) > 0), on=group_keys, how="inner")
+                draws.join(
+                    base.filter(pl.col(weight_name) > 0), on=group_keys, how="inner", nulls_equal=True
+                )
                 .filter(pl.col(cumulative) > pl.col(key_name))
                 .sort([*group_keys, draw, cumulative, row_name], maintain_order=True)
                 .unique(
@@ -3012,21 +3097,24 @@ def slice_sample(
                     keep="first",
                     maintain_order=True,
                 )
-                .sort([*group_keys, draw], maintain_order=True)
+            )
+            group_order = (
+                _dplyr_sort_expressions(candidates, groups) if by_key
+                else [pl.col(group_place)]
+            )
+            candidates = candidates.sort(
+                [*group_order, draw], nulls_last=True, maintain_order=True
             )
             return tf._with_lf(
                 candidates.select(columns),
                 groups=None if transient else tf._groups,
             )
         if not replace:
-            context = _group_context(tf, groups)
-            if n is not None:
-                result = sample_n(n, seed=seed)._fn(context)
-            else:
-                result = sample_frac(prop, seed=seed)._fn(context)
-            if transient:
-                return result._with_lf(result._lf, groups=None, rowwise=False)
-            return result
+            # sample_n()'s draw, with the rows then put in group order.
+            target = _slice_target(n, prop)
+            drawn = _windowed(pl.int_range(pl.len()).shuffle(seed=seed) < target, groups)
+            lf = _slice_in_group_order(tf, groups, by_key, lambda lf: lf.filter(drawn))
+            return tf._with_lf(lf, groups=None if transient else tf._groups)
 
         columns = _frame_columns(tf)
         row_name = _temp_column(columns, "__tidy3_sample_row")
@@ -3054,6 +3142,8 @@ def slice_sample(
                 .explode(struct_name, empty_as_null=False)
                 .unnest(struct_name)
             )
+            if by_key:
+                lf = lf.sort(_dplyr_sort_expressions(lf, groups), nulls_last=True, maintain_order=True)
         else:
             lf = (
                 base.select(sampled.alias(struct_name))
