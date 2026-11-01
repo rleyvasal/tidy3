@@ -254,6 +254,12 @@ def test_slice_sample_weight_checks_still_raise():
 # rewrite that reads its input once (the joins, expand, symdiff and the rows_*
 # verbs got one), or a ``compute()`` between long runs of them. Not strict: a fast
 # machine may hide the growth.
+# The inequality join was tried as one outer join_where (Polars 2.1 has how="left")
+# with row ids to restore the order. It matched the current path on 1,290 cases and
+# fixed the chain (12 steps: 53 ms to 10 ms), but on large tables it took 2.4 to 7.6
+# times as long and up to 1.8 times the memory: Polars' left join_where is itself
+# about 6.6 times slower than its inner one (127 ms against 19 ms for 1,000,000 rows),
+# before the sort. So it was not adopted; compute() between long runs is the way out.
 TIME_GROWS = {
     "complete",
     "inequality join (between)",
