@@ -4,7 +4,9 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.15.0 — 2026-11-01
+
+The notebook's R syntax now comes from tidysyntax, shared with tidy3a, plot3 and stats3.
 
 ### Changed
 
