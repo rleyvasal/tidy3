@@ -4723,12 +4723,11 @@ def _rows_change_one_pass(
     of x. Otherwise:
 
     y's rows go under x's rows in one table, each tagged with where it came
-    from. A set built from y's few keys is probed with x's keys to find the keys
-    both hold (missing keys match each other), so x is never grouped. Then a y
-    row is an addition when its key is not one of those, which upsert keeps and
-    update and patch (unmatched="error") raise on; the rest of y is dropped. A
-    left join of that table with y brings in the new values, y's keys being
-    unique.
+    from. Upsert joins y's values in by key and keeps a row from y only when no
+    row of x reached the same row of y. Update and patch (unmatched="error")
+    instead probe x's keys against a small set built from y's keys, so x is never
+    grouped, raise on a y key x lacks, drop the rows from y, and then join the
+    values in. y's keys are unique.
     """
     expressions = []
     for column in x_columns:
@@ -4769,18 +4768,26 @@ def _rows_change_one_pass(
         ],
         how="vertical_relaxed",
     )
+    if operation == "rows_upsert":
+        # Every stacked row joins y's values by key, and y's keys are unique, so a
+        # row from y joins its own row of y. That row is already in x exactly when
+        # some original row of x joined it too: the join's own row ids say so,
+        # whatever the keys' types and missing values.
+        joined = stacked.join(
+            payload, on=keys, how="left", nulls_equal=True, maintain_order="left"
+        )
+        reached = pl.col(right_id).filter(pl.col(tag)).drop_nulls().unique().implode()
+        joined = joined.filter(pl.col(tag) | ~pl.col(right_id).is_in(reached))
+        return tf._with_lf(joined.select(expressions), groups=tf._groups)
     key = pl.struct(keys) if len(keys) > 1 else pl.col(keys[0])
     y_keys = key.filter(~pl.col(tag)).implode()
     shared = key.filter(pl.col(tag) & key.is_in(y_keys, nulls_equal=True)).unique().implode()
     new_key = ~key.is_in(shared, nulls_equal=True)
-    if operation == "rows_upsert":
-        stacked = stacked.filter(pl.col(tag) | new_key)
-    else:
-        stacked = _pl_assert_rows(
-            stacked,
-            ~(~pl.col(tag) & new_key).any(),
-            f"{operation}(): y contains keys absent from x",
-        ).filter(pl.col(tag))
+    stacked = _pl_assert_rows(
+        stacked,
+        ~(~pl.col(tag) & new_key).any(),
+        f"{operation}(): y contains keys absent from x",
+    ).filter(pl.col(tag))
     joined = stacked.join(
         payload, on=keys, how="left", nulls_equal=True, maintain_order="left"
     )
