@@ -26,8 +26,8 @@ from tidy3 import (
     transmute,
 )
 from tidy3.expr import col
+from tidy3syntax import NAME as BT_NAME  # tidy3syntax's backtick placeholder
 from tidy3.masking import (
-    BT_NAME,
     COL_NAME,
     _ASSIGN_VERBS,
     _COUNT_VERBS,
@@ -148,10 +148,10 @@ def test_all_public_column_verbs_are_classified():
     ],
 )
 def test_backtick_keyword_assign_rewrites_to_assign_sentinel(src: str):
-    from tidy3.masking import ASSIGN_NAME
+    from tidy3syntax import ASSIGN
 
     mid = rewrite_backtick_keyword_assigns(src)
-    assert ASSIGN_NAME in mid
+    assert ASSIGN in mid
     assert "`" not in mid
 
 

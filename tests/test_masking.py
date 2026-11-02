@@ -6,8 +6,8 @@ import ast
 
 import pytest
 
+from tidy3syntax import NAME as BT_NAME  # tidy3syntax's backtick placeholder
 from tidy3.masking import (
-    BT_NAME,
     COL_NAME,
     Tidy3MaskTransformer,
     apply_masking,
@@ -122,12 +122,14 @@ def test_transformer_is_idempotent_on_explicit_col():
 
 
 def test_mutate_backtick_new_column_name():
-    """R: mutate(`new hp` = hp * 1.1) → __tidy3_assign__('new hp', col('hp') * 1.1)."""
-    from tidy3.masking import ASSIGN_NAME, rewrite_backtick_keyword_assigns
+    """R: mutate(`new hp` = hp * 1.1) → __r_assign__('new hp', col('hp') * 1.1)."""
+    from tidy3syntax import ASSIGN
+
+    from tidy3.masking import rewrite_backtick_keyword_assigns
 
     raw = "mutate(`new hp` = hp * 1.1)"
     mid = rewrite_backtick_keyword_assigns(raw)
-    assert ASSIGN_NAME in mid and "new hp" in mid
+    assert ASSIGN in mid and "new hp" in mid
     out = _norm(raw)
     assert "new hp" in out
     assert f'{COL_NAME}("hp")' in out or f"{COL_NAME}('hp')" in out
@@ -136,7 +138,7 @@ def test_mutate_backtick_new_column_name():
 def test_mutate_backtick_new_column_end_to_end():
     from tidy3 import mutate, tidy
     from tidy3.expr import col
-    from tidy3.masking import ASSIGN_NAME, BT_NAME, COL_NAME, apply_masking, make_named_assign
+    from tidy3.masking import ASSIGN_NAME, COL_NAME, apply_masking, make_named_assign
 
     cars = tidy({"hp": [100, 200], "cyl": [4, 8]})
     src = apply_masking("(cars >> mutate(`new hp` = hp * 1.1))")
@@ -158,7 +160,7 @@ def test_mutate_backtick_assign_after_other_assignment():
     """A backtick assign after a keyword arg must stay valid Python."""
     from tidy3 import as_numeric, mutate, tidy
     from tidy3.expr import col
-    from tidy3.masking import ASSIGN_NAME, BT_NAME, COL_NAME, apply_masking, make_named_assign
+    from tidy3.masking import ASSIGN_NAME, COL_NAME, apply_masking, make_named_assign
 
     ns = {
         "mutate": mutate,
@@ -270,7 +272,7 @@ def test_new_tidyr_verbs_take_bare_columns():
 def _run_verb(call, **frames):
     import tidy3 as t
     from tidy3.expr import col
-    from tidy3.masking import ASSIGN_NAME, BT_NAME, COL_NAME, apply_masking, make_named_assign
+    from tidy3.masking import ASSIGN_NAME, COL_NAME, apply_masking, make_named_assign
 
     ns = {k: getattr(t, k) for k in dir(t) if not k.startswith("_")}
     ns.update({COL_NAME: col, BT_NAME: col, ASSIGN_NAME: make_named_assign, **frames})
@@ -316,10 +318,10 @@ def test_keyword_rewrite_leaves_valid_code_alone():
     ):
         assert rewrite_backticks(text) == text, text
     # A method call is rewritten like the verb, as `!` in one already is.
-    assert rewrite_backticks("df.select(a=NUM, b)") == "df.select(__tidy3_assign__('a', (NUM)), b)"
+    assert rewrite_backticks("df.select(a=NUM, b)") == "df.select(__r_assign__('a', (NUM)), b)"
     # Verb settings are never turned into columns.
     out = rewrite_backticks("select(by='g', Cus=NUM, Source_Row)")
-    assert "by='g'" in out and "__tidy3_assign__('Cus'" in out
+    assert "by='g'" in out and "__r_assign__('Cus'" in out
 
 
 def test_notebook_transformer_rewrites_keyword_before_positional():
@@ -328,7 +330,7 @@ def test_notebook_transformer_rewrites_keyword_before_positional():
     cell = ["df >> select(Cus=NUM,\n", "                Source_Row)\n"]
     out = "".join(tidy3_backtick_transform(cell))
     compile(out, "<cell>", "exec")
-    assert "__tidy3_assign__('Cus', (NUM))" in out
+    assert "__r_assign__('Cus', (NUM))" in out
     plain = ["x = 1\n", "y = dict(a=1, b=2)\n"]
     assert tidy3_backtick_transform(plain) == plain
 

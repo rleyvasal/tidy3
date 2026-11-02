@@ -164,7 +164,7 @@ def maybe_rewrite_cell(source: str) -> str | None:
 
     The rewrite is tidy3syntax's (tidy3's syntax, and plot3's ``+`` layers
     when plot3 is installed): each multi-line pipe is wrapped in parentheses
-    on the lines as typed, and backticks become ``__tidy3_bt__("hp new")``.
+    on the lines as typed, and backticks become ``__r_name__("hp new")``.
     """
     if not source or not source.strip():
         return None
@@ -174,10 +174,8 @@ def maybe_rewrite_cell(source: str) -> str | None:
     import tidy3syntax
     from tidy3syntax import continuation
 
-    from tidy3.masking import _tidy3_names
-
     dialects = _dialects()
-    out = _tidy3_names(continuation.join(tidy3syntax.repair(text, dialects), dialects))
+    out = continuation.join(tidy3syntax.repair(text, dialects), dialects)
     if out == text:
         return None
     try:
@@ -247,10 +245,12 @@ def partial_run(
     # Sentinel + col for R-style AST masking when eval'd outside full IPython.
     try:
         from tidy3.expr import col
-        from tidy3.masking import BT_NAME, COL_NAME, apply_masking, default_known_names
+        import tidy3syntax
+
+        from tidy3.masking import COL_NAME, apply_masking, default_known_names
 
         ns.setdefault(COL_NAME, col)
-        ns.setdefault(BT_NAME, col)
+        ns.setdefault(tidy3syntax.NAME, col)
         from tidy3.expr import name_ref
         from tidy3.masking import NAME_REF
 

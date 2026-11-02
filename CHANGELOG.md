@@ -4,6 +4,19 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- In notebooks, the backtick placeholder in a rewritten cell is
+  tidy3syntax's `__r_name__`, not `__tidy3_bt__`, and the assignment
+  placeholder `__r_assign__` (tidy3's AST pass renames it to
+  `__tidy3_assign__` inside tidy3's calls); `rewrite_backticks`,
+  `maybe_rewrite_cell` and the other rewrites return them. `nb_export` still
+  writes `col(...)` and defines `__tidy3_assign__`, so exported scripts are
+  unchanged. Requires tidy3syntax 0.2, whose placeholders the four packages
+  now share alone.
+
 ## 0.16.0 — 2026-11-01
 
 tidy3's notebook syntax registers with tidy3syntax's coordinator, shared with tidy3a, plot3 and stats3, and exports, partial runs and CRAFT cells rewrite through it too.

@@ -4,7 +4,7 @@ Two-phase design (SolveIt / IPython)::
 
 1. **Source preparser** turns backticks into a neutral sentinel::
 
-       `hp new`  →  __tidy3_bt__("hp new")
+       `hp new`  →  __r_name__("hp new")
 
 2. **AST transformer** resolves the sentinel (and bare names) by verb context::
 
@@ -27,13 +27,12 @@ from typing import Any, Iterable, Literal
 
 import tidy3syntax
 from tidy3syntax import repairs
-from tidy3syntax.scanner import Spans, apply
 
 # Sentinel / injected names (must match jupyter registration).
-BT_NAME = "__tidy3_bt__"
 COL_NAME = "__tidy3_col__"
-# Spaced / odd *new* column names in mutate/select/rename:
-#   `new hp` = expr  →  __tidy3_assign__("new hp", (expr))
+# Spaced / odd *new* column names in mutate/select/rename: the source pass writes
+# tidy3syntax's __r_assign__("new hp", (expr)), and the AST pass renames it to
+# this, tidy3's own name for NamedAssign, inside tidy3's calls.
 ASSIGN_NAME = "__tidy3_assign__"
 # A notebook variable that may also name a column: name_ref("x", x) picks the
 # column when the frame has one (dplyr's data mask), else the value.
@@ -253,7 +252,7 @@ def rewrite_backtick_keyword_assigns(source: str) -> str:
     Uses ``=`` only (not ``==`` / ``!=`` / ``<=`` / ``>=``). The rewrite is
     tidy3syntax's, shared with tidy3a, plot3 and stats3.
     """
-    return _tidy3_names(repairs.backtick_assignments(source))
+    return repairs.backtick_assignments(source)
 
 
 # Verbs whose call *arguments* may use R-style ``!`` as tidy3 negation.
@@ -351,24 +350,6 @@ def dialect() -> tidy3syntax.Dialect:
 
     return dataclasses.replace(DIALECT, mask=mask)
 
-_NEUTRAL = re.compile(r"\b(" + re.escape(tidy3syntax.NAME) + "|" + re.escape(tidy3syntax.ASSIGN) + r")(?=\s*\()")
-
-
-def _tidy3_names(source: str) -> str:
-    """tidy3syntax's neutral placeholders as tidy3's own: ``__r_name__`` → ``__tidy3_bt__``,
-    ``__r_assign__`` → ``__tidy3_assign__``, outside strings and comments.
-
-    Until plot3, stats3 and tidy3a all read the neutral names, tidy3 keeps
-    writing the names they read today, and ``nb_export`` keeps its output.
-    """
-    if tidy3syntax.NAME not in source and tidy3syntax.ASSIGN not in source:
-        return source
-    spans = Spans.of(source)
-    own = {tidy3syntax.NAME: BT_NAME, tidy3syntax.ASSIGN: ASSIGN_NAME}
-    edits = [(m.start(), m.end(), own[m.group(1)]) for m in _NEUTRAL.finditer(source) if m.start() in spans]
-    return apply(source, edits)
-
-
 def rewrite_keywords_before_positional(source: str) -> str:
     """Make ``select(Cus = NUM, Source_Row)`` valid Python, keeping its order.
 
@@ -385,7 +366,7 @@ def rewrite_keywords_before_positional(source: str) -> str:
     whose backtick assignments count as positional arguments. The rewrite is
     tidy3syntax's, shared with tidy3a, plot3 and stats3.
     """
-    return _tidy3_names(repairs.keywords_before_positional(source, [DIALECT]))
+    return repairs.keywords_before_positional(source, [DIALECT])
 
 
 _FORMULA_CALL_RE = re.compile(
@@ -425,24 +406,23 @@ def rewrite_backticks(source: str) -> str:
     """Preparse R-style tokens for Python (tidy3 contexts only for ``!``).
 
     1. ``!`` → ``~`` inside tidy3 verb args only (not shell ``!pip``, not ``!=``)
-    2. `` `new col` = expr `` → ``__tidy3_assign__("new col", (expr))``
+    2. `` `new col` = expr `` → ``__r_assign__("new col", (expr))``
     3. ``case_when(x > 1 ~ "a")`` → ``case_when((x > 1, "a"))``
        (``left ~ right`` rules; see :func:`rewrite_formula_rules`)
-    4. ``select(a = x, b)`` → ``select(__tidy3_assign__('a', (x)), b)``
+    4. ``select(a = x, b)`` → ``select(__r_assign__('a', (x)), b)``
        (a keyword before a positional argument, which Python rejects)
-    5. remaining `` `col` `` → ``__tidy3_bt__("col")``, outside strings
+    5. remaining `` `col` `` → ``__r_name__("col")``, outside strings
        and comments
 
     These are tidy3syntax's repairs, run with tidy3's dialect. They leave the
-    neutral placeholders ``__r_name__`` and ``__r_assign__``, which
-    :func:`_tidy3_names` turns back into tidy3's own: plot3, stats3 and
-    tidy3a read those today, and ``nb_export`` writes them into files.
+    placeholders ``__r_name__`` and ``__r_assign__`` that tidy3, tidy3a,
+    plot3 and stats3 share; tidy3's AST pass reads them in tidy3's calls.
 
     Prefer writing ``~`` for negation — it needs no preparser.
     """
     if repairs.is_shell_cell(source):
         return source
-    return _tidy3_names(tidy3syntax.repair(source, [DIALECT]))
+    return tidy3syntax.repair(source, [DIALECT])
 
 
 class NamedAssign:
@@ -517,7 +497,7 @@ def _is_bt_call(node: ast.AST) -> bool:
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id in (BT_NAME, tidy3syntax.NAME)
+        and node.func.id == tidy3syntax.NAME
         and len(node.args) == 1
         and isinstance(node.args[0], ast.Constant)
         and isinstance(node.args[0].value, str)
@@ -800,7 +780,7 @@ def bound_names(tree: ast.AST) -> set[str]:
 def default_known_names(extra: Iterable[str] | None = None) -> set[str]:
     """Names that must not be rewritten to columns (funcs, builtins, sentinels)."""
     known = set(dir(builtins))
-    known.update({BT_NAME, COL_NAME, NAME_REF, ASSIGN_NAME, API_NAME, "True", "False", "None"})
+    known.update({tidy3syntax.NAME, tidy3syntax.ASSIGN, COL_NAME, NAME_REF, ASSIGN_NAME, API_NAME, "True", "False", "None"})
     # tidy3 helpers commonly used bare in expressions
     try:
         import tidy3 as t3

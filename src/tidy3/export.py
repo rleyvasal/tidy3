@@ -214,12 +214,14 @@ def _publicize_sentinels(source: str) -> tuple[str, bool]:
     Returns ``(source, needs_assign_helper)`` when ``__tidy3_assign__`` remains
     (spaced *new* column names in mutate/select/rename).
     """
-    from tidy3.masking import ASSIGN_NAME, BT_NAME, COL_NAME
+    import tidy3syntax
+
+    from tidy3.masking import ASSIGN_NAME, COL_NAME
 
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return source, ASSIGN_NAME in source
+        return source, ASSIGN_NAME in source or tidy3syntax.ASSIGN in source
 
     needs_assign = False
 
@@ -227,9 +229,10 @@ def _publicize_sentinels(source: str) -> tuple[str, bool]:
         def visit_Call(self, node: ast.Call) -> ast.AST:
             self.generic_visit(node)
             if isinstance(node.func, ast.Name):
-                if node.func.id in {COL_NAME, BT_NAME}:
+                if node.func.id in {COL_NAME, tidy3syntax.NAME}:
                     node.func.id = "col"
-                elif node.func.id == ASSIGN_NAME:
+                elif node.func.id in {ASSIGN_NAME, tidy3syntax.ASSIGN}:
+                    node.func.id = ASSIGN_NAME
                     nonlocal needs_assign
                     needs_assign = True
             return node

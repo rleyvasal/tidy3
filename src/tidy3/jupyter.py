@@ -11,7 +11,7 @@ cell for the prefix, or ``%tidy3_run`` for a one-liner.
 
 R-style bare names / backticks (Jupyter only)
 ---------------------------------------------
-A source preparser turns `` `hp new` `` into ``__tidy3_bt__("hp new")``, then
+A source preparser turns `` `hp new` `` into ``__r_name__("hp new")``, then
 an AST transformer resolves bare names and sentinels by verb context::
 
     filter(mpg > 20)              # → filter(col("mpg") > 20)
@@ -41,7 +41,6 @@ import tidy3syntax.ipython
 
 from tidy3.masking import (
     ASSIGN_NAME,
-    BT_NAME,
     COL_NAME,
     DIALECT,
     Tidy3MaskTransformer,
@@ -273,8 +272,6 @@ def enable_r_style(ipython: Any | None = None) -> bool:
     ns = getattr(ipython, "user_ns", None)
     if ns is not None:
         ns[COL_NAME] = col
-        # Fallback if a sentinel escapes AST handling → treat as column expr.
-        ns[BT_NAME] = col
         # Runtime carrier for `new col` = expr → NamedAssign; the AST pass
         # renames tidy3syntax's __r_assign__ to this name in tidy3's calls.
         ns[ASSIGN_NAME] = make_named_assign
