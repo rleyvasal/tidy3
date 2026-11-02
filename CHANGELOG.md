@@ -4,7 +4,9 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.17.0 — 2026-11-02
+
+Only tidy3syntax's placeholders, and nb_export writes tidy3a's and stats3's syntax as public code.
 
 ### Changed
 
