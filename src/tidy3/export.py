@@ -93,22 +93,17 @@ def _parse_directives(source: str) -> tuple[set[str], dict[str, str], str]:
 
 def collect_known_names(sources: Iterable[str]) -> set[str]:
     """Names that must not become column refs (imports, assigns, defs)."""
-    from tidy3.masking import bound_names, default_known_names
+    import tidy3syntax
+
+    from tidy3.masking import bound_names, default_known_names, dialect
 
     known = default_known_names()
+    # Each cell as Python, its R syntax and multi-line pipes rewritten, so the
+    # names a cell of pipes assigns count too.
+    dialects = [dialect(), *(d for d in tidy3syntax.installed() if d.package != "tidy3")]
     for src in sources:
-        text = src
-        from tidy3.masking import has_formula_call
-
-        if "`" in text or has_formula_call(text):
-            from tidy3.masking import rewrite_backticks
-
-            try:
-                text = rewrite_backticks(text)
-            except Exception:
-                pass
         try:
-            tree = ast.parse(text)
+            tree = ast.parse(tidy3syntax.rewrite(src, dialects))
         except SyntaxError:
             continue
         known |= bound_names(tree)
@@ -248,6 +243,8 @@ def transform_source(
     known: set[str] | None = None,
     with_plot3: bool = True,
     publicize: bool = True,
+    context: Any = None,
+    imports: set[str] | None = None,
 ) -> str:
     """Rewrite R-style bare names / backticks / multi-line pipes to plain Python.
 
@@ -265,20 +262,30 @@ def transform_source(
     from tidy3.masking import default_known_names, dialect
 
     text = source
-
-    # The notebook's syntax as the coordinator rewrites it, for tidy3 and,
-    # when installed, plot3 (found through its tidy3syntax entry point), then
-    # each package's bare-name masking.
+    # The notebook's syntax as the coordinator rewrites it, then each
+    # package's masking as public code: tidy3's; plot3's when installed (as
+    # before); tidy3a's and stats3's when the notebook imports them. Each is
+    # found through its tidy3syntax entry point. *context* is the notebook's
+    # imports, which say whose call each one is; *imports* collects the lines
+    # the exported script needs for the masks that changed something.
+    installed = tidy3syntax.installed()
+    if context is None:
+        context = tidy3syntax.imported_names(source, dialects=installed)
+    imported = {str(module).split(".")[0] for module in context.values()}
     dialects = [dialect()]
-    if with_plot3:
-        dialects += [d for d in tidy3syntax.installed() if d.package == "plot3"]
-    text = tidy3syntax.rewrite(text, dialects)
+    for package in installed:
+        if package.package == "plot3" and with_plot3 or package.package in imported - {"tidy3", "plot3"}:
+            dialects.append(package)
+    text = tidy3syntax.rewrite(text, dialects, context)
     if text.endswith("\n") and not source.endswith("\n"):
         text = text[:-1]
     kn = frozenset(known if known is not None else default_known_names())
     for package in dialects:
         if package.mask is not None:
-            text = package.mask(text, kn)  # a SyntaxError reaches the caller, who may warn
+            masked = package.mask(text, kn, context)  # a SyntaxError reaches the caller, who may warn
+            if masked != text and imports is not None:
+                imports.update(package.export_imports)
+            text = masked
 
     if publicize:
         text, _needs_assign = _publicize_sentinels(text)
@@ -293,6 +300,8 @@ def transform_cell(
     cell_no: int = 0,
     warnings: list[str] | None = None,
     needs_assign_flag: list[bool] | None = None,
+    context: Any = None,
+    imports: set[str] | None = None,
 ) -> str | None:
     """Transform one notebook cell.
 
@@ -315,7 +324,7 @@ def transform_cell(
 
     try:
         text = transform_source(
-            body, known=known, with_plot3=with_plot3, publicize=False
+            body, known=known, with_plot3=with_plot3, publicize=False, context=context, imports=imports
         )
         text, needs_assign = _publicize_sentinels(text)
         if needs_assign and needs_assign_flag is not None:
@@ -348,6 +357,7 @@ def _header(
     *,
     only_export: bool,
     needs_assign: bool = False,
+    imports: Sequence[str] = (),
 ) -> str:
     src = nb_path.as_posix() if nb_path is not None else "<string>"
     mode = "only #| export cells" if only_export else "all code cells (except #| skip)"
@@ -358,6 +368,8 @@ def _header(
         "# Re-export from the notebook rather than hand-editing this file.",
         "",
     ]
+    if imports:
+        lines.extend(["# Packages the rewritten names call (tidy3a.col, polars.col, ...)", *imports, ""])
     if needs_assign:
         lines.extend(
             [
@@ -423,6 +435,11 @@ def nb_export(
     known = collect_known_names(raw_bodies)
     if known_extra:
         known.update(known_extra)
+    # The notebook's imports, in order: whose call each verb is, for every cell.
+    import tidy3syntax
+
+    context = tidy3syntax.imported_names(*raw_bodies, dialects=tidy3syntax.installed())
+    imports: set[str] = set()
 
     warnings: list[str] = []
     exported_parts: list[str] = []
@@ -447,6 +464,8 @@ def nb_export(
             cell_no=i,
             warnings=warnings,
             needs_assign_flag=needs_assign_flag,
+            context=context,
+            imports=imports,
         )
         if out is None or not out.strip():
             n_skipped += 1
@@ -461,7 +480,7 @@ def nb_export(
         n_exported += 1
 
     script = _header(
-        path, only_export=only_export, needs_assign=bool(needs_assign_flag)
+        path, only_export=only_export, needs_assign=bool(needs_assign_flag), imports=sorted(imports)
     )
     if exported_parts:
         script += "\n\n".join(p.rstrip() for p in exported_parts) + "\n"

@@ -266,3 +266,48 @@ def test_export_joins_plus_lines_of_a_ggplot():
     tree = ast.parse(out)
     assert len(tree.body) == 1 and isinstance(tree.body[0], ast.Assign)
     assert "'a'" in out or '"a"' in out
+
+
+def _notebook(path, cells):
+    import json
+
+    nb = {
+        "cells": [{"cell_type": "code", "source": c, "metadata": {}, "outputs": [], "execution_count": None} for c in cells],
+        "metadata": {}, "nbformat": 4, "nbformat_minor": 5,
+    }
+    path.write_text(json.dumps(nb), encoding="utf-8")
+    return path
+
+
+def test_nb_export_writes_tidy3a_cells_as_public_code(tmp_path):
+    pytest.importorskip("tidy3a")
+    from tidy3 import nb_export
+
+    nb = _notebook(tmp_path / "t.ipynb", [
+        "from tidy3a import *\nimport numpy as np",
+        "cloud = read_array(np.array([[1.0, 10], [2, 20], [3, 30]]), dims={'p': infer, 'f': 2},\n"
+        "                   labels={'f': ['a', 'b']}, field_axis='f')",
+        "limit = 1\nkept = cloud\n>> filter(!(a > 2), a > limit)\n>> mutate(`twice b` = b * 2)\n>> pull(`twice b`)",
+    ])
+    script = nb_export(nb, write=False)
+    assert "import tidy3a\n" in script and "tidy3a.col('a') > limit" in script
+    assert "tidy3a.assign('twice b'" in script and "__tidy3" not in script
+    ns: dict = {}
+    exec(script, ns)
+    assert ns["kept"].tolist() == [40.0]
+
+
+def test_nb_export_writes_stats3_cells_as_public_code(tmp_path):
+    pytest.importorskip("stats3")
+    from tidy3 import nb_export
+
+    nb = _notebook(tmp_path / "s.ipynb", [
+        "from stats3 import *\nimport polars as pl",
+        "pg = pl.DataFrame({'y': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 'g': ['a', 'a', 'a', 'b', 'b', 'b']})",
+        "r = pg >> t_test(y ~ g)\nb = pg >> binom_test(g == 'a')",
+    ])
+    script = nb_export(nb, write=False)
+    assert "import polars\n" in script and "t_test('y ~ g')" in script and "polars.col('g') == 'a'" in script
+    ns: dict = {}
+    exec(script, ns)
+    assert ns["r"].height == 1 and ns["b"].height == 1

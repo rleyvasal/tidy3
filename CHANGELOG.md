@@ -8,6 +8,14 @@ under **Changed**.
 
 ### Changed
 
+- `nb_export` writes tidy3a's and stats3's notebook syntax as public code
+  when the notebook imports them, found through their tidy3syntax entry
+  points: a tidy3a column becomes `tidy3a.col("a")`, a stats3 column
+  `polars.col("g")`, and the script imports `tidy3a` or `polars` for them.
+  tidy3's own masking leaves alone the verbs a notebook imports from another
+  package (tidy3a's `filter`), and a cell of multi-line pipes counts its
+  assignments as notebook variables.
+
 - In notebooks, the backtick placeholder in a rewritten cell is
   tidy3syntax's `__r_name__`, not `__tidy3_bt__`, and the assignment
   placeholder `__r_assign__` (tidy3's AST pass renames it to

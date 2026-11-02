@@ -345,8 +345,8 @@ def dialect() -> tidy3syntax.Dialect:
     """tidy3's dialect for tidy3syntax (its ``tidy3syntax.dialects`` entry point): the
     notebook loader, and tidy3's bare-name masking for exports."""
 
-    def mask(source: str, known: frozenset[str]) -> str:
-        return apply_masking(source, known=set(known), backticks=True)
+    def mask(source: str, known: frozenset[str], context: Any = None) -> str:
+        return apply_masking(source, known=set(known), backticks=True, modules=context)
 
     return dataclasses.replace(DIALECT, mask=mask)
 
@@ -940,8 +940,11 @@ def _cell_import_sources(node: ast.Module) -> dict[str, list[tuple[tuple[int, in
 class Tidy3MaskTransformer(ast.NodeTransformer):
     """Top-level AST pass: choose expr vs selector masking per verb."""
 
-    def __init__(self, known: set[str] | None = None):
+    def __init__(self, known: set[str] | None = None, modules: Any = None):
         self._known_static = known
+        # For an export: the module each name the notebook imports comes from
+        # (tidy3syntax's imported_names), so another package's verbs are left alone.
+        self._modules = modules
         self._soft: set[str] = set()
         self._variables: dict[str, Any] = {}
         self._cell_names: set[str] = set()
@@ -959,7 +962,8 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
         runs before the cell does.
         """
         if self._known_static is not None:
-            return True
+            module = None if self._modules is None else self._modules.get(verb)
+            return module is None or str(module).split(".")[0] == "tidy3"
         position = (call.lineno, call.col_offset)
         for bound_at, package in reversed(self._cell_imports.get(verb, [])):
             if bound_at <= position:
@@ -1196,11 +1200,16 @@ def apply_masking(
     *,
     known: set[str] | None = None,
     backticks: bool = True,
+    modules: Any = None,
 ) -> str:
-    """Apply backtick rewrite + AST masking; return unparsed source (for tests)."""
+    """Apply backtick rewrite + AST masking; return unparsed source (for tests and exports).
+
+    *modules* maps the names a notebook imports to their modules; a verb
+    imported from another package (tidy3a's ``filter``) is left alone.
+    """
     text = rewrite_backticks(source) if backticks else source
     tree = ast.parse(text)
-    tree = Tidy3MaskTransformer(known=known or default_known_names()).visit(tree)
+    tree = Tidy3MaskTransformer(known=known or default_known_names(), modules=modules).visit(tree)
     ast.fix_missing_locations(tree)
     return ast.unparse(tree)
 
