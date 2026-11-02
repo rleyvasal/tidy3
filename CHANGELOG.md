@@ -4,6 +4,21 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- In a notebook, tidy3's syntax (multi-line `>>` pipes, `!`, keywords before
+  positional arguments, `left ~ right` rules, backtick names) goes through
+  tidy3syntax's coordinator (`tidy3syntax>=0.1.2`), one input transformer
+  shared with tidy3a, plot3 and stats3, which keeps itself ahead of CRAFT's
+  router before each cell, so tidy3's own `pre_run_cell` hook is gone and the
+  packages' load order no longer matters. tidy3 declares a
+  `tidy3syntax.dialects` entry point. A cell that imports plot3 gets plot3's
+  masking from plot3's own entry point, not from a hook in tidy3.
+- A `+` line after a pipe joins it only when the pipe ends in a plot3 call
+  (`df >> ggplot(...)` then `+ geom_point()`), not after any pipe.
+
 ## 0.15.1 — 2026-11-01
 
 ### Changed

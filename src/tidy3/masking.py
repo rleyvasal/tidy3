@@ -336,6 +336,7 @@ DIALECT = tidy3syntax.Dialect(
     settings=_CONTROL_KW,
     rule_calls=_FORMULA_FUNCTIONS,
     rule_after_column=_FORMULA_AFTER_COLUMN,
+    pipe_operators={">>"},  # tidy(df) then ">> filter(...)" on the next line
 )
 
 _NEUTRAL = re.compile(r"\b(" + re.escape(tidy3syntax.NAME) + "|" + re.escape(tidy3syntax.ASSIGN) + r")(?=\s*\()")
@@ -944,51 +945,6 @@ def _cell_import_sources(node: ast.Module) -> dict[str, list[tuple[tuple[int, in
     return sources
 
 
-def _imports_plot3(node: ast.Module) -> bool:
-    for statement in ast.walk(node):
-        if isinstance(statement, ast.ImportFrom) and statement.module:
-            if statement.module.split(".")[0] == "plot3":
-                return True
-        elif isinstance(statement, ast.Import):
-            if any(alias.name.split(".")[0] == "plot3" for alias in statement.names):
-                return True
-    return False
-
-
-def _plot3_masking_for_importing_cell(node: ast.Module) -> ast.Module:
-    """Give a cell that imports plot3 plot3's ``aes`` bare-name masking.
-
-    plot3 turns its masking on when it is imported, which is too late for
-    the cell doing the import: ``from plot3 import *`` followed by
-    ``aes(x=wt)`` in one cell would read ``wt`` as a Python name. Apply
-    plot3's pass to that cell here, and turn plot3 on for later cells once
-    the cell has run (plot3 may have been imported before IPython started).
-    """
-    try:
-        from IPython import get_ipython
-
-        ip = get_ipython()
-    except Exception:
-        return node
-    if ip is None or not _imports_plot3(node):
-        return node
-    active = getattr(ip, "ast_transformers", []) or []
-    if any(type(t).__name__ == "Plot3MaskTransformer" for t in active):
-        return node
-    try:
-        from plot3.masking import Plot3MaskTransformer
-        from plot3.jupyter import enable_r_style
-    except ImportError:
-        return node
-
-    def turn_on(*_: Any) -> None:
-        ip.events.unregister("post_run_cell", turn_on)
-        enable_r_style(ip)
-
-    ip.events.register("post_run_cell", turn_on)
-    return Plot3MaskTransformer().visit(node)
-
-
 class Tidy3MaskTransformer(ast.NodeTransformer):
     """Top-level AST pass: choose expr vs selector masking per verb."""
 
@@ -1107,8 +1063,9 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
             self._variables = {
                 k: v for k, v in self._variables.items() if k not in self._cell_names
             }
-        node = self.generic_visit(node)
-        return _plot3_masking_for_importing_cell(node)
+        # A cell importing plot3 gets plot3's masking from tidy3syntax's
+        # coordinator, through plot3's entry point.
+        return self.generic_visit(node)
 
     def _mask_keyword(self, kw: ast.keyword, *, default: Mode) -> ast.keyword:
         """Apply masking rules for a single keyword by name."""
@@ -1135,6 +1092,9 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
         """Mask ``__tidy3_assign__("name", expr)`` value; leave name string."""
         if _is_assign_call(node):
             assert isinstance(node, ast.Call)
+            # tidy3syntax's __r_assign__ is tidy3's NamedAssign inside tidy3's calls; the shared
+            # name's value in the namespace belongs to no package.
+            node.func.id = ASSIGN_NAME
             node.args = [
                 node.args[0],
                 self._mask(node.args[1], value_mode),

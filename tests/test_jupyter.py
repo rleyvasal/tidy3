@@ -81,51 +81,21 @@ def test_pipe_transform_registration_replaces_stale_module_copy():
     from tidy3.jupyter import _R_STYLE_ON
     from tidy3.masking import tidy3_backtick_transform
 
-    # Default R-style on: backticks then pipe rewriter at front.
+    # A stale tidy3 transformer from an earlier copy of the module is removed;
+    # tidy3's syntax runs in tidy3syntax's coordinator, put first.
     import tidy3.jupyter as jmod
+    import tidy3syntax.ipython
 
     jmod._R_STYLE_ON = True
     assert enable_pipe_transform(ipython)
-    assert ipython.input_transformers_cleanup == [
-        tidy3_backtick_transform,
-        tidy3_input_transformer,
-        unrelated,
-    ]
-    assert ipython.input_transformers_post == [
-        tidy3_backtick_transform,
-        tidy3_input_transformer,
-    ]
+    coordinator, *rest = ipython.input_transformers_cleanup
+    assert getattr(coordinator, "tidy3syntax", False) and rest == [unrelated]
+    assert ipython.input_transformers_post == []
+    assert "tidy3" in tidy3syntax.ipython.registered(ipython)
 
     disable_pipe_transform(ipython)
     assert ipython.input_transformers_cleanup == [unrelated]
-    assert ipython.input_transformers_post == []
-
-def test_aes_bare_names_work_in_the_cell_that_imports_plot3():
-    pytest = __import__("pytest")
-    pytest.importorskip("IPython")
-    pytest.importorskip("plot3")
-    from IPython.core.interactiveshell import InteractiveShell
-
-    InteractiveShell.clear_instance()
-    shell = InteractiveShell.instance()
-    try:
-        shell.run_line_magic("load_ext", "tidy3.jupyter")
-        shell.run_cell('cars = tidy({"mpg": [21.0, 22.8], "wt": [2.62, 2.32]})')
-        first = shell.run_cell(
-            "from plot3 import aes, geom_point, ggplot\n"
-            "p = ggplot(cars, aes(x=wt, y=mpg)) + geom_point()"
-        )
-        later = shell.run_cell("q = ggplot(cars, aes(x=wt, y=mpg)) + geom_point()")
-
-        assert first.success and later.success
-        maskers = [
-            t for t in shell.ast_transformers
-            if type(t).__name__ == "Plot3MaskTransformer"
-        ]
-        assert len(maskers) == 1
-    finally:
-        shell.run_line_magic("unload_ext", "tidy3.jupyter")
-        InteractiveShell.clear_instance()
+    assert tidy3syntax.ipython.registered(ipython) == ()
 
 
 def test_multiline_pipe_inside_a_function_runs_in_ipython():
