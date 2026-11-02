@@ -4,6 +4,14 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.17.1 — 2026-11-02
+
+### Fixed
+
+- tidy3 requires plot3 0.10 or later, the release that shares tidy3syntax 0.2
+  with it. 0.17.0 allowed plot3 0.9, which needs tidy3syntax below 0.2, so an
+  installer that could not see plot3 0.10 yet found no versions that fit.
+
 ## 0.17.0 — 2026-11-02
 
 Only tidy3syntax's placeholders, and nb_export writes tidy3a's and stats3's syntax as public code.
