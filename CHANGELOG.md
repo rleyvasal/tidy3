@@ -4,7 +4,9 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.16.0 — 2026-11-01
+
+tidy3's notebook syntax registers with tidy3syntax's coordinator, shared with tidy3a, plot3 and stats3, and exports, partial runs and CRAFT cells rewrite through it too.
 
 ### Changed
 
