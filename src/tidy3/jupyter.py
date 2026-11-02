@@ -49,7 +49,6 @@ from tidy3.masking import (
     is_mask_transformer,
     has_formula_call,
     make_named_assign,
-    tidy3_backtick_transform,
 )
 
 _TRANSFORMER: Callable[[list[str]], list[str]] | None = None

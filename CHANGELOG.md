@@ -18,6 +18,11 @@ under **Changed**.
   masking from plot3's own entry point, not from a hook in tidy3.
 - A `+` line after a pipe joins it only when the pipe ends in a plot3 call
   (`df >> ggplot(...)` then `+ geom_point()`), not after any pipe.
+- `nb_export`, partial runs (`%%tidy3_run`) and CRAFT's remote cells rewrite
+  through tidy3syntax too, with plot3's syntax and masking when plot3 is
+  installed, found through its `tidy3syntax.dialects` entry point: tidy3's
+  own copy of the pipe joining is gone, and `export.py` no longer imports
+  plot3. `maybe_rewrite_cell` and `join_broken_pipe` keep their behaviour.
 
 ## 0.15.1 — 2026-11-01
 

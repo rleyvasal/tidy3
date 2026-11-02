@@ -18,6 +18,7 @@ Plain ``.py`` files are unchanged — use ``col("x")`` / strings there.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import builtins
 import importlib
 import re
@@ -337,7 +338,18 @@ DIALECT = tidy3syntax.Dialect(
     rule_calls=_FORMULA_FUNCTIONS,
     rule_after_column=_FORMULA_AFTER_COLUMN,
     pipe_operators={">>"},  # tidy(df) then ">> filter(...)" on the next line
+    extension="tidy3.jupyter:load_ipython_extension",
 )
+
+
+def dialect() -> tidy3syntax.Dialect:
+    """tidy3's dialect for tidy3syntax (its ``tidy3syntax.dialects`` entry point): the
+    notebook loader, and tidy3's bare-name masking for exports."""
+
+    def mask(source: str, known: frozenset[str]) -> str:
+        return apply_masking(source, known=set(known), backticks=True)
+
+    return dataclasses.replace(DIALECT, mask=mask)
 
 _NEUTRAL = re.compile(r"\b(" + re.escape(tidy3syntax.NAME) + "|" + re.escape(tidy3syntax.ASSIGN) + r")(?=\s*\()")
 

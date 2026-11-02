@@ -257,50 +257,25 @@ def transform_source(
     if not source or not source.strip():
         return source
 
+    import tidy3syntax
+
+    from tidy3.masking import default_known_names, dialect
+
     text = source
-    # Multi-line >> pipe wrapping + backtick preparser
-    from tidy3.partial_run import maybe_rewrite_cell
 
-    rewritten = maybe_rewrite_cell(text)
-    if rewritten is not None:
-        text = rewritten
-        if text.endswith("\n"):
-            text = text[:-1]
-
+    # The notebook's syntax as the coordinator rewrites it, for tidy3 and,
+    # when installed, plot3 (found through its tidy3syntax entry point), then
+    # each package's bare-name masking.
+    dialects = [dialect()]
     if with_plot3:
-        # ggplot(...) then "+ geom_point()" lines, as plot3's notebook
-        # support joins them (plot3 0.6.6 and newer).
-        try:
-            from plot3.masking import join_layer_lines
-
-            joined = join_layer_lines(text)
-            if joined is not None:
-                text = joined
-        except ImportError:
-            pass
-
-    from tidy3.masking import apply_masking, default_known_names
-
-    kn = set(known) if known is not None else default_known_names()
-    try:
-        text = apply_masking(text, known=kn, backticks=True)
-    except SyntaxError:
-        # Leave as-is; caller may warn
-        raise
-
-    if with_plot3:
-        try:
-            from plot3.masking import (
-                apply_masking as plot3_apply_masking,
-                default_known_names as plot3_known,
-            )
-
-            kn2 = kn | plot3_known()
-            text = plot3_apply_masking(text, known=kn2, backticks=False)
-        except ImportError:
-            pass
-        except SyntaxError:
-            raise
+        dialects += [d for d in tidy3syntax.installed() if d.package == "plot3"]
+    text = tidy3syntax.rewrite(text, dialects)
+    if text.endswith("\n") and not source.endswith("\n"):
+        text = text[:-1]
+    kn = frozenset(known if known is not None else default_known_names())
+    for package in dialects:
+        if package.mask is not None:
+            text = package.mask(text, kn)  # a SyntaxError reaches the caller, who may warn
 
     if publicize:
         text, _needs_assign = _publicize_sentinels(text)
