@@ -24,9 +24,9 @@ import re
 from types import ModuleType
 from typing import Any, Iterable, Literal
 
-import tidysyntax
-from tidysyntax import repairs
-from tidysyntax.scanner import Spans, apply
+import tidy3syntax
+from tidy3syntax import repairs
+from tidy3syntax.scanner import Spans, apply
 
 # Sentinel / injected names (must match jupyter registration).
 BT_NAME = "__tidy3_bt__"
@@ -250,7 +250,7 @@ def rewrite_backtick_keyword_assigns(source: str) -> str:
 
     Runtime :class:`NamedAssign` objects are expanded inside mutate/select/rename.
     Uses ``=`` only (not ``==`` / ``!=`` / ``<=`` / ``>=``). The rewrite is
-    tidysyntax's, shared with tidy3a, plot3 and stats3.
+    tidy3syntax's, shared with tidy3a, plot3 and stats3.
     """
     return _tidy3_names(repairs.backtick_assignments(source))
 
@@ -310,7 +310,7 @@ def rewrite_bang_not(source: str) -> str:
 
     A ``!`` that starts a line inside a tidy3 call is negation. ``!=`` and
     string / comment contents are never rewritten. The rewrite is
-    tidysyntax's, shared with tidy3a, plot3 and stats3.
+    tidy3syntax's, shared with tidy3a, plot3 and stats3.
 
     :class:`~tidy3.expr.Expr` and :class:`~tidy3.tidyselect.Selector` both
     implement ``__invert__`` (used by ``~`` / rewritten ``!``).
@@ -329,7 +329,7 @@ _CONTROL_KW = frozenset(
 )
 
 # tidy3's part of the notebook syntax tidy3, tidy3a, plot3 and stats3 share.
-DIALECT = tidysyntax.Dialect(
+DIALECT = tidy3syntax.Dialect(
     "tidy3",
     negation_calls=_TIDY3_BANG_VERBS,
     ordered_calls=_NAMED_ASSIGN_VERBS,
@@ -338,20 +338,20 @@ DIALECT = tidysyntax.Dialect(
     rule_after_column=_FORMULA_AFTER_COLUMN,
 )
 
-_NEUTRAL = re.compile(r"\b(" + re.escape(tidysyntax.NAME) + "|" + re.escape(tidysyntax.ASSIGN) + r")(?=\s*\()")
+_NEUTRAL = re.compile(r"\b(" + re.escape(tidy3syntax.NAME) + "|" + re.escape(tidy3syntax.ASSIGN) + r")(?=\s*\()")
 
 
 def _tidy3_names(source: str) -> str:
-    """tidysyntax's neutral placeholders as tidy3's own: ``__r_name__`` → ``__tidy3_bt__``,
+    """tidy3syntax's neutral placeholders as tidy3's own: ``__r_name__`` → ``__tidy3_bt__``,
     ``__r_assign__`` → ``__tidy3_assign__``, outside strings and comments.
 
     Until plot3, stats3 and tidy3a all read the neutral names, tidy3 keeps
     writing the names they read today, and ``nb_export`` keeps its output.
     """
-    if tidysyntax.NAME not in source and tidysyntax.ASSIGN not in source:
+    if tidy3syntax.NAME not in source and tidy3syntax.ASSIGN not in source:
         return source
     spans = Spans.of(source)
-    own = {tidysyntax.NAME: BT_NAME, tidysyntax.ASSIGN: ASSIGN_NAME}
+    own = {tidy3syntax.NAME: BT_NAME, tidy3syntax.ASSIGN: ASSIGN_NAME}
     edits = [(m.start(), m.end(), own[m.group(1)]) for m in _NEUTRAL.finditer(source) if m.start() in spans]
     return apply(source, edits)
 
@@ -370,7 +370,7 @@ def rewrite_keywords_before_positional(source: str) -> str:
     verb settings such as ``by=`` are left alone. Code that was already valid
     Python is not changed. Run after :func:`rewrite_backtick_keyword_assigns`,
     whose backtick assignments count as positional arguments. The rewrite is
-    tidysyntax's, shared with tidy3a, plot3 and stats3.
+    tidy3syntax's, shared with tidy3a, plot3 and stats3.
     """
     return _tidy3_names(repairs.keywords_before_positional(source, [DIALECT]))
 
@@ -401,7 +401,7 @@ def rewrite_formula_rules(source: str) -> str:
     ``~`` inside strings, backtick names, brackets, or ``default=``-style
     keyword arguments is left alone. Tuples keep working beside formulas.
     Raises :class:`SyntaxError` for a rule that is not exactly ``left ~ right``.
-    The rewrite is tidysyntax's, shared with tidy3a, plot3 and stats3.
+    The rewrite is tidy3syntax's, shared with tidy3a, plot3 and stats3.
     """
     if not has_formula_call(source):
         return source
@@ -420,7 +420,7 @@ def rewrite_backticks(source: str) -> str:
     5. remaining `` `col` `` → ``__tidy3_bt__("col")``, outside strings
        and comments
 
-    These are tidysyntax's repairs, run with tidy3's dialect. They leave the
+    These are tidy3syntax's repairs, run with tidy3's dialect. They leave the
     neutral placeholders ``__r_name__`` and ``__r_assign__``, which
     :func:`_tidy3_names` turns back into tidy3's own: plot3, stats3 and
     tidy3a read those today, and ``nb_export`` writes them into files.
@@ -429,7 +429,7 @@ def rewrite_backticks(source: str) -> str:
     """
     if repairs.is_shell_cell(source):
         return source
-    return _tidy3_names(tidysyntax.repair(source, [DIALECT]))
+    return _tidy3_names(tidy3syntax.repair(source, [DIALECT]))
 
 
 class NamedAssign:
@@ -454,7 +454,7 @@ def _is_assign_call(node: ast.AST) -> bool:
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id in (ASSIGN_NAME, tidysyntax.ASSIGN)
+        and node.func.id in (ASSIGN_NAME, tidy3syntax.ASSIGN)
         and len(node.args) >= 2
         and isinstance(node.args[0], ast.Constant)
         and isinstance(node.args[0].value, str)
@@ -504,7 +504,7 @@ def _is_bt_call(node: ast.AST) -> bool:
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id in (BT_NAME, tidysyntax.NAME)
+        and node.func.id in (BT_NAME, tidy3syntax.NAME)
         and len(node.args) == 1
         and isinstance(node.args[0], ast.Constant)
         and isinstance(node.args[0].value, str)
