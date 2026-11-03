@@ -35,7 +35,7 @@ dependencies = [
   # Standard library only.
   "tidy3syntax>=0.2,<0.3",
   # The paged notebook table tidy3a and stats3 share. Polars only.
-  "table3>=0.1,<0.2",
+  "table3>=0.3,<0.4",
 ]
 
 [project.optional-dependencies]
