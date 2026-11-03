@@ -1,5 +1,6 @@
 """A frame in a notebook prints as a paged table, as R notebooks print a data frame."""
 
+import json
 import re
 
 import polars as pl
@@ -24,24 +25,31 @@ def opts():
 
 
 def _body_rows(html: str) -> int:
-    return html.split("<tbody>")[1].count("<tr")
+    """Rows written as cells: the first page."""
+    return html.split("<tbody>")[1].split("</tbody>")[0].count("<tr")
+
+
+def _all_rows(html: str) -> int:
+    """Every row the table pages through: the JSON its script draws, or the cells."""
+    block = re.search(r"<script type='application/json'>(.*?)</script>", html, re.S)
+    return len(json.loads(block.group(1))) if block else _body_rows(html)
 
 
 def test_every_distinct_row_ten_a_page(islands):
     html = (islands >> distinct())._repr_html_()
-    assert _body_rows(html) == 29
+    assert _body_rows(html) == 10 and _all_rows(html) == 29
     assert "island 28" in html
     assert "data-page-size='10'" in html and "data-label='29 rows'" in html
     assert ">TidyFrame (preview)<" in html
-    assert html.count("<script>") == 1  # pages in place; a scroll box without scripts
+    assert html.count("<script>") == 1  # pages in place; the first page without scripts
 
 
 def test_preview_max_caps_the_rows(islands, opts):
     html = islands._repr_html_()
-    assert _body_rows(html) == 87  # under the default 100
+    assert _all_rows(html) == 87  # under the default 100
     opts(preview_max=20, preview_rows=5)
     html = islands._repr_html_()
-    assert _body_rows(html) == 20
+    assert _body_rows(html) == 5 and _all_rows(html) == 20
     assert "data-page-size='5'" in html
     assert "data-label='20 rows (first 20 of 87)'" in html
     assert "shape: (87, 1)" in html
@@ -49,7 +57,7 @@ def test_preview_max_caps_the_rows(islands, opts):
 
 def test_preview_max_below_a_page_still_fills_the_page(islands, opts):
     opts(preview_max=3, preview_rows=10)
-    assert _body_rows(islands._repr_html_()) == 10
+    assert _all_rows(islands._repr_html_()) == 10
 
 
 def test_preview_digits(opts):

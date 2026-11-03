@@ -236,12 +236,13 @@ options(preview_digits="full")              # every stored digit
 
 Floats print as in the text preview, up to six decimal places, which shows
 `0.000123456789` as `0.000123`; `preview_digits=4` keeps four significant
-digits instead (`0.0001235`, as R's `signif()`). Every row the table holds
-is saved with the notebook, about 100 KB for 100 rows of a dozen columns,
-so raise `preview_max` for the cells that need it. Paging needs the notebook
-to run output scripts; where it doesn't (an untrusted Jupyter notebook), the
-same rows show in one box that scrolls. The table follows the notebook's
-light or dark theme in VS Code, JupyterLab and SolveIt.
+digits instead (`0.0001235`, as R's `signif()`). The table writes its first
+page as cells and the other rows as compact JSON its script draws, about
+25 KB for 100 rows of a dozen columns, which matters in SolveIt, where a
+cell's output goes to the AI; raise `preview_max` for the cells that need
+more rows. Paging needs the notebook to run output scripts; where it
+doesn't (an untrusted Jupyter notebook), the first page shows. The table
+follows the notebook's light or dark theme in VS Code, JupyterLab and SolveIt.
 
 ### Explore: `view()`
 

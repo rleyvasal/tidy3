@@ -15,6 +15,14 @@ under **Changed**.
   session. Printed tables are not hidden. Requires table3 0.5, whose
   explorer headers also show that they sort before the first click.
 
+### Changed
+
+- A printed frame's notebook table is about a quarter of its size (table3
+  0.5): its first page as cells, the other rows as compact JSON its script
+  draws. A printed 8-column frame of 100 rows is 23 KB instead of 86 KB,
+  which matters in SolveIt, where a cell's output goes to the AI. Paging is
+  the same; without scripts the first page shows.
+
 ## 0.19.0 — 2026-11-03
 
 ### Added
