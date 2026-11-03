@@ -1618,6 +1618,57 @@ def glimpse(data: Any = None, n: int = 10) -> Any:
 
     return Verb(_apply, "glimpse")
 
+
+def view(
+    data: Any = None,
+    *,
+    n: int = 10_000,
+    height: int = 500,
+    digits: int | str | None = None,
+) -> Any:
+    """Open a data explorer over the first *n* rows and pass the frame through.
+
+    As R's ``View()``: one grid to scroll, a search box, headers that sort
+    on a click, and a filter under each column (from-to for numbers and
+    dates, "contains" for text, a pick-list for columns of few values).
+    Called on a frame (``view(penguins)``) it opens the explorer and returns
+    the frame; piped (``penguins >> view()``) it does the same mid-pipe. A
+    Series, as from ``pull()``, shows as one column. The rows go into the
+    notebook's output, so the explorer works in a saved notebook (about 1 MB
+    for 10,000 rows of a dozen columns). *height* is the grid's height in
+    pixels; ``digits=6`` prints floats to six significant digits and
+    ``digits="full"`` every stored digit. Outside a notebook it prints the
+    first rows. The explorer comes from table3.
+    """
+
+    def _positive(v: Any) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+    if isinstance(data, int) and not isinstance(data, bool):
+        raise TypeError("view() takes n=, height= and digits= by keyword")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+        raise ValueError("view() n must be a non-negative integer")
+    if not _positive(height):
+        raise ValueError("view() height must be a positive integer")
+    if digits is not None and digits != "full" and not _positive(digits):
+        raise ValueError('view() digits must be a positive integer, "full", or None')
+    if data is not None:
+        from tidy3.frame import TidyFrame, tidy
+
+        if isinstance(data, pl.Series):
+            data = data.to_frame()
+        frame = data if isinstance(data, TidyFrame) else tidy(data)
+        return frame >> view(n=n, height=height, digits=digits)
+
+    def _apply(tf):
+        import table3
+
+        caption = tf._caption().replace("(preview", "(view", 1)
+        table3.view(tf, n=n, height=height, digits=digits, caption=caption)
+        return tf
+
+    return Verb(_apply, "view")
+
 def arrange(*keys: Any, by_group: bool = False) -> Verb:
     """Order rows. Keys may reference columns dropped by a prior ``select()``."""
     if not keys:

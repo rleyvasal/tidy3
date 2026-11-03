@@ -4,6 +4,19 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.19.0 — unreleased
+
+### Added
+
+- `view()` opens a data explorer, as R's `View()`: one grid of up to 10,000
+  rows with row numbers, a search box, headers that sort on a click, and a
+  filter under each column (from–to for numbers and dates, "contains" for
+  text, a pick-list for booleans and columns of at most 50 values).
+  `penguins >> view()`, `view(penguins)` and `penguins.view()` open it and
+  pass the frame on, like `glimpse()`; `n=`, `height=` and `digits=` as in
+  table3. It runs in the notebook's browser, so it works in saved
+  notebooks. It comes from table3 0.4, which tidy3 now requires.
+
 ## 0.18.0 — 2026-11-02
 
 ### Changed

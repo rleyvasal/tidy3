@@ -662,6 +662,7 @@ REASONS = {
     "today": "reads the clock when called",
     "now": "reads the clock when called",
     "glimpse": "prints a preview and returns the frame",
+    "view": "opens a data explorer and returns the frame",
     "peek": "prints a preview and returns the frame",
     "str_view": "prints match highlights",
     "nb_export": "rewrites a notebook; not a frame query",

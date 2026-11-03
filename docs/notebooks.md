@@ -243,6 +243,31 @@ to run output scripts; where it doesn't (an untrusted Jupyter notebook), the
 same rows show in one box that scrolls. The table follows the notebook's
 light or dark theme in VS Code, JupyterLab and SolveIt.
 
+### Explore: `view()`
+
+`view()` opens a data explorer, as R's `View()` does: one grid of up to
+10,000 rows to scroll, with row numbers, a search box, headers that sort on a
+click (ascending, descending, off), and a filter under each column:
+
+```python
+cars >> view()                           # or view(cars), or cars.view()
+cars >> filter(mpg > 20) >> view() >> count("cyl")   # it passes the frame on
+cars >> view(n=50_000, height=700)       # more rows, a taller grid
+cars >> view(digits=4)                   # floats to four significant digits
+```
+
+| Column | Filter |
+|---|---|
+| numbers, dates | from and to, either blank; `2008` matches a whole year |
+| text | contains, ignoring case |
+| booleans, and text with at most 50 values | a pick-list, `null` included |
+
+The status line counts the rows that pass ("42 of 344 rows | 8 columns") and
+says when `n` cut the rows. The rows go into the notebook's output, so the
+explorer still works when the notebook is reopened, about 1 MB for 10,000
+rows of a dozen columns. It needs the notebook to run output scripts, as
+paging does; where it doesn't, the first 100 rows show as a plain table.
+
 ### R-style bare names & backticks
 
 Once the rewriting is on (an earlier cell imported tidy3 or ran
