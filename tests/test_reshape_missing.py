@@ -5,6 +5,7 @@ import polars as pl
 import pytest
 
 from tidy3 import (
+    build_longer_spec,
     complete,
     drop_na,
     expand,
@@ -136,6 +137,72 @@ def test_pivot_longer_splits_names_into_multiple_columns():
         "period": ["day", "day"],
         "reading": [20, 3],
     }
+
+
+def test_pivot_longer_names_pattern_with_one_names_to_column():
+    # tidyr applies names_pattern even when names_to names one column.
+    frame = tidy({"id": [1, 2], "wk1": [10, 20], "wk2": [30, 40]})
+    verb = pivot_longer(
+        starts_with("wk"), names_to="week", names_pattern=r"wk(\d)"
+    )
+    expected = {
+        "id": [1, 1, 2, 2],
+        "week": ["1", "2", "1", "2"],
+        "value": [10, 30, 20, 40],
+    }
+
+    # The same verb gives the same result each time it runs.
+    assert as_pandas(frame >> verb).to_dict(orient="list") == expected
+    assert as_pandas(frame >> verb).to_dict(orient="list") == expected
+
+
+def test_pivot_longer_names_pattern_with_two_names_to_columns():
+    frame = tidy({"id": [1], "temp_day": [20], "rain_night": [3]})
+    out = as_pandas(
+        frame
+        >> pivot_longer(
+            ["temp_day", "rain_night"],
+            names_to=["measure", "period"],
+            names_pattern=r"(\w+)_(\w+)",
+        )
+    )
+    assert out.to_dict(orient="list") == {
+        "id": [1, 1],
+        "measure": ["temp", "rain"],
+        "period": ["day", "night"],
+        "value": [20, 3],
+    }
+
+
+def test_pivot_longer_names_pattern_unmatched_names_are_missing():
+    frame = tidy({"id": [1], "wk1": [10], "total": [99]})
+    out = as_pandas(
+        frame
+        >> pivot_longer(
+            ["wk1", "total"], names_to="week", names_pattern=r"wk(\d)"
+        )
+    )
+    assert out["week"].iloc[0] == "1"
+    assert pd.isna(out["week"].iloc[1])
+    assert out["value"].tolist() == [10, 99]
+
+
+def test_pivot_longer_names_pattern_group_count_must_match_names_to():
+    with pytest.raises(ValueError, match="1 capture group"):
+        pivot_longer("x", names_to="week", names_pattern=r"(w)(\d)")
+    with pytest.raises(ValueError, match="2 capture group"):
+        pivot_longer("x", names_to=["a", "b"], names_pattern=r"w(\d)")
+    frame = tidy({"wk1": [1]})
+    with pytest.raises(ValueError, match="1 capture group"):
+        build_longer_spec(frame, "wk1", names_to="week", names_pattern=r"wk")
+
+
+def test_build_longer_spec_names_pattern_with_one_names_to_column():
+    frame = tidy({"id": [1], "wk1": [10], "wk2": [30]})
+    spec = build_longer_spec(
+        frame, starts_with("wk"), names_to="week", names_pattern=r"wk(\d)"
+    )
+    assert as_pandas(spec)["week"].tolist() == ["1", "2"]
 
 
 def test_pivot_longer_cols_vary_slowest():

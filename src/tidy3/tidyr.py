@@ -591,6 +591,21 @@ def complete(
 _NAME_REPAIRS = ("check_unique", "minimal", "unique", "universal")
 
 
+def _check_names_pattern(names_pattern: str | None, targets: list[str]) -> None:
+    """As in tidyr, names_pattern needs one capture group per names_to column."""
+    if not names_pattern or not targets:
+        return
+    try:
+        groups = re.compile(names_pattern).groups
+    except re.error:
+        return  # Polars syntax Python's re lacks; Polars reports its own errors
+    if groups != len(targets):
+        raise ValueError(
+            f"names_pattern must have {len(targets)} capture group(s), one per "
+            f"names_to column; found {groups}"
+        )
+
+
 def _check_names_repair(names_repair: Any) -> None:
     if not callable(names_repair) and names_repair not in _NAME_REPAIRS:
         choices = ", ".join(repr(choice) for choice in _NAME_REPAIRS)
@@ -876,6 +891,7 @@ def pivot_longer(
         )
     if len(set(name_columns)) != len(name_columns):
         raise ValueError("names_to must not repeat a name")
+    _check_names_pattern(names_pattern, name_columns)
 
     def _apply(tf):
         pivoted = resolve_selection(tf, [cols])
@@ -961,9 +977,9 @@ def _pivot_longer_steps(
             name_expression = name_expression.str.replace(
                 rf"^(?:{names_prefix})", ""
             )
-        if len(name_columns) == 1:
+        if len(name_columns) == 1 and not names_pattern:
             lf = lf.with_columns(name_expression.alias(key_columns[0]))
-        elif len(name_columns) > 1:
+        elif name_columns:
             if names_pattern:
                 pieces = [
                     name_expression.str.extract(names_pattern, index + 1).alias(name)
@@ -1351,6 +1367,7 @@ def build_longer_spec(
     )
     if len(targets) > 1 and names_sep is None and names_pattern is None:
         raise ValueError("multiple names_to columns require names_sep or names_pattern")
+    _check_names_pattern(names_pattern, targets)
     rows = []
     for column in pivoted:
         name = re.sub(rf"^(?:{names_prefix})", "", column) if names_prefix else column

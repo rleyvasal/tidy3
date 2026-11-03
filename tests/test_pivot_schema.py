@@ -39,6 +39,7 @@ LONGER = {
     "names and values to": (WIDE, ["x_1", "x_2"], {"names_to": "n", "values_to": "val"}),
     "prefix": (WIDE, ["x_1", "x_2"], {"names_prefix": "x_", "names_to": "n"}),
     "two names, sep": (WIDE, ["x_1", "x_2", "y_1", "y_2"], {"names_to": ["var", "num"], "names_sep": "_"}),
+    "one name, pattern": (WIDE, ["x_1", "x_2"], {"names_to": "num", "names_pattern": r"x_(.)"}),
     "two names, pattern": (WIDE, ["x_1", "x_2"], {"names_to": ["var", "num"], "names_pattern": r"(.)_(.)"}),
     ".value": (WIDE, ["x_1", "x_2", "y_1", "y_2"], {"names_to": [".value", "num"], "names_sep": "_"}),
     "drop missing": (WIDE, ["x_1", "x_2"], {"values_drop_na": True}),

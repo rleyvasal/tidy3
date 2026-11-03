@@ -4,6 +4,15 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- `pivot_longer()` applies `names_pattern` when `names_to` names a single
+  column, as tidyr does; it kept the whole column name before. A pattern
+  whose capture groups don't match the `names_to` columns in number now
+  raises, in `pivot_longer()` and `build_longer_spec()`.
+
 ## 0.20.0 — 2026-11-03
 
 ### Added
