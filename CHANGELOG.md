@@ -4,6 +4,17 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.20.0 — unreleased
+
+### Added
+
+- In SolveIt, `view()` hides its cell from the AI (SolveIt's red eye), as
+  plot3 does for plots, so the explorer's rows don't fill the model's
+  context; SolveIt hides the cell's code with its output. `view(hide=False)`
+  keeps a cell visible, and `table3.autohide(False)` stops hiding for the
+  session. Printed tables are not hidden. Requires table3 0.5, whose
+  explorer headers also show that they sort before the first click.
+
 ## 0.19.0 — 2026-11-03
 
 ### Added

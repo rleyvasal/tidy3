@@ -1625,6 +1625,7 @@ def view(
     n: int = 10_000,
     height: int = 500,
     digits: int | str | None = None,
+    hide: bool | None = None,
 ) -> Any:
     """Open a data explorer over the first *n* rows and pass the frame through.
 
@@ -1638,7 +1639,9 @@ def view(
     for 10,000 rows of a dozen columns). *height* is the grid's height in
     pixels; ``digits=6`` prints floats to six significant digits and
     ``digits="full"`` every stored digit. Outside a notebook it prints the
-    first rows. The explorer comes from table3.
+    first rows. In SolveIt the cell is hidden from the AI so the rows don't
+    fill its context (*hide*: ``False`` keeps it visible; ``None`` follows
+    ``table3.autohide()``). The explorer comes from table3.
     """
 
     def _positive(v: Any) -> bool:
@@ -1652,19 +1655,21 @@ def view(
         raise ValueError("view() height must be a positive integer")
     if digits is not None and digits != "full" and not _positive(digits):
         raise ValueError('view() digits must be a positive integer, "full", or None')
+    if hide is not None and not isinstance(hide, bool):
+        raise TypeError("view() hide must be True, False or None")
     if data is not None:
         from tidy3.frame import TidyFrame, tidy
 
         if isinstance(data, pl.Series):
             data = data.to_frame()
         frame = data if isinstance(data, TidyFrame) else tidy(data)
-        return frame >> view(n=n, height=height, digits=digits)
+        return frame >> view(n=n, height=height, digits=digits, hide=hide)
 
     def _apply(tf):
         import table3
 
         caption = tf._caption().replace("(preview", "(view", 1)
-        table3.view(tf, n=n, height=height, digits=digits, caption=caption)
+        table3.view(tf, n=n, height=height, digits=digits, caption=caption, hide=hide)
         return tf
 
     return Verb(_apply, "view")

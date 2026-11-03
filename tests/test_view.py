@@ -86,9 +86,22 @@ def test_called_on_data_method_and_series(notebook):
     assert len(notebook) == 5
 
 
+def test_hide_reaches_table3(monkeypatch, notebook):
+    import table3
+
+    seen = []
+    monkeypatch.setattr(table3._solveit, "hide_calling_cell", lambda: seen.append(1))
+    tidy(x=[1]) >> view()
+    tidy(x=[1]) >> view(hide=False)
+    tidy(x=[1]).view(hide=True)
+    assert seen == [1, 1]
+
+
 def test_arguments_checked():
     with pytest.raises(TypeError):
         view(300)
     for bad in ({"n": -1}, {"height": 0}, {"height": None}, {"digits": 0}):
         with pytest.raises(ValueError):
             view(**bad)
+    with pytest.raises(TypeError, match="hide"):
+        view(hide="yes")

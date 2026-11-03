@@ -268,6 +268,13 @@ explorer still works when the notebook is reopened, about 1 MB for 10,000
 rows of a dozen columns. It needs the notebook to run output scripts, as
 paging does; where it doesn't, the first 100 rows show as a plain table.
 
+In SolveIt, which sends every cell's code and output to its AI, `view()`
+hides its cell from the AI (the red eye), as plot3 does for plots, so the
+rows don't fill the model's context; the cell's code is hidden with them,
+so keep `view()` on a line of its own. `view(hide=False)` keeps a cell
+visible, and `table3.autohide(False)` stops hiding for the session. Printed
+tables are not hidden.
+
 ### R-style bare names & backticks
 
 Once the rewriting is on (an earlier cell imported tidy3 or ran

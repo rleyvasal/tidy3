@@ -490,11 +490,16 @@ class TidyFrame:
         return self >> glimpse_verb(n)
 
     def view(
-        self, *, n: int = 10_000, height: int = 500, digits: int | str | None = None
+        self,
+        *,
+        n: int = 10_000,
+        height: int = 500,
+        digits: int | str | None = None,
+        hide: bool | None = None,
     ) -> TidyFrame:
         from tidy3.verbs import view as view_verb
 
-        return self >> view_verb(n=n, height=height, digits=digits)
+        return self >> view_verb(n=n, height=height, digits=digits, hide=hide)
 
     def arrange(self, *keys: Any, by_group: bool = False) -> TidyFrame:
         from tidy3.verbs import arrange as arrange_verb
