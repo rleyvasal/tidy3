@@ -52,9 +52,9 @@ def test_preview_shape_is_the_whole_frame_like_a_tibble():
         text = repr(tf)
         assert "shape: (30, 1)" in text
         assert text.endswith("… 20 more rows")
-        html = tf._repr_html_()
+        html = tf._repr_html_()  # a paged table holds all 30
         assert "shape: (30, 1)" in html
-        assert "… 20 more rows" in html
+        assert "data-label='30 rows'" in html
 
 
 def test_preview_without_more_rows_has_no_footer():
@@ -72,7 +72,8 @@ def test_preview_count_off_shows_unknown_rows():
     try:
         assert "shape: (?, 1)" in repr(tf)
         assert repr(tf).endswith("… more rows")
-        assert "shape: (?, 1)" in tf._repr_html_()
+        # The notebook table holds up to 100 rows, so it sees all 30.
+        assert "shape: (30, 1)" in tf._repr_html_()
         # Few enough rows to see them all: the count is known without a pass.
         assert "shape: (3, 1)" in repr(tidy({"x": [1, 2, 3]}))
     finally:
@@ -94,7 +95,8 @@ def test_show_and_preview_rows_print_every_requested_row(capsys):
         options(preview_rows=50)
         try:
             assert _shown_rows(repr(tf)) == 50
-            assert tf._repr_html_().count("<tr>") == 2 + 50  # names, dtypes, rows
+            assert _shown_rows(tf._repr_html_()) == 50  # all, 50 a page
+            assert "data-page-size='50'" in tf._repr_html_()
         finally:
             options(preview_rows=10)
         assert _shown_rows(repr(tf)) == 10

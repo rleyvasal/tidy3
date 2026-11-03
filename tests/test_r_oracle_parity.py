@@ -3217,7 +3217,6 @@ INVARIANT_ONLY = {
     "compute",
     "to_numpy",
     "glimpse",
-    "view",
     "peek",
     "nesting",
     "summarize",

@@ -4,24 +4,26 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## 0.18.0 — 2026-11-02
+## 0.18.0 — unreleased
 
-### Added
+### Changed
 
-- `view()` shows up to 1,000 rows in the cell's output, ten a page, as
-  RStudio's paged data frames do: `penguins >> distinct("species", "island")
-  >> view()`. Wide frames show as many columns as fit, with arrows to the
-  rest; names and types stay in the header, floats print as in the text
-  preview, and the table follows VS Code's, JupyterLab's and SolveIt's light
-  or dark theme. `digits=6` prints floats to six significant digits, so
-  small numbers keep their precision (`0.000123457`, where the preview shows
-  `0.000123`), and `digits="full"` every stored digit. `n=`, `page_size=`,
-  and `pages=False` for one box `height=`
-  pixels tall that scrolls (also what notebooks that don't run output
-  scripts show). It passes the frame through like `glimpse()`; end a cell's
-  last line with `;` to skip the usual preview under it. The table comes
-  from the new [view3](https://github.com/rleyvasal/view3) package, which
-  tidy3 now requires, through `TidyFrame.__view3__`.
+- A frame in a notebook prints as a paged table, as R notebooks print a
+  data frame: it holds the first 100 rows, ten a page, with Previous / page /
+  Next buttons, so `penguins >> distinct("species", "island")` shows every
+  combination without `pull()`. Wide frames show as many columns as fit,
+  with arrows to the rest; names and types stay in the header, floats print
+  as in the text preview, and the table follows VS Code's, JupyterLab's and
+  SolveIt's light or dark theme. `options(preview_rows=)` sets the page size
+  as before, and two options are new: `preview_max=` (rows the table holds,
+  default 100; each is saved with the notebook) and `preview_digits=` (`6`
+  for six significant digits, so small numbers keep their precision:
+  `0.000123457` where the preview shows `0.000123`; `"full"` for every
+  stored digit). Where a notebook doesn't run output scripts (an untrusted
+  Jupyter notebook), the same rows show in one box that scrolls. The text
+  preview outside notebooks is unchanged. The table comes from the new
+  [table3](https://github.com/rleyvasal/table3) package, which tidy3 now
+  requires, through `TidyFrame.__table3__`.
 
 ## 0.17.1 — 2026-11-02
 

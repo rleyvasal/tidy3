@@ -1618,65 +1618,6 @@ def glimpse(data: Any = None, n: int = 10) -> Any:
 
     return Verb(_apply, "glimpse")
 
-
-def view(
-    data: Any = None,
-    *,
-    n: int = 1000,
-    pages: bool = True,
-    page_size: int = 10,
-    height: int | None = 300,
-    digits: int | str | None = None,
-) -> Any:
-    """Show up to *n* rows in a paged table and pass the frame through.
-
-    Like RStudio's paged data frames: *page_size* rows a page, and as many
-    columns as fit the cell with arrows to the rest. Called on a frame
-    (``view(penguins)``) it shows and returns the frame; piped
-    (``penguins >> view()``) it does the same mid-pipe. A Series, as from
-    ``pull()``, shows as a one-column table. ``pages=False``, or a notebook
-    that doesn't run output scripts, shows every row in a box *height*
-    pixels tall that scrolls. Floats print as in the preview unless
-    ``digits=6`` asks for six significant digits (``0.000123457``, where
-    the preview shows ``0.000123``) or ``digits="full"`` for every stored
-    digit. Outside a notebook it prints the rows. As a
-    cell's last line the notebook also prints the usual preview; end the
-    line with ``;`` to hide it. The table comes from view3.
-    """
-    def _positive(v: Any) -> bool:
-        return isinstance(v, int) and not isinstance(v, bool) and v > 0
-
-    if isinstance(data, int) and not isinstance(data, bool):
-        raise TypeError("view() takes n=, page_size= and height= by keyword")
-    if not isinstance(n, int) or isinstance(n, bool) or n < 0:
-        raise ValueError("view() n must be a non-negative integer")
-    if not isinstance(pages, bool):
-        raise TypeError("view() pages must be True or False")
-    if not _positive(page_size):
-        raise ValueError("view() page_size must be a positive integer")
-    if height is not None and not _positive(height):
-        raise ValueError("view() height must be a positive integer or None")
-    if digits is not None and digits != "full" and not _positive(digits):
-        raise ValueError('view() digits must be a positive integer, "full", or None')
-    opts = {
-        "n": n, "pages": pages, "page_size": page_size, "height": height, "digits": digits,
-    }
-    if data is not None:
-        from tidy3.frame import TidyFrame, tidy
-
-        if isinstance(data, pl.Series):
-            data = data.to_frame()
-        frame = data if isinstance(data, TidyFrame) else tidy(data)
-        return frame >> view(**opts)
-
-    def _apply(tf):
-        import view3
-
-        view3.view(tf, **opts)
-        return tf
-
-    return Verb(_apply, "view")
-
 def arrange(*keys: Any, by_group: bool = False) -> Verb:
     """Order rows. Keys may reference columns dropped by a prior ``select()``."""
     if not keys:

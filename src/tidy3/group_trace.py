@@ -100,7 +100,7 @@ class _Probe(TidyFrame):
     def _computes(self, *args: Any, **kwargs: Any) -> Any:
         raise TraceAbort("data was computed")
 
-    collect = compute = to_polars = to_pandas = to_numpy = pull = glimpse = view = show = _computes  # type: ignore[assignment]
+    collect = compute = to_polars = to_pandas = to_numpy = pull = glimpse = show = _computes  # type: ignore[assignment]
     __len__ = __iter__ = __getitem__ = __repr__ = _repr_html_ = _computes  # type: ignore[assignment]
 
     @property

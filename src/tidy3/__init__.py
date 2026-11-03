@@ -397,7 +397,6 @@ from tidy3.verbs import (
     ungroup,
     union,
     union_all,
-    view,
     with_groups,
 )
 from tidy3.janitor import (
@@ -528,7 +527,6 @@ __all__ = [
     "full_join",
     "ge",
     "glimpse",
-    "view",
     "get_dupes",
     "group_by",
     "group_map",
