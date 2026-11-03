@@ -34,6 +34,8 @@ dependencies = [
   # before positional arguments, `left ~ right` rules, backtick names).
   # Standard library only.
   "tidy3syntax>=0.2,<0.3",
+  # view(): the paged table tidy3a and stats3 share. Polars only.
+  "view3>=0.2,<0.3",
 ]
 
 [project.optional-dependencies]

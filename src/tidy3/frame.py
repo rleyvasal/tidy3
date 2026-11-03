@@ -489,6 +489,21 @@ class TidyFrame:
 
         return self >> glimpse_verb(n)
 
+    def view(
+        self,
+        *,
+        n: int = 1000,
+        pages: bool = True,
+        page_size: int = 10,
+        height: int | None = 300,
+        digits: int | str | None = None,
+    ) -> TidyFrame:
+        from tidy3.verbs import view as view_verb
+
+        return self >> view_verb(
+            n=n, pages=pages, page_size=page_size, height=height, digits=digits
+        )
+
     def arrange(self, *keys: Any, by_group: bool = False) -> TidyFrame:
         from tidy3.verbs import arrange as arrange_verb
 
@@ -1539,6 +1554,11 @@ class TidyFrame:
             total_rows=total,
             rows_unknown=total is None,
         )
+
+    def __view3__(self, n: int) -> tuple[Any, int | None, str]:
+        """view3's rows: the first *n*, the whole count (None if not counted), a caption."""
+        pdf, total = self._preview_parts(n)
+        return pdf, total, self._caption().replace("(preview", "(view", 1)
 
     # NOTE: no _repr_mimebundle_ — SolveIt renders text/plain when a
     # mimebundle is present; separate __repr__/_repr_html_ (like polars

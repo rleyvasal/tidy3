@@ -4,6 +4,25 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.18.0 — unreleased
+
+### Added
+
+- `view()` shows up to 1,000 rows in the cell's output, ten a page, as
+  RStudio's paged data frames do: `penguins >> distinct("species", "island")
+  >> view()`. Wide frames show as many columns as fit, with arrows to the
+  rest; names and types stay in the header, floats print as in the text
+  preview, and the table follows VS Code's, JupyterLab's and SolveIt's light
+  or dark theme. `digits=6` prints floats to six significant digits, so
+  small numbers keep their precision (`0.000123457`, where the preview shows
+  `0.000123`), and `digits="full"` every stored digit. `n=`, `page_size=`,
+  and `pages=False` for one box `height=`
+  pixels tall that scrolls (also what notebooks that don't run output
+  scripts show). It passes the frame through like `glimpse()`; end a cell's
+  last line with `;` to skip the usual preview under it. The table comes
+  from the new [view3](https://github.com/rleyvasal/view3) package, which
+  tidy3 now requires, through `TidyFrame.__view3__`.
+
 ## 0.17.1 — 2026-11-02
 
 ### Fixed

@@ -66,7 +66,8 @@ shape: (6, 5)
 
 Every table shows each column's type under its name, and the caption
 keeps the grouping that's left (`summarise` drops the last group, as in
-dplyr). `glimpse(penguins)` prints one line per column.
+dplyr). `glimpse(penguins)` prints one line per column, and
+`penguins >> view()` shows every row, ten a page, as RStudio does.
 
 ### Shorter notebook syntax, from the next cell on
 

@@ -218,6 +218,35 @@ summary(cars)     # count, null_count, n_unique, mean, std, min, 25%, 50%, 75%, 
 describe(cars)    # alias of summary (pandas-style name)
 ```
 
+### Every row: `view()`
+
+A preview shows ten rows. `view()` shows up to 1,000 in the cell's output,
+ten a page, with Previous / page / Next buttons, as RStudio's paged data
+frames do:
+
+```python
+cars >> distinct("cyl", "hp") >> view();
+cars >> view(page_size=25);
+cars >> view(n=5000);                  # more rows than the default 1,000
+cars >> view(pages=False, height=300); # one box that scrolls instead
+cars >> mutate(ratio=hp / wt / 1e6) >> view(digits=4);  # four significant digits
+```
+
+Names and types stay in the header, and a wide frame shows as many columns
+as fit with arrows to the rest; the footer says which rows and columns are
+showing, and when `n` cut the rows. Floats print as in the preview, up to six
+decimal places, which shows `0.000123456789` as `0.000123`; `digits=4` keeps
+four significant digits instead (`0.0001235`, as R's `signif()`), and
+`digits="full"` every stored digit. The table follows the notebook's light
+or dark theme in VS Code, JupyterLab and SolveIt. Paging needs the notebook
+to run output scripts; where it doesn't (an untrusted Jupyter notebook), the
+same table shows as the scrolling box.
+
+`view()` passes the frame through, so it can sit in the middle of a pipe.
+On a cell's last line the notebook also prints the usual preview; the `;`
+hides it. Every row of `n` goes into the saved notebook, about 1 MB for
+1,000 rows of a dozen columns.
+
 ### R-style bare names & backticks
 
 Once the rewriting is on (an earlier cell imported tidy3 or ran
