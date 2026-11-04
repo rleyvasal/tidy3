@@ -4,6 +4,14 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.20.3 — 2026-11-03
+
+### Fixed
+
+- A notebook cell that ends in `view()` shows the explorer alone; it also
+  printed the frame `view()` returns. The frame still passes down a pipe,
+  and shows as usual in a later cell.
+
 ## 0.20.2 — 2026-11-03
 
 ### Changed
@@ -12,14 +20,6 @@ under **Changed**.
   later table3 releases reach it without a new tidy3, and upgrading tidy3
   brings table3 0.5.1's fix: a paged table's Next button no longer moves
   from page to page.
-
-## Unreleased
-
-### Fixed
-
-- A notebook cell that ends in `view()` shows the explorer alone; it also
-  printed the frame `view()` returns. The frame still passes down a pipe,
-  and shows as usual in a later cell.
 
 ## 0.20.1 — 2026-11-03
 
