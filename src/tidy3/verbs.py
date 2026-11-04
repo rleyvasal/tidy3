@@ -1634,7 +1634,10 @@ def view(
     dates, "contains" for text, a pick-list for columns of few values).
     Called on a frame (``view(penguins)``) it opens the explorer and returns
     the frame; piped (``penguins >> view()``) it does the same mid-pipe. A
-    Series, as from ``pull()``, shows as one column. The rows go into the
+    Series, as from ``pull()``, shows as one column. A cell that ends in
+    ``view()`` shows the explorer alone, not the returned frame as well (R's
+    ``View()`` returns invisibly); in a later cell, or piped on, the frame
+    displays as usual. The rows go into the
     notebook's output, so the explorer works in a saved notebook (about 1 MB
     for 10,000 rows of a dozen columns). *height* is the grid's height in
     pixels; ``digits=6`` prints floats to six significant digits and
@@ -1670,7 +1673,9 @@ def view(
 
         caption = tf._caption().replace("(preview", "(view", 1)
         table3.view(tf, n=n, height=height, digits=digits, caption=caption, hide=hide)
-        return tf
+        from tidy3.frame import _viewed
+
+        return _viewed(tf)
 
     return Verb(_apply, "view")
 

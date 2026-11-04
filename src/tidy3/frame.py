@@ -1570,6 +1570,53 @@ class TidyFrame:
         return int(self._lf.select(pl.len()).collect().item())
 
 
+class _ViewedFrame(TidyFrame):
+    """view()'s result: the frame, not shown again by the cell that viewed it.
+
+    view() has already shown the explorer, so a cell ending in ``view()``
+    would otherwise also print the frame. Once the cell ends the frame
+    displays as any other; later verbs return plain frames.
+    """
+
+    __slots__ = ("_quiet",)
+
+    @classmethod
+    def _of(cls, tf: TidyFrame) -> TidyFrame:
+        out = cls.__new__(cls)
+        for name in TidyFrame.__slots__:
+            setattr(out, name, getattr(tf, name))
+        out._quiet = True
+        return out
+
+    def _ipython_display_(self) -> None:
+        if self._quiet:
+            return
+        from IPython.display import display
+
+        plain = TidyFrame.__new__(TidyFrame)
+        for name in TidyFrame.__slots__:
+            setattr(plain, name, getattr(self, name))
+        display(plain)
+
+
+def _viewed(tf: TidyFrame) -> TidyFrame:
+    """*tf*, kept from displaying again until the running notebook cell ends."""
+    try:
+        from IPython import get_ipython
+
+        events = get_ipython().events
+        out = _ViewedFrame._of(tf)
+
+        def _cell_done(*_: Any) -> None:
+            out._quiet = False
+            events.unregister("post_run_cell", _cell_done)
+
+        events.register("post_run_cell", _cell_done)
+    except Exception:  # not in IPython: nothing displays the result
+        return tf
+    return out
+
+
 class _TidyStep:
     """``x >> tidy()``: a model's table, or data wrapped as a TidyFrame."""
 

@@ -13,6 +13,14 @@ under **Changed**.
   brings table3 0.5.1's fix: a paged table's Next button no longer moves
   from page to page.
 
+## Unreleased
+
+### Fixed
+
+- A notebook cell that ends in `view()` shows the explorer alone; it also
+  printed the frame `view()` returns. The frame still passes down a pipe,
+  and shows as usual in a later cell.
+
 ## 0.20.1 — 2026-11-03
 
 ### Fixed

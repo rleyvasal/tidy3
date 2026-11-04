@@ -105,3 +105,30 @@ def test_arguments_checked():
             view(**bad)
     with pytest.raises(TypeError, match="hide"):
         view(hide="yes")
+
+
+def test_cell_ending_in_view_shows_the_frame_once(capsys):
+    """Jupyter would print view()'s returned frame after the explorer."""
+    from IPython.core.interactiveshell import InteractiveShell
+
+    shell = InteractiveShell.instance()
+
+    def run(code: str) -> str:
+        capsys.readouterr()
+        result = shell.run_cell(code)
+        assert result.success, result.error_before_exec or result.error_in_exec
+        return capsys.readouterr().out
+
+    try:
+        run("from tidy3 import arrange, tidy, view\ndf = tidy(x=[3, 1, 2])")
+        assert "TidyFrame (preview" not in run("df >> view()")
+        assert "TidyFrame (preview" not in run("df.view()")
+        # Piped on, the result displays as usual.
+        assert "TidyFrame (preview" in run("df >> view() >> arrange('x')")
+        # Kept quiet only in the cell that viewed it.
+        assert "TidyFrame (preview" not in run("v = df >> view()")
+        assert "TidyFrame (preview" in run("v")
+        assert "TidyFrame (preview" in run("v")
+        assert shell.user_ns["v"].pull("x").to_list() == [3, 1, 2]
+    finally:
+        InteractiveShell.clear_instance()

@@ -257,6 +257,11 @@ cars >> view(n=50_000, height=700)       # more rows, a taller grid
 cars >> view(digits=4)                   # floats to four significant digits
 ```
 
+A cell that ends in `view()` shows the explorer alone, not the frame a
+second time, as R's `View()` returns invisibly. The frame it returns is
+otherwise the same: piped on, or assigned and shown in a later cell, it
+displays as any frame.
+
 | Column | Filter |
 |---|---|
 | numbers, dates | from and to, either blank; `2008` matches a whole year |
