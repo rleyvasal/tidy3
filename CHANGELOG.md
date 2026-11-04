@@ -4,6 +4,15 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- tidy3 takes any table3 from 0.5.1 to before 1.0 (`table3>=0.5.1,<1`), so
+  later table3 releases reach it without a new tidy3, and upgrading tidy3
+  brings table3 0.5.1's fix: a paged table's Next button no longer moves
+  from page to page.
+
 ## 0.20.1 — 2026-11-03
 
 ### Fixed
