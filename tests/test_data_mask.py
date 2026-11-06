@@ -149,3 +149,79 @@ def test_a_local_variable_in_another_function_leaves_the_column_alone(shell):
         assert [str(d)[:10] for d in out["later"]] == ["2024-04-01", "2024-07-01"]
         assert out["label"].tolist() == ["2024-02!", "2024-05!"]
     assert shell.user_ns["helper"]() == "quarter"
+
+
+def _cell(ip, source):
+    result = ip.run_cell(source, silent=True)
+    error = result.error_before_exec or result.error_in_exec
+    if error is not None:
+        raise error
+
+
+def test_naming_a_result_after_a_column_it_uses(shell):
+    # The right-hand side runs before ``x`` exists, so bare x is the column.
+    setup(shell, "")
+    _cell(shell, "x = d >> filter(x > 1.5)")
+    assert shell.user_ns["x"].collect(as_="pandas")["x"].tolist() == [2.0, 3.0]
+    # Re-running the cell: the stale x from the first run is not the column.
+    _cell(shell, "x = d >> filter(x > 1.5)")
+    assert shell.user_ns["x"].collect(as_="pandas")["x"].tolist() == [2.0, 3.0]
+    _cell(shell, "x = 100")  # a stale scalar from an earlier cell too
+    _cell(shell, "x = d >> filter(x > 1.5)")
+    assert shell.user_ns["x"].collect(as_="pandas")["x"].tolist() == [2.0, 3.0]
+    _cell(shell, "n = d >> mutate(k = n * 2)\nk = n >> select(k)")
+    assert shell.user_ns["k"].collect(as_="pandas")["k"].tolist() == [2, 4, 2]
+
+
+def test_a_name_assigned_later_in_the_cell_is_still_a_column_before(shell):
+    setup(shell, "")
+    _cell(shell, "out = d >> filter(x > 1.5)\nx = 'later'")
+    assert shell.user_ns["out"].collect(as_="pandas")["x"].tolist() == [2.0, 3.0]
+    assert shell.user_ns["x"] == "later"
+
+
+def test_a_loop_body_sees_names_the_loop_binds_as_variables(shell):
+    # A compound statement can run its body more than once: its own names
+    # stay variables throughout, as before.
+    setup(shell, "")
+    _cell(
+        shell,
+        "kept = []\n"
+        "for limit in (1.5, 2.5):\n"
+        "    kept.append((d >> filter(x > limit)).collect(as_='pandas')['x'].tolist())",
+    )
+    assert shell.user_ns["kept"] == [[2.0, 3.0], [3.0]]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "tidy({'x': [7.0, 8.0, 9.0]})",
+        "[7.0, 8.0, 9.0]",
+        "np.array([7.0, 8.0, 9.0])",
+        "pl.Series([7.0, 8.0, 9.0])",
+    ],
+)
+def test_column_beats_a_frame_list_array_or_series_variable(shell, value):
+    setup(shell, "import numpy as np, polars as pl\nx = " + value)
+    assert run(shell, "d >> filter(x > 1.5)")["x"] == [2.0, 3.0]
+    assert run(shell, "d >> mutate(z = x * 10)")["z"] == [10.0, 20.0, 30.0]
+    assert run(shell, "d >> arrange(-x)")["x"] == [3.0, 2.0, 1.0]
+    assert run(shell, "d >> summarise(m = mean(x))")["m"] == [2.0]
+
+
+def test_a_list_array_or_series_variable_fills_in_without_a_column(shell):
+    setup(
+        shell,
+        "import numpy as np, polars as pl\n"
+        "codes = np.array([7, 8, 9])\nweights = pl.Series([1, 0, 1])\nkeep = ['a']",
+    )
+    assert run(shell, "d >> mutate(z = codes + 1)")["z"] == [8, 9, 10]
+    assert run(shell, "d >> mutate(z = x * weights)")["z"] == [1.0, 0.0, 3.0]
+    assert run(shell, "d >> filter(g.is_in(keep))")["x"] == [1.0, 3.0]
+    assert run(shell, "d >> mutate(z = codes)")["z"] == [7, 8, 9]
+
+
+def test_a_function_variable_stays_a_function(shell):
+    setup(shell, "def double(v):\n    return v * 2")
+    assert run(shell, "d >> mutate(across(starts_with('x'), double))")["x"] == [2.0, 4.0, 6.0]

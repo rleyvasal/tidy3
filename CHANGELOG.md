@@ -4,6 +4,43 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- `skip_rows`, Polars' name, is an alias of `skip` in `read_csv`,
+  `read_tsv`, `read_delim`, and `scan_csv`: the number of lines above the
+  header. Passing both is an error.
+- `read_excel(path, skip=2)` (or `skip_rows=2`) reads the header from row
+  3, skipping title rows above the table, as readxl's `skip` does.
+
+### Fixed
+
+- `read_excel()` without `sheet=` reads the first sheet whatever its name.
+  It failed before with "no matching sheets found when `sheet_name` is 0".
+- In notebooks, a result named after a column it uses works:
+  `mpg = cars >> filter(mpg > 22)` filters on the column. Before, a name
+  the cell assigned anywhere was a variable throughout the cell, so the
+  first run failed with `NameError` and a re-run silently compared against
+  the previous run's value. A name the cell assigns is now a variable from
+  the statement after its assignment on, in the order the cell runs; a
+  `for`, `if`, or `with` block still counts its own names throughout.
+
+### Changed
+
+- In `filter()`, `mutate()`, `arrange()`, `summarise()` and other
+  expressions, a column beats a same-named notebook variable whatever the
+  variable holds, as dplyr's data mask does. Before, only numbers, strings,
+  and dates gave way; a frame failed with a `TypeError`, and a list, numpy
+  array, or Series named like a column was used in its place. The variable
+  still fills in when the frame has no such column, `env.x` still means
+  the variable, and a function stays a function.
+- `read_excel(sheet=)` positions are 1-based, as in readxl: `sheet=2` is
+  the second tab. Integer sheets never worked before; `sheet=0` or a
+  negative position is now an error that says so.
+- The `dev` extra installs `fastexcel`, so the test suite reads real
+  workbooks.
+
 ## 0.21.1 — 2026-11-06
 
 ### Fixed

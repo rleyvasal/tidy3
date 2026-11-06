@@ -712,6 +712,8 @@ class MaskNames(ast.NodeTransformer):
 
 
 _SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+# Statements whose right-hand side runs before the names they assign exist.
+_SIMPLE_ASSIGNS = (ast.Assign, ast.AnnAssign, ast.AugAssign)
 
 
 def bound_names(tree: ast.AST) -> set[str]:
@@ -830,26 +832,14 @@ def _shadowed_api_function(name: str, variables: dict[str, Any]) -> bool:
 def _may_name_a_column(value: Any, mode: Mode) -> bool:
     """Whether a variable used bare could mean a same-named column instead.
 
-    In expressions only simple values qualify (a function or array stays
-    itself); in selections anything but functions and modules does, so
-    ``select(cols)`` with a list of names still works.
+    Anything but a function or module: like dplyr's data mask, the column
+    wins when the frame has one (``env.x`` is the variable), and the value
+    is used when it has none, so ``mutate(x = values)`` with a list, array,
+    or Series still works. A function stays itself, as in ``across(cols, f)``.
     """
-    import datetime
-    import decimal
     import types
 
-    if mode == "selector":
-        return not callable(value) and not isinstance(value, types.ModuleType)
-    if value is None or isinstance(
-        value, (bool, int, float, complex, str, decimal.Decimal, datetime.date, datetime.time)
-    ):
-        return True
-    try:
-        import numpy as np
-
-        return isinstance(value, np.generic)
-    except ImportError:
-        return False
+    return not callable(value) and not isinstance(value, types.ModuleType)
 
 
 def soft_names(namespace: dict[str, Any] | None = None) -> set[str]:
@@ -1050,18 +1040,40 @@ class Tidy3MaskTransformer(ast.NodeTransformer):
             self._soft &= self._known_static
         self._variables = _notebook_variables(namespace, self._soft)
         if self._known_static is None:
-            # Variables this cell creates do not exist yet: the mask runs
-            # before the cell. Treat them as variables, as a script does,
-            # and drop any stale value from an earlier cell.
-            self._cell_names = bound_names(node)
             self._cell_imports = _cell_import_sources(node)
-            self._soft -= self._cell_names
-            self._variables = {
-                k: v for k, v in self._variables.items() if k not in self._cell_names
-            }
+            return self._visit_cell(node)
         # A cell importing plot3 gets plot3's masking from tidy3syntax's
         # coordinator, through plot3's entry point.
         return self.generic_visit(node)
+
+    def _visit_cell(self, node: ast.Module) -> ast.Module:
+        """Mask a notebook cell statement by statement, in the order it runs.
+
+        A name the cell assigns is a variable from the statement after the
+        assignment on, as a script runs; any value it had from an earlier
+        cell is stale there. Before that, and in the right-hand side of its
+        own assignment (``mpg = cars >> filter(mpg > 22)``), a bare name
+        means the column when the frame has one. A compound statement
+        (``for``, ``if``, ``with``, …) counts the names it binds throughout,
+        since its body can run more than once.
+        """
+        soft, variables = self._soft, self._variables
+        earlier: set[str] = set()
+        body: list[ast.stmt] = []
+        for statement in node.body:
+            binds = bound_names(ast.Module(body=[statement], type_ignores=[]))
+            own = set() if isinstance(statement, _SIMPLE_ASSIGNS) else binds
+            self._cell_names = earlier | own
+            self._soft = soft - self._cell_names
+            self._variables = {
+                k: v for k, v in variables.items() if k not in self._cell_names
+            }
+            result = self.visit(statement)
+            if result is not None:
+                body.extend(result if isinstance(result, list) else [result])
+            earlier |= binds
+        node.body = body
+        return node
 
     def _mask_keyword(self, kw: ast.keyword, *, default: Mode) -> ast.keyword:
         """Apply masking rules for a single keyword by name."""

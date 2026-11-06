@@ -337,7 +337,13 @@ ggplot(cars_space, aes(x=`hp new`, y=mpg)) + geom_point()
   for the variable when a column has the same name (dplyr's `.env$x`), or
   `col("x")` to insist on the column. Within one `mutate()`, a column made
   earlier counts: `mutate(y = x * 2, z = y + 1)`. Calls skip non-functions
-  like R does, so `n()` still counts rows after `n = 7`.
+  like R does, so `n()` still counts rows after `n = 7`. This holds whatever
+  the variable holds (a number, a frame, a list, an array); a function stays
+  a function.
+- **A cell runs in order**: a name the cell assigns is your variable from
+  the next statement on, so `mpg = cars >> filter(mpg > 22)` filters on the
+  column `mpg`, on the first run and every re-run. A `for`, `if`, or `with`
+  block counts the names it assigns throughout its body.
 - **plot3** `aes` / `facet_wrap` use the same style in Jupyter
 
 #### `left ~ right` rules
