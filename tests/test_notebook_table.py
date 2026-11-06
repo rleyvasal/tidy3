@@ -39,7 +39,7 @@ def test_every_distinct_row_ten_a_page(islands):
     html = (islands >> distinct())._repr_html_()
     assert _body_rows(html) == 10 and _all_rows(html) == 29
     assert "island 28" in html
-    assert "data-page-size='10'" in html and "data-label='29 rows'" in html
+    assert "data-page-size='10'" in html and "data-total='29'" in html
     assert ">TidyFrame (preview)<" in html
     assert html.count("<script>") == 1  # pages in place; the first page without scripts
 
@@ -51,7 +51,7 @@ def test_preview_max_caps_the_rows(islands, opts):
     html = islands._repr_html_()
     assert _body_rows(html) == 5 and _all_rows(html) == 20
     assert "data-page-size='5'" in html
-    assert "data-label='20 rows (first 20 of 87)'" in html
+    assert "data-total='87'" in html  # 20 previewed of 87: table3 writes the label
     assert "shape: (87, 1)" in html
 
 
@@ -77,7 +77,7 @@ def test_groups_and_uncounted_rows(opts):
     assert ">TidyFrame (preview groups=[&#x27;g&#x27;])<" in tf._repr_html_()
     opts(preview_count=False, preview_max=10)
     html = (tidy(x=list(range(50))) >> filter(col("x") >= 0))._repr_html_()
-    assert "shape: (?, 1)" in html and "(first 10 of more)" in html
+    assert "shape: (?, 1)" in html and "data-total=''" in html  # not counted
 
 
 def test_table3_hook(islands):

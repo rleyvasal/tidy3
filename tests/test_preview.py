@@ -54,7 +54,7 @@ def test_preview_shape_is_the_whole_frame_like_a_tibble():
         assert text.endswith("… 20 more rows")
         html = tf._repr_html_()  # a paged table holds all 30
         assert "shape: (30, 1)" in html
-        assert "data-label='30 rows'" in html
+        assert "data-total='30'" in html
 
 
 def test_preview_without_more_rows_has_no_footer():
