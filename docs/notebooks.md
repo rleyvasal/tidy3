@@ -222,9 +222,9 @@ describe(cars)    # alias of summary (pandas-style name)
 
 A frame in a notebook prints as a paged table, as R notebooks print a data
 frame: ten rows a page, with Previous / page / Next buttons, through its
-first 100 rows. Names and types stay in the header, and a wide frame shows
-as many columns as fit, with arrows to the rest; the footer says which rows
-and columns are showing, and how many rows there are in all.
+first 100 rows. Names and types stay in the header, and a wide frame
+scrolls sideways to the rest of its columns (table3 0.8); the footer says
+which rows and columns are showing, and how many rows there are in all.
 
 ```python
 cars >> distinct("cyl", "hp")               # every combination, ten a page
