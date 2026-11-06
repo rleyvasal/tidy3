@@ -1045,8 +1045,24 @@ and is recorded in `problems()`. `strict=True` raises `ConversionError`
 instead. Date columns are ISO `YYYY-MM-DD`.
 `id` adds a column with each row's source path, including when `source` is
 a glob. A non-UTF-8 `encoding` is available on `read_csv` for one file;
-`scan_csv` asks you to use `read_csv` for that. `read_excel(path, sheet=)`
-and `excel_sheets(path)` need `pip install 'tidy3[excel]'`.
+`scan_csv` asks you to use `read_csv` for that.
+
+`skip` is the number of lines above the header: `skip=2` reads the header
+from line 3. `skip_rows`, Polars' name, is the same option in every reader;
+pass one of them.
+
+`read_excel(path, sheet=, skip=)` reads one sheet: the first by default, or
+`sheet=` a name or a 1-based position, as in readxl (`sheet=2` is the second
+tab). `skip` (or `skip_rows`) counts rows above the header, as in
+`read_csv`. Other keywords go to `polars.read_excel`, so fastexcel's
+`read_options` still works. `read_excel` and `excel_sheets(path)` need
+`pip install 'tidy3[excel]'`.
+
+```python notest
+read_csv("cars.csv", skip_rows=2)
+read_excel("cars.xlsx", skip=2)
+read_excel("cars.xlsx", sheet="Engines")
+```
 
 #### Where these differ from R on purpose
 

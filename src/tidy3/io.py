@@ -1,8 +1,8 @@
 """File readers. ``scan_*`` stays lazy; ``read_*`` returns a computed frame.
 
 ``read_csv``, ``read_tsv``, and ``read_delim`` share options with
-:func:`scan_csv`: ``col_types``, ``na``, ``skip``, ``comment``, ``trim_ws``,
-and ``id``. ``trim_ws`` defaults to false for :func:`scan_csv`, so existing
+:func:`scan_csv`: ``col_types``, ``na``, ``skip`` (or Polars' name,
+``skip_rows``), ``comment``, ``trim_ws``, and ``id``. ``trim_ws`` defaults to false for :func:`scan_csv`, so existing
 scans do not change, and true for the readers. With ``col_types``, integer,
 double, logical, date, and datetime columns are read as text and parsed by
 the shared conversion engine, so ``"2.5"`` is a recorded problem rather than
@@ -257,13 +257,30 @@ def _read_typed(source: Any, options: dict[str, Any], rows: int | None) -> pl.Da
     return typed
 
 
+def _skip_option(skip: int | None, kwargs: dict[str, Any]) -> int:
+    """Lines to skip before the header: ``skip=`` or Polars' ``skip_rows=``.
+
+    Removes ``skip_rows`` from *kwargs*; the two names are one option.
+    """
+    if "skip_rows" in kwargs:
+        alias = kwargs.pop("skip_rows")
+        if skip is not None:
+            raise TypeError("pass skip= or skip_rows=, not both")
+        skip = alias
+    if skip is None:
+        return 0
+    if isinstance(skip, bool) or not isinstance(skip, int) or skip < 0:
+        raise ValueError("skip must be a non-negative integer")
+    return skip
+
+
 def _scan_table(
     source: Any,
     *,
     delim: str | None,
     col_types: dict[str, Any] | None,
     na: Any,
-    skip: int,
+    skip: int | None,
     comment: str | None,
     trim_ws: bool,
     id: str | None,
@@ -278,8 +295,7 @@ def _scan_table(
         raise TypeError("pass na= or null_values=, not both")
     if delim is not None and "separator" in kwargs:
         raise TypeError("pass delim= or separator=, not both")
-    if isinstance(skip, bool) or not isinstance(skip, int) or skip < 0:
-        raise ValueError("skip must be a non-negative integer")
+    skip = _skip_option(skip, kwargs)
     if not isinstance(strict, bool):
         raise TypeError("strict must be a boolean")
     polars_encoding = _polars_encoding(encoding)
@@ -387,7 +403,7 @@ def scan_csv(
     *,
     col_types: dict[str, Any] | None = None,
     na: Any = None,
-    skip: int = 0,
+    skip: int | None = None,
     comment: str | None = None,
     trim_ws: bool = False,
     id: str | None = None,
@@ -426,7 +442,7 @@ def read_csv(
     *,
     col_types: dict[str, Any] | None = None,
     na: Any = None,
-    skip: int = 0,
+    skip: int | None = None,
     comment: str | None = None,
     trim_ws: bool = True,
     id: str | None = None,
@@ -507,19 +523,41 @@ def excel_sheets(path: str | Path) -> list[str]:
 def read_excel(
     path: str | Path,
     sheet: str | int | None = None,
+    *,
+    skip: int | None = None,
     **kwargs: Any,
 ) -> TidyFrame:
     """Read one Excel sheet into a :class:`~tidy3.frame.TidyFrame`.
 
     Requires the optional ``fastexcel`` package (``pip install 'tidy3[excel]'``).
-    ``sheet`` is a name or a 0-based index; the default is the first sheet.
+    ``sheet`` is a name or a 1-based position, as in readxl; the default is
+    the first sheet. ``skip`` (or ``skip_rows``, as in :func:`read_csv`) is
+    the number of rows above the header: ``skip=2`` reads the header from
+    row 3. Other keywords go to :func:`polars.read_excel`.
     """
     _need_fastexcel()
-    frame = pl.read_excel(
-        path,
-        sheet_name=0 if sheet is None else sheet,
-        **kwargs,
-    )
+    skip = _skip_option(skip, kwargs)
+    if sheet is not None:
+        if "sheet_name" in kwargs or "sheet_id" in kwargs:
+            raise TypeError("pass sheet= or sheet_name=/sheet_id=, not both")
+        if isinstance(sheet, str):
+            kwargs["sheet_name"] = sheet
+        elif isinstance(sheet, int) and not isinstance(sheet, bool):
+            if sheet < 1:
+                raise ValueError(
+                    f"sheet positions are 1-based (sheet=1 is the first); got {sheet}"
+                )
+            kwargs["sheet_id"] = sheet
+        else:
+            raise TypeError(f"sheet must be a name or a position; got {sheet!r}")
+    if skip:
+        # fastexcel's own skip_rows skips rows after the header
+        options = dict(kwargs.pop("read_options", None) or {})
+        if "header_row" in options:
+            raise TypeError("pass skip= or read_options={'header_row': ...}, not both")
+        options["header_row"] = skip
+        kwargs["read_options"] = options
+    frame = pl.read_excel(path, **kwargs)
     from tidy3.frame import tidy
 
     return tidy(frame)
