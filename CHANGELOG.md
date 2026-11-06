@@ -4,6 +4,20 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- `select(-a, -b)` drops every column it names, as in dplyr. Before, each
+  `-x` was the complement of `x` and the complements were unioned, so a
+  selection with two or more `-x` dropped nothing (and moved columns to
+  the end). `-x` now drops `x` from the columns selected before it, a
+  selection that starts with `-x` starts from every column, and a later
+  name adds a dropped column back. This covers bare names, backtick names,
+  `-col("x")`, `-all_of(...)`, `-starts_with(...)` and lists in other
+  verbs (`pivot_longer([-a, -b])`). `!x` / `~x` stay the complement, as in
+  tidyselect.
+
 ## 0.21.0 — 2026-11-05
 
 ### Added

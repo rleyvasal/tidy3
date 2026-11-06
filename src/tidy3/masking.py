@@ -666,10 +666,10 @@ class MaskNames(ast.NodeTransformer):
             if isinstance(operand, ast.Constant) and isinstance(operand.value, str):
                 # -"mpg" is invalid; -mpg → all_of(["mpg"]) then invert
                 operand = self._all_of_one(operand.value)
-            return ast.copy_location(
-                ast.UnaryOp(op=ast.Invert(), operand=operand),
-                node,
-            )
+            # dplyr: ``-x`` drops from the selection so far; ``!x`` is the
+            # complement. Keep ``-`` so several ``-x`` drop every one.
+            op = ast.USub() if isinstance(node.op, ast.USub) else ast.Invert()
+            return ast.copy_location(ast.UnaryOp(op=op, operand=operand), node)
         node.operand = self._operand(node.operand)
         return node
 

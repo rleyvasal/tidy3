@@ -10,6 +10,11 @@ import pytest
 
 from tidy3 import (
     all_of,
+    col,
+    drop,
+    group_by,
+    mutate,
+    pivot_longer,
     cols_between,
     col_range,
     contains,
@@ -142,7 +147,8 @@ def test_masking_select_bang_starts_with():
 
 def test_masking_select_minus_bare_column():
     out = apply_masking("select(-mpg)", known=default_known_names())
-    # -mpg → ~all_of(["mpg"])
+    # -mpg → -all_of(["mpg"]): a dplyr exclusion, not the ! complement
+    assert "-all_of" in out
     assert "all_of" in out
     assert "mpg" in out
 
@@ -269,3 +275,77 @@ def test_pandas_date_list_and_dict_columns_are_not_text():
             for backend in ("polars", "pandas")
         }
         assert found == {"polars": wanted, "pandas": wanted}
+
+
+def test_minus_several_columns_drops_each():
+    # dplyr: select(-a, -b) drops both (a union of complements kept all)
+    cars = _cars()
+    expected = ["new_a", "new_b", "cyl", "name", "flag"]
+    assert columns(cars >> select(-all_of(["mpg"]), -all_of(["hp"]))) == expected
+    assert columns(cars >> select(-col("mpg"), -col("hp"))) == expected
+    assert columns(
+        cars >> select(-starts_with("new"), -all_of(["mpg"]), -col("flag"))
+    ) == ["cyl", "hp", "name"]
+
+
+def test_minus_after_positive_removes_from_selection():
+    cars = _cars()
+    assert columns(cars >> select(starts_with("new"), "mpg", -col("new_b"))) == [
+        "new_a",
+        "mpg",
+    ]
+    # a later positive adds back what an earlier -x removed
+    assert columns(cars >> select(-col("mpg"), -col("hp"), "mpg")) == [
+        "new_a",
+        "new_b",
+        "cyl",
+        "name",
+        "flag",
+        "mpg",
+    ]
+
+
+def test_bang_complements_union_like_tidyselect():
+    # tidyselect: !a, !b is the union of two complements — every column
+    cars = _cars()
+    assert columns(cars >> select(~all_of(["mpg"]), ~all_of(["hp"]))) == [
+        "new_a", "new_b", "cyl", "hp", "name", "flag", "mpg",
+    ]
+
+
+def test_minus_several_after_mutate_and_with_groups():
+    cars = _cars() >> mutate(power=col("hp") * 2)
+    assert columns(cars >> select(-col("hp"), -col("mpg"), -starts_with("new"))) == [
+        "cyl",
+        "name",
+        "flag",
+        "power",
+    ]
+    grouped = cars >> group_by("cyl") >> select(-col("cyl"), -col("hp"))
+    assert columns(grouped)[0] == "cyl"  # grouping column kept, like dplyr
+    assert "hp" not in columns(grouped)
+
+
+def test_minus_several_in_other_verbs():
+    cars = _cars()
+    long = cars >> pivot_longer(
+        [-all_of(["name"]), -all_of(["flag"])], names_to="k", values_to="v"
+    )
+    assert columns(long) == ["name", "flag", "k", "v"]
+
+
+def test_masked_minus_backtick_columns_end_to_end():
+    from tidy3.export import transform_source
+    from tidy3.masking import rewrite_backticks
+
+    cars = tidy({"car name": ["a"], "mpg (city)": [21.0], "hp": [110], "cyl": [4]})
+    src = transform_source(
+        rewrite_backticks("out = cars >> select(-`car name`, -`mpg (city)`, -hp)"),
+        known=default_known_names({"cars", "out"}),
+    )
+    import tidy3
+
+    ns = {name: getattr(tidy3, name) for name in tidy3.__all__}
+    ns["cars"] = cars
+    exec(src, ns)
+    assert columns(ns["out"]) == ["cyl"]

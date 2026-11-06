@@ -25,11 +25,13 @@ _CURRENT_GROUP_ROWS: ContextVar[Any] = ContextVar(
 class Selector:
     """Deferred column selection resolved against a concrete frame schema."""
 
-    __slots__ = ("_resolve", "label")
+    __slots__ = ("_resolve", "label", "excludes")
 
     def __init__(self, resolve: Callable[..., list[str]], label: str):
         self._resolve = resolve
         self.label = label
+        # Set by ``-selector``: the selection it removes (dplyr ``-x``).
+        self.excludes: Selector | None = None
 
     def resolve(
         self, columns: list[str], schema: Mapping[str, Any], groups: list[str]
@@ -81,8 +83,16 @@ class Selector:
         return Selector(resolve, f"!{self.label}")
 
     def __neg__(self) -> Selector:
-        """Exclude columns (dplyr ``-starts_with(...)`` / ``-col``)."""
-        return self.__invert__()
+        """Exclude columns (dplyr ``-starts_with(...)`` / ``-col``).
+
+        On its own it is the complement; among several selections it drops
+        its columns from the ones selected before it (see
+        :func:`resolve_selection`).
+        """
+        complement = self.__invert__()
+        complement.label = f"-{self.label}"
+        complement.excludes = self
+        return complement
 
     def __repr__(self) -> str:
         return f"<tidy3.Selector {self.label}>"
@@ -115,12 +125,35 @@ def _plain_col_name(spec: Any) -> str | None:
     return None
 
 
+def exclusion(spec: Any) -> Any:
+    """What a dplyr ``-x`` selection removes, or None when *spec* is not one.
+
+    ``-starts_with("x")`` / ``-all_of(["x"])`` give the inner selector;
+    ``-col("x")`` gives the name ``"x"``.
+    """
+    if isinstance(spec, Selector):
+        return spec.excludes
+    if isinstance(spec, Expr) and spec.node[0] == "neg":
+        inner = spec.node[1]
+        if isinstance(inner, tuple) and inner and inner[0] == "col" and isinstance(inner[1], str):
+            return inner[1]
+        if isinstance(inner, tuple) and inner and inner[0] == "name":
+            return inner[1]
+    return None
+
+
 def resolve_selection(
     tf: Any,
     specs: Iterable[Any],
     *,
     strict_strings: bool = True,
 ) -> list[str]:
+    """Column names a tidy-select specification picks, in order.
+
+    Like dplyr, ``-x`` drops ``x`` from the columns selected before it, and
+    a selection that starts with ``-x`` starts from every column, so
+    ``select(-a, -b)`` drops both.
+    """
     columns, schema = _frame_schema(tf)
     groups = list(tf._groups or [])
     selected: list[str] = []
@@ -150,14 +183,30 @@ def resolve_selection(
                 raise IndexError(f"column position out of range: {spec}")
             selected.append(columns[index])
         elif isinstance(spec, Iterable) and not isinstance(spec, (str, bytes)):
-            for item in spec:
-                add(item)
+            # a list is dplyr's c(...): its own selection, in order
+            selected.extend(sequence(list(spec)))
         else:
             raise TypeError(f"unsupported column selection: {spec!r}")
 
-    for spec in specs:
-        add(spec)
-    return list(dict.fromkeys(selected))
+    def sequence(specs: list[Any]) -> list[str]:
+        nonlocal selected
+        outer = selected
+        selected = list(columns) if specs and exclusion(specs[0]) is not None else []
+        try:
+            for spec in specs:
+                removed = exclusion(spec)
+                if removed is None:
+                    add(spec)
+                    continue
+                before = len(selected)
+                add(removed)
+                unwanted = set(selected[before:])
+                selected = [name for name in selected[:before] if name not in unwanted]
+            return selected
+        finally:
+            selected = outer
+
+    return list(dict.fromkeys(sequence(list(specs))))
 
 
 def everything() -> Selector:

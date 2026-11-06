@@ -21,9 +21,11 @@ from tidy3.tidyselect import (
     ColumnwisePredicate,
     HorizontalSpec,
     Selector,
+    _frame_schema,
     _group_rows_token,
     _plain_col_name,
     _reset_group_rows,
+    exclusion,
     resolve_selection,
 )
 
@@ -1116,7 +1118,19 @@ def select(*cols: Any, **renames: Any) -> Verb:
         ordered: list[Any] = []
         seen_sources: set[str] = set()
         mapping: dict[str, str] = {}
+        if cols and exclusion(cols[0]) is not None:
+            # dplyr: a selection that starts with -x starts from every column
+            ordered.extend(_frame_schema(tf)[0])
+            seen_sources.update(ordered)
         for spec in cols:
+            removed = exclusion(spec)
+            if removed is not None:
+                unwanted = set(resolve_selection(tf, [removed]))
+                ordered = [v for v in ordered if not (isinstance(v, str) and v in unwanted)]
+                seen_sources -= unwanted
+                for name in unwanted:
+                    mapping.pop(name, None)
+                continue
             if isinstance(spec, NamedAssign):
                 # select(`new name` = old) from R-style rewrite
                 resolved = resolve_selection(tf, [spec.value])
