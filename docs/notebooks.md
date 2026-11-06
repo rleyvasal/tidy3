@@ -281,6 +281,26 @@ so keep `view()` on a line of its own. `view(hide=False)` keeps a cell
 visible, and `table3.autohide(False)` stops hiding for the session. Printed
 tables are not hidden.
 
+Under each column's name a profile shows what it holds (a histogram of
+numbers and dates, the most common text values, distinct and missing
+counts), with faint bars for all rows and solid ones for the rows the search
+and filters keep. **Columns** hides columns, and **Export** downloads the
+kept rows as CSV.
+
+With table3 0.7 and anywidget (`pip install "table3[live]"`), `view(live=True)`
+explores every row of the frame, not only the first `n`, through the
+kernel: search, sort, filters, profiles and exports run in polars over the
+whole frame, and the grid fetches the rows you scroll to. Exports can also
+be Parquet, or saved in the kernel's folder. The frame's query runs once,
+when `view()` is called, which is why it is not the default: a frame may
+be a large lazy scan. It needs a notebook that draws Jupyter widgets
+(JupyterLab, Notebook 7, VS Code; not SolveIt), and the first `n` rows are
+still saved with the notebook, for when it's reopened without its kernel.
+
+```python notest
+cars >> view(live=True)                  # every row, through the kernel
+```
+
 ### R-style bare names & backticks
 
 Once the rewriting is on (an earlier cell imported tidy3 or ran

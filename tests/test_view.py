@@ -132,3 +132,43 @@ def test_cell_ending_in_view_shows_the_frame_once(capsys):
         assert shell.user_ns["v"].pull("x").to_list() == [3, 1, 2]
     finally:
         InteractiveShell.clear_instance()
+
+
+def test_table3_gets_the_whole_query(islands):
+    lf = islands.__table3_source__()
+    assert isinstance(lf, pl.LazyFrame) and lf.collect().height == 87
+
+
+def test_live_reaches_table3_only_when_given(islands, monkeypatch):
+    import table3
+
+    calls = []
+    monkeypatch.setattr(table3, "view", lambda data, **kw: calls.append(kw))
+    islands >> view()
+    islands >> view(live=True)
+    islands.view(live=False)
+    view(islands, live=True)
+    assert "live" not in calls[0]
+    assert [c.get("live") for c in calls[1:]] == [True, False, True]
+    with pytest.raises(TypeError, match="live"):
+        view(live="yes")
+
+
+def test_live_explores_every_row(islands, monkeypatch):
+    """With table3's live mode (0.7, anywidget), live=True gives a widget over all rows."""
+    table3 = pytest.importorskip("table3")
+    if "live" not in table3.view.__code__.co_varnames:
+        pytest.skip("table3 before 0.7: no live mode")
+    pytest.importorskip("anywidget")
+    from table3 import _live
+
+    shown = []
+    monkeypatch.setattr(IPython, "get_ipython", lambda: object())
+    monkeypatch.setattr(IPython.display, "display", lambda obj: shown.append(obj))
+    monkeypatch.setattr(_live, "available", lambda: True)
+    islands >> view(n=10, hide=False)
+    assert len(shown) == 1  # a lazy frame: the snapshot alone
+    islands >> distinct() >> view(n=10, live=True, hide=False)
+    snapshot, widget = shown[1:]
+    assert len(_data(snapshot.data)["rows"]) == 10
+    assert widget.meta["total"] == 29 and widget.meta["caption"].startswith("TidyFrame (view")

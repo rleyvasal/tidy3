@@ -1626,6 +1626,7 @@ def view(
     height: int = 500,
     digits: int | str | None = None,
     hide: bool | None = None,
+    live: bool | None = None,
 ) -> Any:
     """Open a data explorer over the first *n* rows and pass the frame through.
 
@@ -1645,6 +1646,14 @@ def view(
     first rows. In SolveIt the cell is hidden from the AI so the rows don't
     fill its context (*hide*: ``False`` keeps it visible; ``None`` follows
     ``table3.autohide()``). The explorer comes from table3.
+
+    ``live=True`` explores every row instead, through the kernel: search,
+    sort, filters, column profiles and exports cover the whole frame, whose
+    query runs once. It needs table3 0.7 with anywidget (``pip install
+    "table3[live]"``) and a notebook that draws Jupyter widgets (JupyterLab,
+    Notebook 7, VS Code); the first *n* rows are still saved with the
+    notebook. Without it a frame is a snapshot of its first *n* rows, as a
+    lazy query may be large; ``live=False`` says so outright.
     """
 
     def _positive(v: Any) -> bool:
@@ -1660,19 +1669,24 @@ def view(
         raise ValueError('view() digits must be a positive integer, "full", or None')
     if hide is not None and not isinstance(hide, bool):
         raise TypeError("view() hide must be True, False or None")
+    if live is not None and not isinstance(live, bool):
+        raise TypeError("view() live must be True, False or None")
     if data is not None:
         from tidy3.frame import TidyFrame, tidy
 
         if isinstance(data, pl.Series):
             data = data.to_frame()
         frame = data if isinstance(data, TidyFrame) else tidy(data)
-        return frame >> view(n=n, height=height, digits=digits, hide=hide)
+        return frame >> view(n=n, height=height, digits=digits, hide=hide, live=live)
 
     def _apply(tf):
         import table3
 
         caption = tf._caption().replace("(preview", "(view", 1)
-        table3.view(tf, n=n, height=height, digits=digits, caption=caption, hide=hide)
+        # live= reaches table3 only when given, so tidy3 still works with a
+        # table3 before 0.7, which has no live mode.
+        extra = {} if live is None else {"live": live}
+        table3.view(tf, n=n, height=height, digits=digits, caption=caption, hide=hide, **extra)
         from tidy3.frame import _viewed
 
         return _viewed(tf)

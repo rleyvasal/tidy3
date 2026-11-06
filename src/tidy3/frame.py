@@ -496,10 +496,11 @@ class TidyFrame:
         height: int = 500,
         digits: int | str | None = None,
         hide: bool | None = None,
+        live: bool | None = None,
     ) -> TidyFrame:
         from tidy3.verbs import view as view_verb
 
-        return self >> view_verb(n=n, height=height, digits=digits, hide=hide)
+        return self >> view_verb(n=n, height=height, digits=digits, hide=hide, live=live)
 
     def arrange(self, *keys: Any, by_group: bool = False) -> TidyFrame:
         from tidy3.verbs import arrange as arrange_verb
@@ -1561,6 +1562,11 @@ class TidyFrame:
         """table3's rows: the first *n*, the whole count (None if not counted), a caption."""
         pdf, total = self._preview_parts(n)
         return pdf, total, self._caption()
+
+    def __table3_source__(self) -> pl.LazyFrame:
+        """table3's whole data, for its live explorer (``view(live=True)``):
+        the frame's query, which table3 collects once."""
+        return self._lf
 
     # NOTE: no _repr_mimebundle_ — SolveIt renders text/plain when a
     # mimebundle is present; separate __repr__/_repr_html_ (like polars

@@ -4,6 +4,19 @@ All notable changes to tidy3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- `view(live=True)` (also `view(df, live=True)` and `df.view(live=True)`)
+  explores every row of the frame through the kernel, with table3 0.7's
+  live explorer and anywidget (`pip install "table3[live]"`): search, sort,
+  filters, column profiles and exports cover the whole frame, whose query
+  runs once. Without it `view()` is a snapshot of the first `n` rows, as
+  before, since a frame may be a large lazy scan. With a table3 before 0.7
+  everything else works as before. Frames give table3 their whole query
+  through a new `__table3_source__()` method.
+
 ## 0.20.3 — 2026-11-03
 
 ### Fixed
